@@ -66,6 +66,14 @@ Merge is authorized for assigned implementation tasks from the owner-approved pl
 
 Check that the PR head has not changed immediately before merging and use a merge operation conditioned on that head SHA. Verify integration with the current target branch; if related merges or conflict resolution change the tested combination, repeat affected integration checks and review. Never use administrative bypass. Agent approval evidence must be independently attributable; if agents share a GitHub account, a second chat does not constitute a separate GitHub approving identity. M0 must define trusted checks for that case rather than counting author self-approval.
 
+## Main protection configuration
+
+Coordinator applies the reviewed [ruleset](../../config/main-ruleset.json) to ruleset `26263104` only after the trusted evidence workflow is installed: `gh api --method PUT repos/richardo920/cineforge/rulesets/26263104 --input config/main-ruleset.json`. Read back the effective `main` rules and verify seven required GitHub Actions checks, strict current-base checks, PR/thread requirements, no bypass, and deletion/force-push blocking.
+
+Before claiming enforcement, coordinator runs `python scripts/protection_probe.py --coordinator-live-probe --session UNIQUE8CHAR --output /private/tmp/UNIQUE8CHAR-protection.jsonl`. It retains a disposable target/head/PR/ruleset and records protection-specific missing/failed/stale-check merge rejections plus a successful fresh-check merge; main is never a write target. Its two synthetic statuses have no Actions-source binding; production requires app `15368`, whose same-name status limitation still requires fresh local signed-evidence verification.
+
+One shared GitHub principal cannot approve its own PR, so native approval count is zero; stale native approval dismissal is configured but cannot be demonstrated with an independent approving principal here. Distinct current-head review/testing reports and coordinator signature/source verification remain mandatory; repository/environment administrators and the shared host remain trusted.
+
 ## Full agent maintenance
 
 The owner is not expected to write code, review code, or merge routine PRs. After initial plan approval, the coordinator schedules ready tasks within that scope and agents handle implementation, independent review/testing, merges, issue triage, bug fixes, dependency updates, documentation, and CI failures. Routine maintenance uses the same gates; urgency does not waive review or testing.
