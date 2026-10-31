@@ -285,18 +285,18 @@ def check_pr(api: GitHubAPI, number: int, key: bytes) -> bool:
         payload = verify_bundle(bundle, key, repository=api.repository, pr_number=number,
                                 head_sha=head, base_sha=base)
         verify_report_sources(payload, comments)
-        latest = api.request(f"pulls/{number}")
-        if (latest["state"] != "open" or latest["head"]["sha"] != head
-                or latest["base"]["repo"]["full_name"] != api.repository
-                or latest["base"]["ref"] != "main"
-                or api.request("commits/main")["sha"] != base):
-            raise EvidenceError("PR target, head or main changed during verification")
         # Re-read mutable source comments and signed revocations before publishing.
         fresh_comments = api.pages(f"issues/{number}/comments")
         fresh_bundle = select_bundle(fresh_comments, key)
         if canonical(fresh_bundle) != canonical(bundle):
             raise EvidenceError("coordinator attestation changed during verification")
         verify_report_sources(payload, fresh_comments)
+        latest = api.request(f"pulls/{number}")
+        if (latest["state"] != "open" or latest["head"]["sha"] != head
+                or latest["base"]["repo"]["full_name"] != api.repository
+                or latest["base"]["ref"] != "main"
+                or api.request("commits/main")["sha"] != base):
+            raise EvidenceError("PR target, head or main changed during verification")
     except (EvidenceError, KeyError, TypeError, ValueError, RecursionError) as exc:
         description = str(exc) if isinstance(exc, EvidenceError) else "Malformed evidence or API data"
         api.status(head, "failure", description)
