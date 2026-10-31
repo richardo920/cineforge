@@ -76,3 +76,7 @@ Use a private GitHub Project linked to Cineforge as the coordinator's shared que
 Coordinator selects Ready tasks, assigns isolated worktrees, links PRs, and refreshes stale evidence after changes. Ready to merge requires every gate in the agent merge policy; Done requires verified merge. A green status field never grants merge authority.
 
 The private [Cineforge — Agent Development project](https://github.com/users/richardo920/projects/1) is linked to the repository. Projects access is verified; the proposed plan tasks are draft cards in Backlog pending approval. M0.6 covers conversion to issues and operational task/PR tracking after approval; no automatic dispatch or merge controller is configured. Use issues/PRs as the fallback if Projects becomes unavailable.
+
+## Starting a development session
+
+After the owner approves and merges the initial planning PR, open `~/Desktop/cineforge` as a Codex project and start a coordinator chat with: **“Start the next ready milestone.”** `AGENTS.md` defines the full startup procedure, delegation, merge gates, and stopping point; no separate `skills.md` is required. Repeat the same prompt to resume an interrupted milestone or start the next one after completion.
