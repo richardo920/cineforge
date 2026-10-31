@@ -21,6 +21,9 @@ Python 3.11+. Runtime has no third-party dependencies. `.env.example` lists futu
 - `src/cineforge/`: package and CLI scaffold.
 - `tests/`: offline smoke tests; `.github/workflows/ci.yml`: CI.
 - `AGENTS.md`: contributor rules and agent review expectations.
-- Planning PR: `DESIGN.md`, `MILESTONES.md`, and subsystem documentation under `docs/`.
+- [Design overview](docs/design/overview.md): vision, file structure, and subsystem contracts.
+- [Milestone plan](docs/plans/milestones.md): tasks, dependencies, and acceptance criteria.
+- [Agent workflow](docs/development/agent-workflow.md): implementation, review, testing, and coordination.
+- `docs/design/`: architecture, GPU/model providers, characters, audio, skills, and licensing.
 
 Code is proprietary pending an explicit open-source license decision. Keep credentials, model weights, recordings, and generated media outside Git; review third-party code, skill, model, and asset rights separately before reuse.

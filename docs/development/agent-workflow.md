@@ -32,7 +32,7 @@ Suggested task record: `task ID | dependencies | branch/PR | head SHA | author |
 
 ## Role prompts
 
-Implementation: “Implement only approved task TASK-ID in your own worktree. Read DESIGN.md and its acceptance criteria. Add meaningful tests, open a PR with evidence, and wait for independent review. Do not merge.”
+Implementation: “Implement only approved task TASK-ID in your own worktree. Read docs/design/overview.md and its acceptance criteria. Add meaningful tests, open a PR with evidence, and wait for independent review. Do not merge.”
 
 Review: “Independently review PR URL at HEAD-SHA against its intended base and TASK-ID. Do not modify implementation. Inspect affected callers and failure paths. Report actionable findings with severity, file/line, reproduction, and required fix; state residual uncertainty even if no issues are found.”
 

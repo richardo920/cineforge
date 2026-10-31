@@ -10,29 +10,28 @@ The initial repository contains only a private Python package/CLI scaffold and C
 
 ```text
 cineforge/
-├── DESIGN.md                  # Vision, architecture, and extension contracts
-├── README.md                  # Install, demo, and current capabilities
+├── README.md                  # Install and current capabilities
 ├── AGENTS.md                  # Contributor and agent rules
 ├── pyproject.toml             # Python package and CLI
 ├── .env.example               # Empty credential placeholders
-├── .github/workflows/ci.yml   # Offline tests on supported Python versions
+├── .github/workflows/ci.yml   # Offline CI
 ├── docs/
-│   ├── architecture.md        # Production flow and reproducibility
-│   ├── providers.md           # GPU and model contracts
-│   ├── characters.md          # Identity, references, and consent
-│   ├── audio.md               # Sound planning, analysis, and review
-│   ├── skills.md              # Curated skill provenance and trust
-│   └── licensing.md           # Code, model, and asset rights
-├── examples/                  # Small, synthetic metadata only
-├── src/cineforge/
-│   ├── cli.py                 # Deterministic offline demo
-│   ├── models.py              # Model requirements and GPU selection
-│   ├── providers.py           # Execution protocol and mock adapter
-│   ├── characters.py          # Versioned character registry
-│   ├── audio.py               # Timeline and audio analysis contracts
-│   └── skills.py              # Pinned skill metadata
-└── tests/                     # Contract and CLI tests without credentials
+│   ├── design/
+│   │   ├── overview.md        # Vision, layout, and contracts (this file)
+│   │   ├── architecture.md    # Production flow and reproducibility
+│   │   ├── providers.md       # GPU and model contracts
+│   │   ├── characters.md      # Identity, references, and consent
+│   │   ├── audio.md           # Sound planning and review
+│   │   ├── skills.md          # Skill provenance and trust
+│   │   └── licensing.md       # Code, model, and asset rights
+│   ├── plans/milestones.md    # Tasks, dependencies, acceptance criteria
+│   └── development/
+│       └── agent-workflow.md  # Parallel agents and PR quality gates
+├── src/cineforge/             # Current: package and CLI scaffold
+└── tests/                     # Current: offline CLI smoke tests
 ```
+
+Proposed modules after plan approval: `models.py`, `providers.py`, `characters.py`, `audio.py`, and `skills.py`; synthetic fixtures/examples accompany those tasks.
 
 ## Architecture and data flow
 
@@ -89,4 +88,4 @@ Test incompatible device selection, invalid cue timing, duplicate character revi
 
 ## Agent delivery and review
 
-Implementation waits for owner review and merge of this design and `MILESTONES.md`. Each task ships through an implementation agent, an independent review agent, and an independent testing agent before owner merge; see `docs/agent-workflow.md` for evidence and enforcement requirements.
+Implementation waits for owner review and merge of this design and `docs/plans/milestones.md`. Each task ships through an implementation agent, an independent review agent, and an independent testing agent before owner merge; see `docs/development/agent-workflow.md` for evidence and enforcement requirements.
