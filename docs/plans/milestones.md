@@ -1,6 +1,6 @@
 # Cineforge milestone plan
 
-**Proposal for owner review. No implementation tasks are authorized until this plan is merged and the owner assigns them.** Initial scaffold/CI setup is complete separately; all tasks below remain unchecked.
+**Proposal for owner review. Implementation begins after owner approval and merge of this plan; agents then schedule tasks within its approved scope without requiring the owner to code or review routine PRs.** Initial scaffold/CI setup is complete separately; all tasks below remain unchecked.
 
 One task per PR by default. Each task needs current-head CI, independent review-agent findings, independent testing-agent approval, and coordinator/merge-agent verification before agent merge; failures and unavailable checks must be reported explicitly.
 
@@ -8,7 +8,7 @@ One task per PR by default. Each task needs current-head CI, independent review-
 
 Depends on plan approval. Exit: a sample PR demonstrates the full author → review → testing → coordinator merge loop and enforced protections are verified, or unsupported protections are explicitly recorded.
 
-- [ ] M0.1 Define reusable implementation/review/testing agent instructions with task boundaries and severity rules. Acceptance: a sample task yields three distinct reports tied to the same PR head SHA; authors cannot self-certify review.
+- [ ] M0.1 Define reusable coordinator/implementation/review/testing agent instructions with task boundaries, maintenance ownership, and severity rules. Acceptance: a sample task yields three distinct reports tied to the same PR head SHA; authors cannot self-certify review.
 - [ ] M0.2 Configure available main-branch protections and required CI. Acceptance: failing checks block merge, new commits invalidate stale approval where supported, and conditional agent-merge policy/any platform limitations are documented and tested on a disposable branch.
 - [ ] M0.3 Add trusted review/testing evidence checks. Acceptance: missing or stale reports fail; untrusted PR text cannot forge approval; successful CI alone never authorizes merge, and absent/failed/stale independent approval blocks agent merge; do not use privileged workflows to execute untrusted PR code. Record whether evidence verifies identity, completion, or findings resolution.
 - [ ] M0.4 Add lint/type checks, package build/install checks, secret scanning, dependency review, and a repository artifact-size policy. Acceptance: synthetic bad fixtures fail each relevant guard without including a real secret; pin tool versions and action revisions.

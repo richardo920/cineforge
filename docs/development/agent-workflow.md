@@ -8,11 +8,11 @@ Use this chat for design and prioritization; use Codex in a repository checkout 
 | Review agent | Independently inspect diff and affected callers | Head SHA, severity, file/line, failure scenario |
 | Testing agent | Independently test task acceptance and failure paths | Head SHA, commands, fixtures, results, gaps |
 | Coordinator / merge agent | Verify all required gates and merge approved tasks | Current-head CI, independent review/test approval, merge record |
-| Owner | Approve initial plan, task scope, and design tradeoffs | Merged plan and task assignments |
+| Owner (optional involvement) | Set product direction, approve initial plan, resolve scope decisions | Product decisions; no routine code review required |
 
 Review and testing agents should use separate contexts and inspect requirements directly. They may share the same underlying model, so correlated mistakes remain possible; automated checks and human judgment still matter.
 
-For every implementation PR: author opens PR → reviewer and tester report on its head SHA → author fixes findings → affected reviews/checks repeat → coordinator/merge agent verifies all gates and merges without another owner confirmation. Block critical/high findings and failed acceptance criteria; document lower-severity deferrals with owner agreement. Do not let the author approve its own work.
+For every implementation PR: author opens PR → reviewer and tester report on its head SHA → author fixes findings → affected reviews/checks repeat → coordinator/merge agent verifies all gates and merges without another owner confirmation. Block critical/high findings and failed acceptance criteria; document lower-severity deferrals with independent reviewer agreement and a tracked follow-up. Do not let the author approve its own work.
 
 Planned enforcement: required CI, stale approval dismissal, current-head review/test evidence, and conditional agent merge after every required gate passes. Agent prose is not a GitHub approval or status check; milestone M0 must implement trusted checks and verify protections supported by the account before calling these enforced. Default CI receives no model/cloud credentials; paid/GPU integration runs require explicit opt-in and budgets.
 
@@ -54,3 +54,9 @@ Product references: [Code review](https://learn.chatgpt.com/docs/code-review?sur
 Merge is authorized for assigned implementation tasks from the owner-approved plan when all required CI checks succeed, the independent review agent explicitly passes the current head with no unresolved blocking findings, and the independent testing agent explicitly passes all acceptance criteria for that head. Pending, skipped, missing, unavailable, or stale required evidence blocks merge. New commits require renewed independent approvals and current-head tests.
 
 Check that the PR head has not changed immediately before merging and use a merge operation conditioned on that head SHA. Verify integration with the current target branch; if related merges or conflict resolution change the tested combination, repeat affected integration checks and review. Never use administrative bypass. Agent approval evidence must be independently attributable; if agents share a GitHub account, a second chat does not constitute a separate GitHub approving identity. M0 must define trusted checks for that case rather than counting author self-approval.
+
+## Full agent maintenance
+
+The owner is not expected to write code, review code, or merge routine PRs. After initial plan approval, the coordinator schedules ready tasks within that scope and agents handle implementation, independent review/testing, merges, issue triage, bug fixes, dependency updates, documentation, and CI failures. Routine maintenance uses the same gates; urgency does not waive review or testing.
+
+The owner may inspect or intervene at any time. Escalate unresolved blockers or product-scope decisions; do not request routine code approval. Preserve existing approval requirements for spending, rights/consent, public release, and changes to security-sensitive access. This is the intended operating model; the scaffold does not yet run a continuous maintenance service or an automated merge controller.

@@ -89,3 +89,5 @@ Test incompatible device selection, invalid cue timing, duplicate character revi
 ## Agent delivery and review
 
 Implementation waits for owner review and merge of this design and `docs/plans/milestones.md`. Each task ships through an implementation agent, an independent review agent, and an independent testing agent before coordinator/merge-agent merge once all required checks and both independent approvals pass for the current head; see `docs/development/agent-workflow.md` for evidence and enforcement requirements.
+
+Agents own ongoing repository maintenance and routine merges under the approved plan; the owner provides product direction and may optionally inspect code, with no routine coding or code-review obligation.
