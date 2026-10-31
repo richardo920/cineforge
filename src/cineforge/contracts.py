@@ -58,6 +58,7 @@ def _digest(value: object, label: str) -> None:
 def _timestamp(value: object, label: str) -> datetime:
     if not isinstance(value, str):
         raise ContractError(f"{label} must be a timezone-aware ISO8601 timestamp")
+    _text(value, label)
     try:
         result = datetime.fromisoformat(value)
     except ValueError as exc:

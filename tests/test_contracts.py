@@ -232,6 +232,23 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(replace(self.run, started_at="2026-10-31T01:00:00+01:00").started_at,
                          "2026-10-31T01:00:00+01:00")
 
+    def test_timestamps_reject_nonportable_text_through_all_construction_paths(self):
+        for field in ("started_at", "finished_at"):
+            for separator in ("\x00", "\ud800"):
+                value = "2026-10-31" + separator + "00:00:00Z"
+                document = self.run.to_dict()
+                document[field] = value
+                with self.subTest(field=field, separator=repr(separator)):
+                    with self.assertRaises(ContractError):
+                        replace(self.run, **{field: value})
+                    with self.assertRaises(ContractError):
+                        ShotRun.from_dict(document)
+                    with self.assertRaises(ContractError):
+                        ShotRun.from_json(json.dumps(document))
+        valid = replace(self.run, started_at="2026-10-31T01:00:00+01:00")
+        self.assertEqual(ShotRun.from_json(valid.to_json()), valid)
+        valid.to_json().encode("utf-8")
+
     def test_strict_json_rejects_duplicate_keys_nonfinite_and_malformed_roots(self):
         for raw in ('{"schema_version":1,"schema_version":1}',
                     self.shot.to_json().replace('"duration_seconds":2.5', '"duration_seconds":NaN'),
