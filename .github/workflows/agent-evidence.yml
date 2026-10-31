@@ -14,10 +14,14 @@ on:
         type: string
 permissions:
   contents: read
+# Serialize privileged status writes; each run resolves fresh refs and comments.
+concurrency:
+  group: cineforge-agent-evidence
+  cancel-in-progress: false
 jobs:
   evidence:
     name: Verify trusted agent evidence
-    if: github.event_name != 'issue_comment' || github.event.issue.pull_request
+    if: github.ref == 'refs/heads/main' && (github.event_name != 'issue_comment' || github.event.issue.pull_request)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     # Configure this environment with a main-only deployment branch policy.
@@ -38,7 +42,9 @@ jobs:
           import json, os, re, urllib.parse, urllib.request
           repo = os.environ['GITHUB_REPOSITORY']
           event = json.load(open(os.environ['GITHUB_EVENT_PATH']))
-          branch = urllib.parse.quote(event['repository']['default_branch'], safe='')
+          if event['repository']['default_branch'] != 'main':
+              raise SystemExit('Trusted default branch must be main')
+          branch = urllib.parse.quote('main', safe='')
           request = urllib.request.Request(
               f'https://api.github.com/repos/{repo}/commits/{branch}',
               headers={'Authorization': 'Bearer ' + os.environ['GITHUB_TOKEN'],
@@ -50,7 +56,7 @@ jobs:
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
               output.write(f'sha={sha}\n')
           PY
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.3.0
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ steps.trusted.outputs.sha }}
           persist-credentials: false

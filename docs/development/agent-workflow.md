@@ -70,7 +70,7 @@ Check that the PR head has not changed immediately before merging and use a merg
 
 The coordinator signs a bundle only after observing distinct author/reviewer/tester contexts and passing current-head reports. `Agent evidence` verifies that signature, repo/PR/current head/current main, complete passing criteria, and finding resolutions; unsigned text, missing/stale reports and expired bundles fail closed (24-hour lifetime).
 
-Keep the 32-byte hex signing key outside Git and in environment secret `AGENT_EVIDENCE_HMAC_KEY` under **`cineforge-agent-evidence`, restricted to deployment branch `main`**. Never use a repository-wide secret: PR/push workflows could request it. The privileged workflow resolves and executes only the trusted default-branch commit, never PR code; main pushes recheck open PRs.
+Keep the 32-byte hex signing key outside Git (mode `0600`) and in environment secret `AGENT_EVIDENCE_HMAC_KEY` under **`cineforge-agent-evidence`, with custom deployment branches restricted to the single exact branch `main`**. Never use a repository-wide secret: PR/push workflows could request it. The privileged workflow resolves and executes only the trusted default-branch commit, never PR code; main pushes recheck open PRs. The workflow also requires a `main` ref/default branch and serializes status publication.
 
 ```sh
 python scripts/agent_evidence.py sign --payload /tmp/reports.json --key-file /secure/key
@@ -81,7 +81,7 @@ python scripts/agent_evidence.py verify --bundle /tmp/signed-comment.txt --key-f
 
 Payload fields: `repository`, `pr_number`, `head_sha`, `base_sha`, `coordinator_agent_id`, and three `reports: [{report_url, report}]`; reports follow the existing template. Signing adds `issued_at_ns`; publish the complete output as one PR comment. After current-head CI passes, independently resolve refs, fetch fresh report comments, and verify locally immediately before a SHA-conditioned merge; edited/deleted source reports invalidate approval.
 
-This authenticates a trusted coordinator's completion claims, not independent GitHub identities or semantic correctness. Shared maintainer credentials/host and environment administrators remain trusted; a same-name status/check alone cannot establish report authenticity or authorize merge.
+This authenticates coordinator completion claims and records claimed finding resolutions; it does not authenticate independent GitHub identities or verify semantic correctness. Shared host/maintainer credentials and environment administrators remain trusted. Another Actions workflow can spoof a same-name status, so coordinators must verify the signed bundle and fresh sources immediately before merge; a status alone never authorizes it.
 
 ## Full agent maintenance
 

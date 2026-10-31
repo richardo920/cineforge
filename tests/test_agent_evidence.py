@@ -100,11 +100,13 @@ class EvidenceTests(unittest.TestCase):
 
     def test_report_binding_templates_and_required_evidence_fail_closed(self):
         for change in (
-            lambda r: r.update(template_only=True), lambda r: r.update(version=True),
+            lambda r: r.update(template_only=True), lambda r: r.update(template_only=None),
+            lambda r: r.update(version=True),
             lambda r: r.update(head_sha="c" * 40), lambda r: r.update(base_sha="c" * 40),
             lambda r: r.update(pr_url=PR_URL + "3"), lambda r: r.update(acceptance=[]),
             lambda r: r["acceptance"][0].update(evidence=""),
             lambda r: r.update(findings=None), lambda r: r.update(agent_id=" "),
+            lambda r: r.update(agent_id=" agent-review "),
         ):
             data = payload()
             change(data["reports"][1]["report"])
@@ -274,9 +276,57 @@ class WorkflowTests(unittest.TestCase):
                 self.assertFalse(evidence.check_pr(api, 12, KEY))
                 self.assertEqual(api.statuses[-1][1], "failure")
 
+    def test_report_edit_or_signed_revocation_during_verification_fails(self):
+        for mode in ("edit", "revoke"):
+            api = FakeAPI(evidence.sign_payload(payload(), KEY))
+            original = api.pages
+            calls = 0
+
+            def moving_comments(path):
+                nonlocal calls
+                calls += 1
+                comments = original(path)
+                if calls == 2:
+                    if mode == "edit":
+                        comments[1]["body"] = comments[1]["body"].replace('"pass"', '"fail"')
+                    else:
+                        data = payload()
+                        data["reports"][1]["report"]["decision"] = "fail"
+                        revoked = evidence.sign_payload(
+                            data, KEY, issued_at_ns=api.bundle["payload"]["issued_at_ns"] + 1,
+                        )
+                        comments.append({"id": 5, "body": evidence.MARKER + "\n" + json.dumps(revoked)})
+                return comments
+
+            with self.subTest(mode=mode), patch.object(api, "pages", moving_comments):
+                with patch("builtins.print"):
+                    self.assertFalse(evidence.check_pr(api, 12, KEY))
+                self.assertEqual(api.statuses[-1][1], "failure")
+
+    def test_target_change_during_verification_fails(self):
+        api = FakeAPI(evidence.sign_payload(payload(), KEY))
+        original = api.request
+        pulls = 0
+
+        def retarget(path):
+            nonlocal pulls
+            result = original(path)
+            if path == "pulls/12":
+                pulls += 1
+                if pulls == 2:
+                    result["base"]["ref"] = "unreviewed-target"
+            return result
+
+        with patch.object(api, "request", retarget), patch("builtins.print"):
+            self.assertFalse(evidence.check_pr(api, 12, KEY))
+        self.assertEqual(api.statuses[-1][1], "failure")
+
     def test_privileged_workflow_never_checks_out_pr_code(self):
         workflow = (SCRIPT.parents[1] / ".github/workflows/agent-evidence.yml").read_text()
         self.assertIn("environment: cineforge-agent-evidence", workflow)
+        self.assertIn("github.ref == 'refs/heads/main'", workflow)
+        self.assertIn("cancel-in-progress: false", workflow)
+        self.assertIn("default_branch'] != 'main'", workflow)
         self.assertIn("ref: ${{ steps.trusted.outputs.sha }}", workflow)
         self.assertNotIn("github.event.pull_request.head", workflow)
         self.assertNotIn("github.event.comment.body", workflow)

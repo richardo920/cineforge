@@ -35,8 +35,8 @@ def _object(value: Any, label: str) -> dict[str, Any]:
 
 
 def _text(value: Any, label: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise EvidenceError(f"{label} must be nonempty text")
+    if not isinstance(value, str) or not value.strip() or value != value.strip():
+        raise EvidenceError(f"{label} must be nonempty trimmed text")
     return value
 
 
@@ -77,7 +77,7 @@ def sign_payload(
 ) -> dict[str, Any]:
     if len(key) != 32:
         raise EvidenceError("signing key must contain 32 bytes")
-    stamped = dict(payload, issued_at_ns=issued_at_ns or time.time_ns())
+    stamped = dict(payload, issued_at_ns=time.time_ns() if issued_at_ns is None else issued_at_ns)
     signature = hmac.new(key, DOMAIN + canonical(stamped), hashlib.sha256).hexdigest()
     return {"version": 1, "payload": stamped, "signature": signature}
 
@@ -120,6 +120,7 @@ def verify_bundle(
     if not isinstance(reports, list) or len(reports) != 3:
         raise EvidenceError("one implementation, review, and testing report is required")
     seen_roles: set[str] = set()
+    seen_urls: set[str] = set()
     seen_agents = {coordinator}
     task_ids: set[str] = set()
     pr_url = f"https://github.com/{repository}/pull/{pr_number}"
@@ -128,8 +129,11 @@ def verify_bundle(
         report_url = _text(entry.get("report_url"), "report URL")
         if not re.fullmatch(re.escape(pr_url) + r"#issuecomment-[0-9]+", report_url):
             raise EvidenceError("report URL must reference this PR's report comment")
+        if report_url in seen_urls:
+            raise EvidenceError("distinct source reports are required")
+        seen_urls.add(report_url)
         report = _object(entry.get("report"), "report")
-        if report.get("template_only") is not None:
+        if "template_only" in report:
             raise EvidenceError("templates cannot authorize merge")
         if type(report.get("version")) is not int or report["version"] != 1:
             raise EvidenceError("unsupported report version")
@@ -282,8 +286,17 @@ def check_pr(api: GitHubAPI, number: int, key: bytes) -> bool:
                                 head_sha=head, base_sha=base)
         verify_report_sources(payload, comments)
         latest = api.request(f"pulls/{number}")
-        if latest["head"]["sha"] != head or api.request("commits/main")["sha"] != base:
-            raise EvidenceError("head or main changed during verification")
+        if (latest["state"] != "open" or latest["head"]["sha"] != head
+                or latest["base"]["repo"]["full_name"] != api.repository
+                or latest["base"]["ref"] != "main"
+                or api.request("commits/main")["sha"] != base):
+            raise EvidenceError("PR target, head or main changed during verification")
+        # Re-read mutable source comments and signed revocations before publishing.
+        fresh_comments = api.pages(f"issues/{number}/comments")
+        fresh_bundle = select_bundle(fresh_comments, key)
+        if canonical(fresh_bundle) != canonical(bundle):
+            raise EvidenceError("coordinator attestation changed during verification")
+        verify_report_sources(payload, fresh_comments)
     except (EvidenceError, KeyError, TypeError, ValueError, RecursionError) as exc:
         description = str(exc) if isinstance(exc, EvidenceError) else "Malformed evidence or API data"
         api.status(head, "failure", description)
