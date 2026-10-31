@@ -66,6 +66,23 @@ Merge is authorized for assigned implementation tasks from the owner-approved pl
 
 Check that the PR head has not changed immediately before merging and use a merge operation conditioned on that head SHA. Verify integration with the current target branch; if related merges or conflict resolution change the tested combination, repeat affected integration checks and review. Never use administrative bypass. Agent approval evidence must be independently attributable; if agents share a GitHub account, a second chat does not constitute a separate GitHub approving identity. M0 must define trusted checks for that case rather than counting author self-approval.
 
+### Trusted completion attestation
+
+The coordinator signs a bundle only after observing distinct author/reviewer/tester contexts and passing current-head reports. `Agent evidence` verifies that signature, repo/PR/current head/current main, complete passing criteria, and finding resolutions; unsigned text, missing/stale reports and expired bundles fail closed (24-hour lifetime).
+
+Keep the 32-byte hex signing key outside Git (mode `0600`) and in environment secret `AGENT_EVIDENCE_HMAC_KEY` under **`cineforge-agent-evidence`, with custom deployment branches restricted to the single exact branch `main`**. Never use a repository-wide secret: PR/push workflows could request it. The privileged workflow resolves and executes only the trusted default-branch commit, never PR code; main pushes recheck open PRs. The workflow also requires a `main` ref/default branch and serializes status publication.
+
+```sh
+python scripts/agent_evidence.py sign --payload /tmp/reports.json --key-file /secure/key
+python scripts/agent_evidence.py verify --bundle /tmp/signed-comment.txt --key-file /secure/key \
+  --comments-file /tmp/fresh-api-comments.json --repository richardo920/cineforge \
+  --pr 12 --head FULL_HEAD --base CURRENT_MAIN
+```
+
+Payload fields: `repository`, `pr_number`, `head_sha`, `base_sha`, `coordinator_agent_id`, and three `reports: [{report_url, report}]`; reports follow the existing template. Signing adds `issued_at_ns`; publish the complete output as one PR comment. After current-head CI passes, independently resolve refs, fetch fresh report comments, and verify locally immediately before a SHA-conditioned merge; edited/deleted source reports invalidate approval.
+
+This authenticates coordinator completion claims and records claimed finding resolutions; it does not authenticate independent GitHub identities or verify semantic correctness. Shared host/maintainer credentials and environment administrators remain trusted. Another Actions workflow can spoof a same-name status, so coordinators must verify the signed bundle and fresh sources immediately before merge; a status alone never authorizes it.
+
 ## Full agent maintenance
 
 The owner is not expected to write code, review code, or merge routine PRs. After initial plan approval, the coordinator schedules ready tasks within that scope and agents handle implementation, independent review/testing, merges, issue triage, bug fixes, dependency updates, documentation, and CI failures. Routine maintenance uses the same gates; urgency does not waive review or testing.

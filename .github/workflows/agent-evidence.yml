@@ -1,0 +1,70 @@
+name: Trusted agent evidence
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review, edited]
+  issue_comment:
+    types: [created, edited, deleted]
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: PR number to verify
+        required: true
+        type: string
+permissions:
+  contents: read
+# Serialize privileged status writes; each run resolves fresh refs and comments.
+concurrency:
+  group: cineforge-agent-evidence
+  cancel-in-progress: false
+jobs:
+  evidence:
+    name: Verify trusted agent evidence
+    if: github.ref == 'refs/heads/main' && (github.event_name != 'issue_comment' || github.event.issue.pull_request)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Configure this environment with a main-only deployment branch policy.
+    # Never expose this key as a repository-wide secret to PR/push workflows.
+    environment: cineforge-agent-evidence
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+      statuses: write
+    steps:
+      - name: Resolve the trusted default-branch commit
+        id: trusted
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re, urllib.parse, urllib.request
+          repo = os.environ['GITHUB_REPOSITORY']
+          event = json.load(open(os.environ['GITHUB_EVENT_PATH']))
+          if event['repository']['default_branch'] != 'main':
+              raise SystemExit('Trusted default branch must be main')
+          branch = urllib.parse.quote('main', safe='')
+          request = urllib.request.Request(
+              f'https://api.github.com/repos/{repo}/commits/{branch}',
+              headers={'Authorization': 'Bearer ' + os.environ['GITHUB_TOKEN'],
+                       'Accept': 'application/vnd.github+json'})
+          with urllib.request.urlopen(request, timeout=30) as response:
+              sha = json.load(response)['sha']
+          if not re.fullmatch('[0-9a-f]{40}', sha):
+              raise SystemExit('Invalid trusted commit SHA')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'sha={sha}\n')
+          PY
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ steps.trusted.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.11'
+      - name: Verify signed reports and publish SHA-bound status
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          AGENT_EVIDENCE_HMAC_KEY: ${{ secrets.AGENT_EVIDENCE_HMAC_KEY }}
+        run: python scripts/agent_evidence.py check
