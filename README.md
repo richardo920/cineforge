@@ -16,6 +16,12 @@ python -m unittest discover -s tests -v
 
 Python 3.11+. Runtime has no third-party dependencies. `.env.example` lists future adapter settings; the scaffold does not load `.env`.
 
+## CI guards
+
+CI builds/installs wheel and sdist on Python 3.11–3.14; pinned Ruff, mypy, detect-secrets and synthetic failure fixtures run offline. `python scripts/ci_guard.py artifacts` limits tracked blobs to 1 MiB and rejects private/media/model/credential paths, symlinks, and submodules; dependency changes require matching reviewed pins in `config/dependency-policy.json`.
+
+Dependency review also queries advisory services in CI (network required; failures block the job), including GitHub's PR dependency review. Secret scanning covers current staged blobs, not full history; no scanner proves that credentials are absent.
+
 ## Layout
 
 - `src/cineforge/`: package and CLI scaffold.
