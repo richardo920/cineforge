@@ -208,18 +208,56 @@ class EvidenceTests(unittest.TestCase):
             ]
             key_file.write_text(KEY.hex())
             payload_file.write_text(json.dumps(payload()))
-            comments_file.write_text(json.dumps(report_comments(payload())))
             signed = subprocess.run([sys.executable, str(SCRIPT), "sign", "--payload",
                                      str(payload_file), "--key-file", str(key_file)],
                                     text=True, capture_output=True, check=True)
             self.assertNotIn(KEY.hex(), signed.stdout + signed.stderr)
             bundle_file.write_text(signed.stdout)
+            comments = report_comments(payload()) + [{"id": 4, "body": signed.stdout}]
+            comments_file.write_text(json.dumps(comments))
             command = [sys.executable, str(SCRIPT), "verify", "--bundle", str(bundle_file),
                        "--key-file", str(key_file), "--repository", REPO, "--pr", "12",
                        "--comments-file", str(comments_file), "--head", HEAD, "--base", BASE]
             self.assertEqual(subprocess.run(command, capture_output=True).returncode, 0)
             command[-1] = "c" * 40
             self.assertEqual(subprocess.run(command, capture_output=True).returncode, 1)
+
+
+    def test_cli_rejects_superseded_revoked_or_unpublished_bundle(self):
+        import time
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            key_file, bundle_file, comments_file = [
+                root / name for name in ("key", "bundle", "comments")
+            ]
+            key_file.write_text(KEY.hex())
+            original = evidence.sign_payload(payload(), KEY, issued_at_ns=time.time_ns() - 2)
+            body = evidence.MARKER + "\n" + json.dumps(original)
+            bundle_file.write_text(body)
+            command = [sys.executable, str(SCRIPT), "verify", "--bundle", str(bundle_file),
+                       "--key-file", str(key_file), "--repository", REPO, "--pr", "12",
+                       "--comments-file", str(comments_file), "--head", HEAD, "--base", BASE]
+            for mode in ("revoked", "replaced", "unpublished"):
+                comments = report_comments(payload())
+                if mode != "unpublished":
+                    comments.append({"id": 4, "body": body})
+                    newer = payload()
+                    if mode == "revoked":
+                        newer["reports"][1]["report"]["decision"] = "fail"
+                    replacement = evidence.sign_payload(
+                        newer, KEY, issued_at_ns=original["payload"]["issued_at_ns"] + 1,
+                    )
+                    comments.append({"id": 5, "body": evidence.MARKER + "\n" + json.dumps(replacement)})
+                comments_file.write_text(json.dumps(comments))
+                with self.subTest(mode=mode):
+                    result = subprocess.run(command, capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 1)
+                    self.assertNotIn("PASS:", result.stdout)
+                if mode == "replaced":
+                    bundle_file.write_text(json.dumps(replacement))
+                    self.assertEqual(subprocess.run(command, capture_output=True).returncode, 0)
+                    bundle_file.write_text(body)
 
 
 class FakeAPI:

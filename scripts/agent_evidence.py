@@ -367,11 +367,15 @@ def main() -> int:
             raw = args.bundle.read_text()
             if raw.startswith(MARKER + "\n"):
                 raw = raw[len(MARKER):].strip()
-            payload = verify_bundle(load_json(raw), key, repository=args.repository,
-                                    pr_number=args.pr, head_sha=args.head, base_sha=args.base)
+            supplied_bundle = load_json(raw)
             comments = json.loads(args.comments_file.read_text())
             if not isinstance(comments, list) or any(not isinstance(c, dict) for c in comments):
                 raise EvidenceError("comments snapshot must be a GitHub API array")
+            selected_bundle = select_bundle(comments, key)
+            if canonical(supplied_bundle) != canonical(selected_bundle):
+                raise EvidenceError("supplied bundle is not the newest published attestation")
+            payload = verify_bundle(selected_bundle, key, repository=args.repository,
+                                    pr_number=args.pr, head_sha=args.head, base_sha=args.base)
             verify_report_sources(payload, comments)
             print("PASS: signed current-head agent completion attestation")
         return 0
