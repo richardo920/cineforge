@@ -4,6 +4,7 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -84,6 +85,32 @@ class TierRunnerTests(unittest.TestCase):
                 report = TIERS.run_offline_tier("contract")
         self.assertEqual(report["status"], "skipped")
 
+    def test_default_run_discovers_both_offline_directories(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "scripts").mkdir()
+            runner = root / "scripts" / SCRIPT.name
+            shutil.copy2(SCRIPT, runner)
+            for suite in ("tests", "tests_contract"):
+                (root / suite).mkdir()
+                (root / suite / f"test_{suite}_fixture.py").write_text(
+                    "import unittest\n"
+                    "class SyntheticTests(unittest.TestCase):\n"
+                    "    def test_synthetic_case(self):\n"
+                    "        self.assertTrue(True)\n",
+                    encoding="utf-8",
+                )
+            result = subprocess.run(
+                [sys.executable, str(runner)],
+                capture_output=True, text=True, check=False,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        reports = [json.loads(line) for line in result.stdout.splitlines()]
+        self.assertEqual(
+            [(report["tier"], report["status"], report["tests_run"]) for report in reports],
+            [("offline", "passed", 1), ("contract", "passed", 1)],
+        )
+
     def test_failed_and_all_skipped_suites_are_not_passed(self):
         def fail():
             raise AssertionError("synthetic failure")
@@ -94,7 +121,7 @@ class TierRunnerTests(unittest.TestCase):
         for case, status in ((fail, "failed"), (skip, "skipped")):
             suite = unittest.TestSuite([unittest.FunctionTestCase(case)])
             with self.subTest(status=status), mock.patch.object(
-                TIERS.unittest.defaultTestLoader, "discover", return_value=suite,
+                TIERS.unittest.TestLoader, "discover", return_value=suite,
             ), mock.patch.object(TIERS.sys, "stderr", io.StringIO()):
                 report = TIERS.run_offline_tier("offline")
             self.assertEqual(report["status"], status)

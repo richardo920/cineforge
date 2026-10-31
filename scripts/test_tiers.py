@@ -45,7 +45,7 @@ def run_offline_tier(tier: str) -> dict[str, object]:
     directory = ROOT / ("tests" if tier == "offline" else "tests_contract")
     if not directory.is_dir():
         return {"tier": tier, "status": "skipped", "reason": "no suite implemented"}
-    suite = unittest.defaultTestLoader.discover(str(directory))
+    suite = unittest.TestLoader().discover(str(directory))
     result = unittest.TextTestRunner(verbosity=2, stream=sys.stderr).run(suite)
     status = "passed" if result.wasSuccessful() else "failed"
     if result.wasSuccessful() and result.testsRun == len(result.skipped):
