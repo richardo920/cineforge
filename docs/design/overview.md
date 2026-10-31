@@ -86,6 +86,8 @@ Do not select an open-source code license on the owner's behalf. The initial pac
 
 `python -m unittest discover -s tests -v` and the CLI smoke check are the default offline checks. `python scripts/test_tiers.py` reports each tier as passed, failed, or skipped; a skipped required tier never satisfies a merge gate.
 
+CI runs offline and contract tiers in separate interpreters. An absent contract suite is explicitly skipped; an existing suite with zero tests or all tests skipped fails.
+
 | Tier | Suite / policy |
 | --- | --- |
 | Offline | `tests/`: synthetic unit/CLI fixtures; no runtime network, credentials, GPU, or paid calls |

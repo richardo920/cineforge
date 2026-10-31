@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
+import subprocess
 import sys
 import unittest
 from decimal import Decimal, InvalidOperation
@@ -43,18 +45,50 @@ def run_offline_tier(tier: str) -> dict[str, object]:
         raise ValueError("only offline and contract suites can execute")
     directory = ROOT / ("tests" if tier == "offline" else "tests_contract")
     if not directory.is_dir():
-        return {"tier": tier, "status": "skipped", "reason": "no suite implemented"}
+        return {
+            "tier": tier,
+            "status": "skipped" if tier == "contract" else "failed",
+            "reason": "no suite implemented",
+        }
     suite = unittest.TestLoader().discover(str(directory))
     result = unittest.TextTestRunner(verbosity=2, stream=sys.stderr).run(suite)
     status = "passed" if result.wasSuccessful() else "failed"
     if result.wasSuccessful() and result.testsRun == len(result.skipped):
-        status = "skipped"
-    return {
+        status = "failed"
+    report: dict[str, object] = {
         "tier": tier,
         "status": status,
         "tests_run": result.testsRun,
         "tests_skipped": len(result.skipped),
     }
+    if result.testsRun == len(result.skipped):
+        report["reason"] = "implemented suite has no runnable tests"
+    return report
+
+
+def run_isolated_tier(tier: str) -> dict[str, object]:
+    """Keep each directory's imports and module cache in a separate interpreter."""
+    result = subprocess.run(
+        [sys.executable, str(Path(__file__).resolve()), "--_worker-tier", tier],
+        stdout=subprocess.PIPE, text=True, check=False,
+    )
+    try:
+        report: dict[str, object] = json.loads(result.stdout)
+        if (report.get("tier") != tier
+                or report.get("status") not in ("passed", "failed", "skipped")
+                or result.returncode != int(report["status"] == "failed")):
+            raise ValueError("inconsistent worker report")
+        if report["status"] == "passed":
+            total, skipped = report.get("tests_run"), report.get("tests_skipped")
+            if type(total) is not int or type(skipped) is not int or not 0 <= skipped < total:
+                raise ValueError("passing worker did not execute tests")
+        if report["status"] == "skipped" and (
+            tier != "contract" or (ROOT / "tests_contract").exists()
+        ):
+            raise ValueError("implemented or required suite cannot be skipped")
+        return report
+    except (ValueError, TypeError, AttributeError):
+        return {"tier": tier, "status": "failed", "reason": "isolated runner failed"}
 
 
 def main() -> int:
@@ -64,11 +98,17 @@ def main() -> int:
     parser.add_argument("--max-cost-usd")
     parser.add_argument("--estimated-cost-usd")
     parser.add_argument("--timeout-seconds")
+    parser.add_argument("--_worker-tier", choices=("offline", "contract"), help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args._worker_tier:
+        with contextlib.redirect_stdout(sys.stderr):
+            report = run_offline_tier(args._worker_tier)
+        print(json.dumps(report, sort_keys=True))
+        return int(report["status"] == "failed")
     failed = False
     for tier in dict.fromkeys(args.tier or ("offline", "contract")):
         if tier in ("offline", "contract"):
-            report = run_offline_tier(tier)
+            report = run_isolated_tier(tier)
         elif not args.allow_live:
             report = {"tier": tier, "status": "skipped", "reason": "live tests not opted in"}
         else:
