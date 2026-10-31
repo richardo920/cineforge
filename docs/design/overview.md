@@ -84,7 +84,18 @@ Do not select an open-source code license on the owner's behalf. The initial pac
 
 ## Verification
 
-Test incompatible device selection, invalid cue timing, duplicate character revisions, unreviewed skill metadata, and deterministic mock output. Current CI installs the package and runs CLI smoke tests; future foundation CI adds contract tests and an offline mock demo; live adapters later require explicit opt-in integration tests and bounded spend.
+`python -m unittest discover -s tests -v` and the CLI smoke check are the default offline checks. `python scripts/test_tiers.py` reports each tier as passed, failed, or skipped; a skipped required tier never satisfies a merge gate.
+
+| Tier | Suite / policy |
+| --- | --- |
+| Offline | `tests/`: synthetic unit/CLI fixtures; no runtime network, credentials, GPU, or paid calls |
+| Contract | `tests_contract/`: fake-provider/schema/failure fixtures; same offline rules; currently absent |
+| Integration | `tests_integration/`: opt-in real adapters outside default discovery; currently unavailable |
+| Media quality | `tests_media/`: opt-in approved media and technical measurements plus separate human review; currently unavailable |
+
+Live admission requires `--allow-live --max-cost-usd 1 --estimated-cost-usd 0.5 --timeout-seconds 60`; invalid or exceeded limits fail. No live tier executes until an adapter enforces actual spend, deadlines, and cleanup; valid opt-in currently reports skipped with no calls made.
+
+CI fixtures must be synthetic, small, deterministic, and rights-cleared; use fake credentials and temporary outputs. Keep private media/weights outside Git, mock transport/provider failures offline, and record commands, head SHA, skips, and limits in test evidence.
 
 ## Agent delivery and review
 
