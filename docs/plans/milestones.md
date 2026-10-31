@@ -1,6 +1,6 @@
 # Cineforge milestone plan
 
-**Proposal for owner review. Implementation begins after owner approval and merge of this plan; agents then schedule tasks within its approved scope without requiring the owner to code or review routine PRs.** Initial scaffold/CI setup is complete separately; all tasks below remain unchecked.
+**Approved in merged planning PR #1.** Agents schedule within this scope without routine owner coding or review; completion follows verified task evidence in the Project and PRs.
 
 One task per PR by default. Each task needs current-head CI, independent review-agent findings, independent testing-agent approval, and coordinator/merge-agent verification before agent merge; failures and unavailable checks must be reported explicitly.
 
@@ -8,13 +8,15 @@ One task per PR by default. Each task needs current-head CI, independent review-
 
 Depends on plan approval. Exit: a sample PR demonstrates the full author → review → testing → coordinator merge loop and enforced protections are verified, or unsupported protections are explicitly recorded.
 
-- [ ] M0.1 Define reusable coordinator/implementation/review/testing agent instructions with task boundaries, maintenance ownership, and severity rules. Acceptance: a sample task yields three distinct reports tied to the same PR head SHA; authors cannot self-certify review.
-- [ ] M0.2 Configure available main-branch protections and required CI. Acceptance: failing checks block merge, new commits invalidate stale approval where supported, and conditional agent-merge policy/any platform limitations are documented and tested on a disposable branch.
-- [ ] M0.3 Add trusted review/testing evidence checks. Acceptance: missing or stale reports fail; untrusted PR text cannot forge approval; successful CI alone never authorizes merge, and absent/failed/stale independent approval blocks agent merge; do not use privileged workflows to execute untrusted PR code. Record whether evidence verifies identity, completion, or findings resolution.
-- [ ] M0.4 Add lint/type checks, package build/install checks, secret scanning, dependency review, and a repository artifact-size policy. Acceptance: synthetic bad fixtures fail each relevant guard without including a real secret; pin tool versions and action revisions.
-- [ ] M0.5 Define offline/contract/integration/media-quality test tiers and CI fixture policy. Acceptance: default tests need no credentials/GPU/network at runtime; paid runs are opt-in, cost-bounded, and clearly reported as run/skipped.
+M0 completion marks take effect only after [PR #15](https://github.com/richardo920/cineforge/pull/15) passes final-head CI, independent review/testing, signed workflow and fresh local evidence verification, then coordinator verifies its merge; [live protection evidence](https://github.com/richardo920/cineforge/pull/15#issuecomment-6545843729) records platform limits.
 
-- [ ] M0.6 Operationalize the private Cineforge GitHub Project (board created; proposed tasks start as Backlog drafts). Acceptance: each approved task is an issue with task ID, milestone, acceptance criteria, dependencies, linked PR, owner agent, and workflow status; coordinator moves tasks through independent review/testing to Done only after verified merge. Board state cannot substitute for merge checks.
+- [x] M0.1 Define reusable coordinator/implementation/review/testing agent instructions with task boundaries, maintenance ownership, and severity rules. Acceptance: a sample task yields three distinct reports tied to the same PR head SHA; authors cannot self-certify review.
+- [x] M0.2 Configure available main-branch protections and required CI. Acceptance: failing checks block merge, new commits invalidate stale approval where supported, and conditional agent-merge policy/any platform limitations are documented and tested on a disposable branch.
+- [x] M0.3 Add trusted review/testing evidence checks. Acceptance: missing or stale reports fail; untrusted PR text cannot forge approval; successful CI alone never authorizes merge, and absent/failed/stale independent approval blocks agent merge; do not use privileged workflows to execute untrusted PR code. Record whether evidence verifies identity, completion, or findings resolution.
+- [x] M0.4 Add lint/type checks, package build/install checks, secret scanning, dependency review, and a repository artifact-size policy. Acceptance: synthetic bad fixtures fail each relevant guard without including a real secret; pin tool versions and action revisions.
+- [x] M0.5 Define offline/contract/integration/media-quality test tiers and CI fixture policy. Acceptance: default tests need no credentials/GPU/network at runtime; paid runs are opt-in, cost-bounded, and clearly reported as run/skipped.
+
+- [x] M0.6 Operationalize the private Cineforge GitHub Project (board created; proposed tasks start as Backlog drafts). Acceptance: each approved task is an issue with task ID, milestone, acceptance criteria, dependencies, linked PR, owner agent, and workflow status; coordinator moves tasks through independent review/testing to Done only after verified merge. Board state cannot substitute for merge checks.
 
 ## M1 — Domain contracts and offline production demo
 

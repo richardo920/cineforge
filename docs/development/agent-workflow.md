@@ -83,6 +83,16 @@ Payload fields: `repository`, `pr_number`, `head_sha`, `base_sha`, `coordinator_
 
 This authenticates coordinator completion claims and records claimed finding resolutions; it does not authenticate independent GitHub identities or verify semantic correctness. Shared host/maintainer credentials and environment administrators remain trusted. Another Actions workflow can spoof a same-name status, so coordinators must verify the signed bundle and fresh sources immediately before merge; a status alone never authorizes it.
 
+## Main protection configuration
+
+Coordinator applies the reviewed [ruleset](../../config/main-ruleset.json) to ruleset `26263104` only after the trusted evidence workflow is installed: `gh api --method PUT repos/richardo920/cineforge/rulesets/26263104 --input config/main-ruleset.json`. Read back the effective `main` rules and verify seven required GitHub Actions checks, strict current-base checks, PR/thread requirements, no bypass, and deletion/force-push blocking.
+
+Before claiming enforcement, coordinator checks both session refs are absent and runs `python scripts/protection_probe.py --coordinator-live-probe --session unique8char --output /private/tmp/unique8char-protection.jsonl` with a fresh lowercase session token. It retains a disposable target/head/PR/ruleset and records protection-specific missing/failed/stale-check merge rejections plus a successful fresh-check merge; main is never a write target. Its two synthetic statuses have no Actions-source binding; production requires app `15368`, whose same-name status limitation still requires fresh local signed-evidence verification.
+
+One shared GitHub principal cannot approve its own PR, so native approval count is zero; stale native approval dismissal is configured but cannot be demonstrated with an independent approving principal here. Distinct current-head review/testing reports and coordinator signature/source verification remain mandatory; repository/environment administrators and the shared host remain trusted.
+
+[Live evidence, 2026-10-31](https://github.com/richardo920/cineforge/pull/15#issuecomment-6545843729): ruleset `26263104` is active with the declared seven checks and no bypass; disposable PR #16 records five protection-specific HTTP405 denials and a fresh-check merge while main remains unchanged. PR #15 initially has failing `Agent evidence` despite passing ordinary CI; its final head still requires independent reports, successful signed workflow verification, fresh local verification and a verified SHA-conditioned merge before completion.
+
 ## Full agent maintenance
 
 The owner is not expected to write code, review code, or merge routine PRs. After initial plan approval, the coordinator schedules ready tasks within that scope and agents handle implementation, independent review/testing, merges, issue triage, bug fixes, dependency updates, documentation, and CI failures. Routine maintenance uses the same gates; urgency does not waive review or testing.
