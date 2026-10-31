@@ -18,18 +18,31 @@ Planned enforcement: required CI, stale approval dismissal, current-head review/
 
 ## Operating ten tasks in parallel
 
-1. Open `~/Desktop/cineforge` as a Codex project. Keep one coordinator chat responsible for the approved backlog, dependencies, PR links, and review state.
-2. Coordinator selects two or three independent tasks with stable interfaces. Create one implementation chat/worktree/branch per task from current `main`; dependent tasks wait for prerequisites or use an explicitly tracked PR stack.
+1. Keep `~/Desktop/cineforge` read-only for coordinator inspection. Record one active coordinator in the shared queue; only it mutates the GitHub queue, security settings, or merges. Other agents send proposed updates to it.
+2. Coordinator selects two or three independent tasks with stable interfaces. After inspecting worktree ownership/status, give every editing task/session a unique worktree path and branch from current `origin/main`; dependent tasks wait for prerequisites or use an explicitly tracked PR stack.
 3. Each author opens a PR and supplies task ID, acceptance criteria, test evidence, and head SHA. Authors stop changing the branch while reviewers inspect it.
-4. Open a separate review chat for the PR; use Review with Codex in Code Review, or `/review` against the intended base branch in a separate checkout. Review the diff, affected callers, architecture, security, cleanup, and missing tests.
-5. Open a testing chat with its own disposable worktree at the PR head commit. It derives tests from task acceptance criteria, runs existing checks, and probes failures independently. Keep new test changes on a separate branch and hand them back to the author.
+4. Open a separate review chat with its own uniquely named detached worktree at the full PR head SHA. Review the diff against its intended base, affected callers, architecture, security, cleanup, and missing tests.
+5. Open a testing chat with another uniquely named detached worktree at that exact head. It derives tests from task acceptance criteria, runs existing checks, and probes failures independently. Keep proposed test changes on a unique branch and hand them back to the author.
 6. Coordinator routes findings to the author. After fixes, rerun affected tests/review on the new head SHA and update the task record; findings remain open until verified.
 7. Before agent merge, verify current-head CI and integration with current `main`. After related PRs merge, update affected branches and repeat integration checks/review for any resolution changes.
 8. Coordinator/merge agent merges ready implementation PRs in dependency order once every required check, independent review, and independent acceptance test passes for the current head; no further owner confirmation is needed. Coordinator records the merge and schedules the next ready tasks. The initial design/planning PR remains for owner review.
 
-Worktrees isolate checked-out files, not service ports, databases, credentials, shared caches, or cloud spend. Use per-task environments, output directories, database namespaces, and ports; avoid concurrent edits to shared Git configuration or the same branch.
+Before editing, inspect `git worktree list --porcelain` and `git -C PATH status --short`. Never assume an existing path, including `/tmp`, is unowned: reuse requires a recorded handoff, clean status, and a stopped prior owner; pause on uncertain ownership.
 
-Suggested task record: `task ID | dependencies | branch/PR | head SHA | author | review | testing | CI | merge readiness/result`. Start with three implementation slots and reuse reviewer/tester capacity as PRs arrive rather than starting ten tightly coupled tasks together.
+```sh
+git worktree list --porcelain
+git status --short
+git fetch origin
+task_token=$(uuidgen | tr '[:upper:]' '[:lower:]')
+task_path="../cineforge-worktrees/M0.x-${task_token}"
+git worktree add -b "task/M0.x-${task_token}" "$task_path" origin/main
+git worktree add --detach "${task_path}-review" FULL_PR_HEAD_SHA
+git worktree add --detach "${task_path}-test" FULL_PR_HEAD_SHA
+```
+
+Worktrees share Git refs/configuration, credentials, and caches; they do not isolate ports, databases, or cloud spend. Namespace environments, temporary outputs, databases, and ports per session; avoid shared Git configuration changes and other sessions' branches/refs. Clean up only trees your session created after they are clean, inactive, and released in the queue; never force-remove another session's tree.
+
+Task record: `task | session owner | worktree path | branch/detached SHA | PR/head | dependencies | author/review/testing | CI | merge result`. Record handoffs and coordinator ownership here; reuse agent capacity with fresh task worktrees.
 
 ## Role prompts
 

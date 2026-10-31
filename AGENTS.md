@@ -12,13 +12,20 @@
 - Agent reports supplement CI and human review. These instructions alone do not enforce GitHub branch protection.
 - No routine owner coding, code review, or merge action is required. Agents triage issues, schedule ready tasks, fix bugs/CI, maintain dependencies/docs, and merge through the same independent quality gates. Owner participation is optional; escalate product-scope decisions or unresolved blockers.
 
+## Session isolation
+
+- Each editing task/session gets a unique branch and worktree; main stays read-only for coordinator inspection. Before editing, inspect `git worktree list --porcelain` and the intended tree's `git status --short`. Existing paths, including `/tmp`, require a recorded handoff, clean status, and a stopped prior owner; pause on unclear ownership.
+- Reviewers and testers each use a separate, uniquely named detached worktree at the full PR head SHA. Record session owner, task, path, branch (or detached SHA), and PR in the shared queue.
+- Only one coordinator may be active; only that coordinator mutates the GitHub queue, security settings, or merges. Other agents send proposed queue updates to it.
+- Worktrees share refs/configuration, credentials, and caches; namespace environments, temporary outputs, databases, and ports per session. Do not change shared Git configuration or another session's branch/ref. Remove only your session's clean, inactive trees after ownership is released in the queue; never force-remove another session's tree.
+
 ## Startup: “Start the next ready milestone”
 
 - Act as coordinator. Read `docs/design/overview.md`, `docs/plans/milestones.md`, and `docs/development/agent-workflow.md`; inspect current GitHub issues, PRs, CI, and the linked Project before scheduling work.
 - Confirm the initial planning PR is merged. If it is still open, report its link and wait for owner plan approval; do not treat this startup prompt as approval of an unmerged plan.
 - Choose the earliest incomplete milestone with satisfied prerequisites, starting with M0. Work through its ready tasks; milestone completion requires its exit criteria, not merely green tests.
 - Use the Project as the shared queue. Reconcile draft cards with existing issues before creating anything; convert only scheduled approved drafts into Cineforge issues with acceptance criteria and dependencies.
-- Delegate implementation, independent code review, and independent acceptance testing to separate agents. Use one branch/worktree per implementation task, separate test worktrees, and at most three independent implementation tasks concurrently. Follow the role prompts in the workflow document.
+- Confirm the coordinator's exclusive ownership in the shared queue before mutations. Delegate implementation, independent code review, and independent acceptance testing to separate agents with unique session worktrees/author branches and separate detached review/test worktrees; run at most three independent implementation tasks concurrently. Follow the role prompts in the workflow document.
 - Open one PR per task. Route findings back to its author, obtain renewed approvals after fixes, verify all current-head gates and integration with main, then merge as coordinator without routine owner confirmation. Record PR/head/evidence links and move cards to Done only after verified merge.
 - Maintain these rules and the workflow as the source of truth; do not rely on another chat's memory. Do not count chat reports as enforced GitHub checks; M0 establishes and verifies the automation.
 - Continue until the selected milestone meets its exit criteria or a blocker prevents meaningful progress. Finish with merged PRs, test/review evidence, Project status, blockers, and the next ready milestone; do not start the following milestone unless requested.
