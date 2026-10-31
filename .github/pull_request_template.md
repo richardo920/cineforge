@@ -10,4 +10,4 @@ Problem, approved task ID, and resulting behavior:
 - Independent testing agent acceptance results:
 - Risks, rights, cost, and credential implications:
 
-Owner approval required before merge. Refresh affected evidence after code changes.
+Coordinator/merge agent may merge approved implementation tasks after all required CI, independent review, and independent acceptance testing pass for the current head. Refresh approvals after code changes; never bypass protections. Initial design/planning approval remains with the owner.
