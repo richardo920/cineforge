@@ -1,0 +1,43 @@
+# Credentials and local configuration
+.env
+.env.*
+!.env.example
+.secrets/
+secrets/
+*.pem
+*.key
+*credentials*.json
+# Python and tools
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+build/
+dist/
+.DS_Store
+# Private or large production artifacts
+artifacts/
+assets/private/
+models/
+weights/
+output/
+outputs/
+.cache/
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+*.onnx
+*.mp4
+*.mov
+*.mkv
+*.wav
+*.mp3
+*.flac
+*.zip

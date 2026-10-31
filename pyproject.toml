@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=77,<82"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cineforge"
+version = "0.1.0"
+description = "Modular AI filmmaking platform foundation"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "LicenseRef-Proprietary"
+dependencies = []
+
+[project.scripts]
+cineforge = "cineforge.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
