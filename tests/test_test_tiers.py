@@ -110,20 +110,85 @@ class TierRunnerTests(unittest.TestCase):
             [("offline", "passed", 1), ("contract", "passed", 1)],
         )
 
-    def test_failed_and_all_skipped_suites_are_not_passed(self):
+    def test_failed_and_all_skipped_suites_fail(self):
         def fail():
             raise AssertionError("synthetic failure")
 
         def skip():
             raise unittest.SkipTest("synthetic unavailable check")
 
-        for case, status in ((fail, "failed"), (skip, "skipped")):
+        for case, status in ((fail, "failed"), (skip, "failed")):
             suite = unittest.TestSuite([unittest.FunctionTestCase(case)])
             with self.subTest(status=status), mock.patch.object(
                 TIERS.unittest.TestLoader, "discover", return_value=suite,
             ), mock.patch.object(TIERS.sys, "stderr", io.StringIO()):
                 report = TIERS.run_offline_tier("offline")
             self.assertEqual(report["status"], status)
+
+    def test_contract_cli_pass_failure_missing_empty_and_all_skipped(self):
+        cases = (
+            (None, "skipped", 0),
+            ("", "failed", 1),
+            ("self.assertTrue(True)", "passed", 0),
+            ("self.fail('synthetic contract failure')", "failed", 1),
+            ("self.skipTest('synthetic unavailable contract')", "failed", 1),
+            ("__import__('os')._exit(0)", "failed", 1),
+            ("__import__('os').write(1, b'malformed worker output')", "failed", 1),
+        )
+        for body, status, code in cases:
+            with self.subTest(body=body), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / "scripts").mkdir()
+                runner = root / "scripts" / SCRIPT.name
+                shutil.copy2(SCRIPT, runner)
+                if body is not None:
+                    (root / "tests_contract").mkdir()
+                    if body:
+                        (root / "tests_contract" / "test_fixture.py").write_text(
+                            "import unittest\n"
+                            "class SyntheticContract(unittest.TestCase):\n"
+                            "    def test_contract(self):\n"
+                            f"        {body}\n",
+                            encoding="utf-8",
+                        )
+                result = subprocess.run(
+                    [sys.executable, str(runner), "--tier", "contract"],
+                    capture_output=True, text=True, check=False,
+                )
+                self.assertEqual(result.returncode, code, result.stderr)
+                report = json.loads(result.stdout)
+                self.assertEqual(report["tier"], "contract")
+                self.assertEqual(report["status"], status)
+
+    def test_same_module_name_does_not_hide_failing_contract(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "scripts").mkdir()
+            runner = root / "scripts" / SCRIPT.name
+            shutil.copy2(SCRIPT, runner)
+            for suite, assertion in (
+                ("tests", "self.assertTrue(True)"),
+                ("tests_contract", "self.fail('independent contract failure')"),
+            ):
+                (root / suite).mkdir()
+                (root / suite / "test_shared.py").write_text(
+                    "import unittest\n"
+                    "class SyntheticTests(unittest.TestCase):\n"
+                    "    def test_synthetic_case(self):\n"
+                    f"        {assertion}\n",
+                    encoding="utf-8",
+                )
+            result = subprocess.run(
+                [sys.executable, str(runner), "--tier", "offline", "--tier", "contract"],
+                capture_output=True, text=True, check=False,
+            )
+        self.assertEqual(result.returncode, 1, result.stderr)
+        reports = [json.loads(line) for line in result.stdout.splitlines()]
+        self.assertEqual(
+            [(report["tier"], report["status"], report["tests_run"]) for report in reports],
+            [("offline", "passed", 1), ("contract", "failed", 1)],
+        )
+        self.assertIn("independent contract failure", result.stderr)
 
     def test_offline_runner_refuses_live_tiers(self):
         with self.assertRaises(ValueError):
