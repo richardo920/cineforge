@@ -3,14 +3,13 @@
 import importlib.util
 import io
 import json
-from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
-
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "test_tiers.py"
 SPEC = importlib.util.spec_from_file_location("test_tiers", SCRIPT)

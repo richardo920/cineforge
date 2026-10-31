@@ -9,6 +9,7 @@ secrets/
 *credentials*.json
 # Python and tools
 .venv/
+.venv-*/
 venv/
 __pycache__/
 *.py[cod]

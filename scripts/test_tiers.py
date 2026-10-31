@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import argparse
-from decimal import Decimal, InvalidOperation
 import json
-from pathlib import Path
 import sys
 import unittest
-
+from decimal import Decimal, InvalidOperation
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 TIERS = ("offline", "contract", "integration", "media-quality")
