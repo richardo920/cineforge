@@ -75,4 +75,4 @@ Use a private GitHub Project linked to Cineforge as the coordinator's shared que
 
 Coordinator selects Ready tasks, assigns isolated worktrees, links PRs, and refreshes stale evidence after changes. Ready to merge requires every gate in the agent merge policy; Done requires verified merge. A green status field never grants merge authority.
 
-Projects setup is M0.6 and is not configured yet: the current GitHub CLI connection lacks Projects scopes. Use issues/PRs as the fallback queue until access is available; do not widen credentials automatically. Discover/link the board through the [repository Projects page](https://github.com/richardo920/cineforge/projects).
+The private [Cineforge — Agent Development project](https://github.com/users/richardo920/projects/1) is linked to the repository. Projects access is verified; the proposed plan tasks are draft cards in Backlog pending approval. M0.6 covers conversion to issues and operational task/PR tracking after approval; no automatic dispatch or merge controller is configured. Use issues/PRs as the fallback if Projects becomes unavailable.
