@@ -60,3 +60,19 @@ Check that the PR head has not changed immediately before merging and use a merg
 The owner is not expected to write code, review code, or merge routine PRs. After initial plan approval, the coordinator schedules ready tasks within that scope and agents handle implementation, independent review/testing, merges, issue triage, bug fixes, dependency updates, documentation, and CI failures. Routine maintenance uses the same gates; urgency does not waive review or testing.
 
 The owner may inspect or intervene at any time. Escalate unresolved blockers or product-scope decisions; do not request routine code approval. Preserve existing approval requirements for spending, rights/consent, public release, and changes to security-sensitive access. This is the intended operating model; the scaffold does not yet run a continuous maintenance service or an automated merge controller.
+
+## GitHub Projects task queue
+
+Use a private GitHub Project linked to Cineforge as the coordinator's shared queue; each approved task becomes a repository issue, linked to its implementation PR. Keep requirements and acceptance criteria in the issue; record CI/review/testing evidence on the PR against its head SHA.
+
+| Field | Values / purpose |
+| --- | --- |
+| Status | Backlog → Ready → In progress → Review & testing → Ready to merge → Done; Blocked for unresolved dependencies/failures |
+| Task / milestone | Stable plan ID such as M1.2 and its milestone |
+| Dependencies | Blocking issue links; Ready requires prerequisites satisfied |
+| Agent role / chat | Responsible implementation chat, independent reviewer, and tester links |
+| PR / head SHA | Change under review and exact approved commit |
+
+Coordinator selects Ready tasks, assigns isolated worktrees, links PRs, and refreshes stale evidence after changes. Ready to merge requires every gate in the agent merge policy; Done requires verified merge. A green status field never grants merge authority.
+
+Projects setup is M0.6 and is not configured yet: the current GitHub CLI connection lacks Projects scopes. Use issues/PRs as the fallback queue until access is available; do not widen credentials automatically. Discover/link the board through the [repository Projects page](https://github.com/richardo920/cineforge/projects).

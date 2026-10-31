@@ -14,6 +14,8 @@ Depends on plan approval. Exit: a sample PR demonstrates the full author → rev
 - [ ] M0.4 Add lint/type checks, package build/install checks, secret scanning, dependency review, and a repository artifact-size policy. Acceptance: synthetic bad fixtures fail each relevant guard without including a real secret; pin tool versions and action revisions.
 - [ ] M0.5 Define offline/contract/integration/media-quality test tiers and CI fixture policy. Acceptance: default tests need no credentials/GPU/network at runtime; paid runs are opt-in, cost-bounded, and clearly reported as run/skipped.
 
+- [ ] M0.6 Set up a private GitHub Project linked to Cineforge once Projects access is available. Acceptance: each approved task is an issue with task ID, milestone, acceptance criteria, dependencies, linked PR, owner agent, and workflow status; coordinator moves tasks through independent review/testing to Done only after verified merge. Board state cannot substitute for merge checks.
+
 ## M1 — Domain contracts and offline production demo
 
 Depends on M0. Exit: a synthetic shot plan completes through a mock provider with reproducible metadata and no media generation.
@@ -82,4 +84,4 @@ Depends on M6. Exit: owner decides whether to stay private or approve a separate
 
 ## First assignments after approval
 
-Start with M0.1 and M0.5; follow with M0.2–M0.4, then M1. Do not schedule live generation, provider provisioning, skill execution, or public release until the corresponding acceptance gates are satisfied.
+Start with M0.1 and M0.5; follow with M0.2–M0.4 and M0.6 when Projects access is available, then M1. Projects setup need not block otherwise-ready foundation work. Do not schedule live generation, provider provisioning, skill execution, or public release until the corresponding acceptance gates are satisfied.
