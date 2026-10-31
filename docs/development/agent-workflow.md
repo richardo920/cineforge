@@ -74,7 +74,7 @@ The owner may inspect or intervene at any time. Escalate unresolved blockers or 
 
 ## GitHub Projects task queue
 
-Use a private GitHub Project linked to Cineforge as the coordinator's shared queue; each approved task becomes a repository issue, linked to its implementation PR. Keep requirements and acceptance criteria in the issue; record CI/review/testing evidence on the PR against its head SHA.
+Use the private [Cineforge — Agent Development project](https://github.com/users/richardo920/projects/1) as the shared queue. Reconcile task IDs with existing issues before converting scheduled drafts; keep unscheduled tasks in Backlog. Requirements and acceptance criteria live in the issue; current-head CI/review/testing evidence lives on its linked PR.
 
 | Field | Values / purpose |
 | --- | --- |
@@ -84,9 +84,11 @@ Use a private GitHub Project linked to Cineforge as the coordinator's shared que
 | Agent role / chat | Responsible implementation chat, independent reviewer, and tester links |
 | PR / head SHA | Change under review and exact approved commit |
 
-Coordinator selects Ready tasks, assigns isolated worktrees, links PRs, and refreshes stale evidence after changes. Ready to merge requires every gate in the agent merge policy; Done requires verified merge. A green status field never grants merge authority.
+At assignment, PR creation, new commits, review/testing, and merge, reconcile the issue and Project fields: task ID, milestone, acceptance criteria, dependencies, owner/reviewer/tester, status, PR URL, and full head SHA. Record `pending` for an unassigned agent or unopened PR; dependent tasks stay Blocked until prerequisites pass. New commits invalidate approval and require refreshed head/evidence fields.
 
-The private [Cineforge — Agent Development project](https://github.com/users/richardo920/projects/1) is linked to the repository. Projects access is verified; the proposed plan tasks are draft cards in Backlog pending approval. M0.6 covers conversion to issues and operational task/PR tracking after approval; no automatic dispatch or merge controller is configured. Use issues/PRs as the fallback if Projects becomes unavailable.
+Coordinator moves PRs through Review & testing, then Ready to merge only after every merge gate passes. After verifying the SHA-conditioned merge, record its commit and evidence links on the PR/issue before moving the card to Done; a board status never grants merge authority.
+
+The merged plan's six scheduled M0 cards are issues [#2–#7](https://github.com/richardo920/cineforge/issues?q=is%3Aissue+milestone%3A%22M0+%E2%80%94+Make+agent+delivery+reviewable%22); M1–M7 remain unscheduled Backlog drafts. Inspect live state with `gh project item-list 1 --owner richardo920 --format json --limit 100` and `gh pr list --state all --json number,url,state,headRefOid,mergeCommit`. No automatic dispatcher or merge controller is configured; use issues/PRs as the fallback if Projects is unavailable.
 
 ## Starting a development session
 
