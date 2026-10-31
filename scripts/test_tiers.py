@@ -78,6 +78,14 @@ def run_isolated_tier(tier: str) -> dict[str, object]:
                 or report.get("status") not in ("passed", "failed", "skipped")
                 or result.returncode != int(report["status"] == "failed")):
             raise ValueError("inconsistent worker report")
+        if report["status"] == "passed":
+            total, skipped = report.get("tests_run"), report.get("tests_skipped")
+            if type(total) is not int or type(skipped) is not int or not 0 <= skipped < total:
+                raise ValueError("passing worker did not execute tests")
+        if report["status"] == "skipped" and (
+            tier != "contract" or (ROOT / "tests_contract").exists()
+        ):
+            raise ValueError("implemented or required suite cannot be skipped")
         return report
     except (ValueError, TypeError, AttributeError):
         return {"tier": tier, "status": "failed", "reason": "isolated runner failed"}

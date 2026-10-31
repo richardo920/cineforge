@@ -134,6 +134,10 @@ class TierRunnerTests(unittest.TestCase):
             ("self.skipTest('synthetic unavailable contract')", "failed", 1),
             ("__import__('os')._exit(0)", "failed", 1),
             ("__import__('os').write(1, b'malformed worker output')", "failed", 1),
+            ("__import__('os').write(1, b'{\"tier\":\"contract\",\"status\":\"passed\"}'); "
+             "__import__('os')._exit(0)", "failed", 1),
+            ("__import__('os').write(1, b'{\"tier\":\"contract\",\"status\":\"skipped\"}'); "
+             "__import__('os')._exit(0)", "failed", 1),
         )
         for body, status, code in cases:
             with self.subTest(body=body), tempfile.TemporaryDirectory() as directory:
