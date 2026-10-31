@@ -18,7 +18,7 @@ Planned enforcement: required CI, stale approval dismissal, current-head review/
 
 ## Operating ten tasks in parallel
 
-1. Keep `~/Desktop/cineforge` read-only for coordinator inspection. Record one active coordinator in the shared queue; only it mutates the GitHub queue, security settings, or merges. Other agents send proposed updates to it.
+1. Reserve `~/Desktop/cineforge` for coordinator inspection/synchronization, never development edits. Record one active coordinator in the shared queue; only it mutates the GitHub queue, security settings, or merges. Other agents send proposed updates to it.
 2. Coordinator selects two or three independent tasks with stable interfaces. After inspecting worktree ownership/status, give every editing task/session a unique worktree path and branch from current `origin/main`; dependent tasks wait for prerequisites or use an explicitly tracked PR stack.
 3. Each author opens a PR and supplies task ID, acceptance criteria, test evidence, and head SHA. Authors stop changing the branch while reviewers inspect it.
 4. Open a separate review chat with its own uniquely named detached worktree at the full PR head SHA. Review the diff against its intended base, affected callers, architecture, security, cleanup, and missing tests.

@@ -14,7 +14,7 @@
 
 ## Session isolation
 
-- Each editing task/session gets a unique branch and worktree; main stays read-only for coordinator inspection. Before editing, inspect `git worktree list --porcelain` and the intended tree's `git status --short`. Existing paths, including `/tmp`, require a recorded handoff, clean status, and a stopped prior owner; pause on unclear ownership.
+- Each editing task/session gets a unique branch and worktree; main is for coordinator inspection/synchronization only, never development edits. Before editing, inspect `git worktree list --porcelain` and the intended tree's `git status --short`. Existing paths, including `/tmp`, require a recorded handoff, clean status, and a stopped prior owner; pause on unclear ownership.
 - Reviewers and testers each use a separate, uniquely named detached worktree at the full PR head SHA. Record session owner, task, path, branch (or detached SHA), and PR in the shared queue.
 - Only one coordinator may be active; only that coordinator mutates the GitHub queue, security settings, or merges. Other agents send proposed queue updates to it.
 - Worktrees share refs/configuration, credentials, and caches; namespace environments, temporary outputs, databases, and ports per session. Do not change shared Git configuration or another session's branch/ref. Remove only your session's clean, inactive trees after ownership is released in the queue; never force-remove another session's tree.
