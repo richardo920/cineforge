@@ -33,13 +33,11 @@ Suggested task record: `task ID | dependencies | branch/PR | head SHA | author |
 
 ## Role prompts
 
-Implementation: “Implement only approved task TASK-ID in your own worktree. Read docs/design/overview.md and its acceptance criteria. Add meaningful tests, open a PR with evidence, and wait for independent review. Leave merge to the coordinator/merge agent.”
+Use [role instructions](../../.github/agents/roles.json): supply `inputs`, then apply `shared` plus the selected `roles` entry. Author, reviewer and tester use distinct contexts/agent IDs; the tester also uses a separate worktree.
 
-Review: “Independently review PR URL at HEAD-SHA against its intended base and TASK-ID. Do not modify implementation. Inspect affected callers and failure paths. Report actionable findings with severity, file/line, reproduction, and required fix; state residual uncertainty even if no issues are found.”
+Copy [the report template](../../.github/agents/report.example.json) into each PR report, remove `template_only`, replace placeholders and empty unused arrays. Publish author, review and testing reports for the same full head SHA; reviewers/testers explicitly pass or fail, and new commits require renewed reports.
 
-Testing: “Independently verify TASK-ID for PR URL at HEAD-SHA in a separate worktree. Derive cases from acceptance criteria, including invalid input and recovery. Record commands, results, skipped checks, and gaps. No paid calls or production credentials; propose needed test changes separately.”
-
-Coordinator: “Track the approved backlog and dependencies. Dispatch only ready tasks, route PR findings, ensure review/testing/CI evidence matches the current head, and merge ready implementation PRs once every gate passes for the current head. Verify integration with current main, record the merge, and schedule the next ready tasks. Do not bypass protections or implement unrelated work. Leave the initial planning PR for owner review.”
+Critical/high findings and any failed acceptance criterion block merge. Lower-severity deferrals require independent reviewer agreement and a linked follow-up; report skipped checks and uncertainty. These templates standardize content, not identity or trust enforcement; shared-account reports are not independent GitHub approvals (M0.2/M0.3).
 
 ## Built-in review versus reusable skills
 

@@ -1,0 +1,39 @@
+{
+  "template_only": true,
+  "version": 1,
+  "task_id": "TASK-ID",
+  "role": "implementation | review | testing | coordinator",
+  "agent_id": "DISTINCT-AGENT-SESSION-ID",
+  "pr_url": "PR-URL",
+  "head_sha": "FULL-PR-HEAD-SHA",
+  "base_sha": "FULL-BASE-SHA",
+  "worktree": "WORKTREE-PATH",
+  "decision": "pending | pass | fail | blocked",
+  "summary": "RESULT-AND-SCOPE",
+  "acceptance": [
+    {
+      "criterion": "EXACT-ACCEPTANCE-CRITERION",
+      "status": "pass | fail | skipped | unavailable",
+      "evidence": "COMMAND-RESULT-OR-EVIDENCE-LINK"
+    }
+  ],
+  "commands": [
+    {"command": "EXACT-COMMAND", "exit_code": null, "result": "RESULT-OR-SKIP-REASON"}
+  ],
+  "findings": [
+    {
+      "id": "FINDING-ID",
+      "severity": "critical | high | medium | low",
+      "location": "FILE:LINE",
+      "reproduction": "FAILURE-SCENARIO",
+      "required_fix": "FIX-OR-REVIEWER-AGREED-DEFERRAL",
+      "status": "open | verified_fixed | deferred",
+      "verification": "CURRENT-HEAD-EVIDENCE",
+      "reviewer_agreement": "REVIEWER-REPORT-LINK-IF-DEFERRED",
+      "follow_up_issue": "ISSUE-LINK-IF-DEFERRED"
+    }
+  ],
+  "limitations": ["SKIPPED-CHECKS-RESIDUAL-UNCERTAINTY-AND-TRUST-LIMITS"],
+  "related_reports": ["AUTHOR-REVIEW-TEST-REPORT-LINKS"],
+  "merge": {"status": "not_attempted", "commit_sha": null, "url": null}
+}
