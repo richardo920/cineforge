@@ -51,6 +51,7 @@ class RunpodPodSpec:
     disk_gb: int = 80
     min_cuda_version: str = "12.8"
     registry_id: str | None = None
+    min_ram_per_gpu_gb: int | None = None
 
     def __post_init__(self) -> None:
         if (not _identifier(self.session_id) or len(self.session_id) > 32
@@ -68,11 +69,16 @@ class RunpodPodSpec:
                 or not isinstance(self.min_cuda_version, str)
                 or not re.fullmatch(r"\d{1,2}\.\d{1,2}", self.min_cuda_version)
                 or tuple(map(int, self.min_cuda_version.split("."))) < (12, 8)
-                or self.registry_id is not None and not _identifier(self.registry_id)):
+                or self.registry_id is not None and not _identifier(self.registry_id)
+                or self.min_ram_per_gpu_gb is not None and (
+                    type(self.min_ram_per_gpu_gb) is not int
+                    or not 1 <= self.min_ram_per_gpu_gb <= 65536)):
             raise ValueError("invalid immutable Runpod operator configuration")
 
     def to_dict(self) -> dict[str, Any]:
-        return {name: getattr(self, name) for name in self.__dataclass_fields__}
+        # Old scopes/journals predate the optional placement filter. Preserve their bytes.
+        return {name: getattr(self, name) for name in self.__dataclass_fields__
+                if name != "min_ram_per_gpu_gb" or self.min_ram_per_gpu_gb is not None}
 
     @property
     def digest(self) -> str:
@@ -331,10 +337,13 @@ class RunpodPodProvisioner:
         return result
 
     def _body(self, intent: AcquisitionIntent) -> dict[str, object]:
+        gpu: dict[str, object] = {"id": self.spec.gpu_id, "count": 1,
+                                  "minCudaVersion": self.spec.min_cuda_version}
+        if self.spec.min_ram_per_gpu_gb is not None:
+            gpu["minRamPerGpu"] = self.spec.min_ram_per_gpu_gb
         return {"name": intent.name, "image": self.spec.image, "disk": self.spec.disk_gb,
                 "cloud": "SECURE", "dataCenterIds": [self.spec.data_center_id],
-                "gpu": {"id": self.spec.gpu_id, "count": 1,
-                        "minCudaVersion": self.spec.min_cuda_version},
+                "gpu": gpu,
                 "env": {"PUBLIC_KEY": self.spec.ssh_public_key,
                         "CINEFORGE_SESSION": self.spec.session_id,
                         "CINEFORGE_LEASE": intent.owner_token},

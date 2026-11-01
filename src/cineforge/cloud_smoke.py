@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 import re
 import shutil
@@ -57,26 +58,46 @@ def approved_plan(selection: ApprovedComfySelection) -> ProjectPlan:
               selection.model.model_id, selection.model.revision, selection.workflow.digest),))
 
 
-def probe_media(path: Path) -> dict[str, Any]:
+def read_media(path: Path) -> dict[str, Any]:
+    """Bounded, profile-neutral ffprobe measurements; callers enforce their contract."""
     binary = shutil.which("ffprobe")
     if binary is None:
-        raise CloudSmokeError("ffprobe is required before the live smoke")
-    data = strict_object(run_process([binary, "-v", "error", "-count_frames",
-        "-select_streams", "v:0", "-show_entries",
-        "stream=codec_name,width,height,pix_fmt,avg_frame_rate,nb_read_frames:format=duration",
-        "-of", "json", str(path)], timeout=10))
-    streams = data["streams"]
-    if not isinstance(streams, list) or len(streams) != 1:
-        raise CloudSmokeError("single video stream required")
-    stream = streams[0]
-    rate = stream["avg_frame_rate"]
-    if not isinstance(rate, str) or len(rate) > 40:
-        raise CloudSmokeError("invalid measured video rate")
-    fps, duration = float(Fraction(rate)), float(data["format"]["duration"])
-    result = {"media_type": "video/webm", "codec": stream["codec_name"],
-        "pixel_format": stream["pix_fmt"], "width": stream["width"], "height": stream["height"],
-        "decoded_frames": int(stream["nb_read_frames"]), "fps": fps,
-        "duration_seconds": duration}
+        raise CloudSmokeError("ffprobe is required for media inspection")
+    try:
+        data = strict_object(run_process([binary, "-v", "error", "-count_frames",
+            "-select_streams", "v:0", "-show_entries",
+            "stream=codec_name,width,height,pix_fmt,avg_frame_rate,nb_read_frames:format=duration",
+            "-of", "json", str(path)], timeout=10))
+        streams = data["streams"]
+        if (not isinstance(streams, list) or len(streams) != 1
+                or not isinstance(streams[0], dict)):
+            raise ValueError
+        stream = streams[0]
+        rate, frames, duration_value = (stream["avg_frame_rate"], stream["nb_read_frames"],
+                                        data["format"]["duration"])
+        if (not isinstance(rate, str) or re.fullmatch(r"[0-9]{1,10}(?:/[0-9]{1,10})?", rate) is None
+                or not isinstance(frames, str) or re.fullmatch(r"[0-9]{1,20}", frames) is None
+                or type(duration_value) not in (str, int, float)
+                or isinstance(duration_value, str) and len(duration_value) > 40
+                or any(type(stream[name]) is not int or stream[name] <= 0
+                       for name in ("width", "height"))
+                or any(not isinstance(stream[name], str) or not 0 < len(stream[name]) <= 64
+                       for name in ("codec_name", "pix_fmt"))):
+            raise ValueError
+        fps, duration = float(Fraction(rate)), float(duration_value)
+        if (not math.isfinite(fps) or fps <= 0 or not math.isfinite(duration) or duration <= 0
+                or int(frames) <= 0):
+            raise ValueError
+        return {"media_type": "video/webm", "codec": stream["codec_name"],
+            "pixel_format": stream["pix_fmt"], "width": stream["width"], "height": stream["height"],
+            "decoded_frames": int(frames), "fps": fps, "duration_seconds": duration}
+    except (ValueError, TypeError, KeyError, OverflowError, ZeroDivisionError):
+        raise CloudSmokeError("invalid measured video metadata") from None
+
+
+def probe_media(path: Path) -> dict[str, Any]:
+    """The original M3 smoke contract remains the default for M3 callers."""
+    result = read_media(path)
     require_media(result)
     return result
 

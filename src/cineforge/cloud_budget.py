@@ -166,9 +166,87 @@ class BudgetApproval:
         return (intent.requirements == self.model and spec.image == self.image
                 and spec.gpu_id == self.gpu_id and spec.data_center_id == self.region
                 and spec.min_cuda_version == self.min_cuda and spec.disk_gb == self.disk_gb
+                and spec.min_ram_per_gpu_gb == getattr(self, "min_ram_per_gpu_gb", None)
                 and spec.registry_id is None and spec.max_hourly_usd <= self.hourly_ceiling_usd
                 and intent.startup_timeout_seconds + 60 < intent.lease_seconds
                 and intent.lease_seconds <= self.lifetime_seconds)
+
+
+@dataclass(frozen=True)
+class ConditioningBudgetApproval(BudgetApproval):
+    """Separate M4 scope. The legacy M3 constructor/parser remains unchanged."""
+
+    approval: object
+
+    def __post_init__(self) -> None:
+        from cineforge import conditioning_profile as profile
+        from cineforge.conditioning import ConditioningApproval
+        if type(self.approval) is not ConditioningApproval:
+            raise CloudBudgetError("M4 requires its separately checked operator approval")
+        subject = strict_object(self.approval.subject_json)
+        cloud = subject.get("cloud")
+        if not isinstance(cloud, dict):
+            raise CloudBudgetError("M4 approval requires its closed cloud scope")
+        directory = cloud.get("journal_directory")
+        if (not isinstance(directory, str) or not Path(directory).is_absolute()
+                or ".." in Path(directory).parts or str(Path(directory)) != directory
+                or not directory.isprintable() or any(c in directory for c in "\\:%")):
+            raise CloudBudgetError("M4 approval must bind a private absolute journal directory")
+        region = cloud.get("region")
+        if not isinstance(region, str) or region not in profile.REGIONS:
+            raise CloudBudgetError("M4 approval must bind one reviewed data center")
+        expected = {"image": profile.IMAGE, "gpu_id": profile.GPU_ID, "region": region,
+                    "min_ram_per_gpu_gb": profile.MIN_RAM_PER_GPU_GB,
+                    "journal_directory": directory,
+                    "region_fallback": False,
+                    "min_cuda": "12.8", "aggregate_usd": 1, "max_attempts": 1,
+                    "max_concurrent": 1, "lifetime_seconds": 1800,
+                    "hourly_ceiling_usd": 1.25, "disk_gb": 80, "volumes": [], "ports": ["22/tcp"]}
+        excluded = {"volumes", "ports", "region_fallback"}
+        actual = {key: getattr(self, key) for key in expected if key not in excluded}
+        if (self.subject_sha256 != self.approval.subject_sha256
+                or self.model_workflow_sha256 != self.subject_sha256
+                or subject.get("task_id") != "M4.2"
+                or subject.get("profile_id") != profile.PROFILE_ID
+                or canonical(subject.get("cloud")) != canonical(expected)
+                or canonical(actual) != canonical({k: v for k, v in expected.items()
+                                                  if k not in excluded})
+                or self.model != profile.model()):
+            raise CloudBudgetError("M4 budget differs from the approved closed scope")
+
+    @classmethod
+    def for_selection(cls, selection: Any) -> ConditioningBudgetApproval:
+        from cineforge.conditioning import ConditioningSelection
+        if type(selection) is not ConditioningSelection:
+            raise CloudBudgetError("M4 requires the checked I2V selection")
+        selection.gate.preflight()
+        return cls.for_approval(selection.approval)
+
+    @classmethod
+    def for_approval(cls, approval: Any) -> ConditioningBudgetApproval:
+        from cineforge import conditioning_profile as profile
+        from cineforge.conditioning import ConditioningApproval
+        if type(approval) is not ConditioningApproval:
+            raise CloudBudgetError("M4 requires its checked operator approval")
+        cloud = strict_object(approval.subject_json).get("cloud")
+        if not isinstance(cloud, dict) or not isinstance(cloud.get("region"), str):
+            raise CloudBudgetError("M4 approval requires one explicit data center")
+        region = cloud["region"]
+        return cls(approval.subject_sha256, approval.subject_sha256, profile.model(),
+                   profile.IMAGE, profile.GPU_ID, region, "12.8", 1, 1, 1, 1800, 1.25, 80,
+                   approval)
+
+    @property
+    def min_ram_per_gpu_gb(self) -> int:
+        from cineforge import conditioning_profile as profile
+        return profile.MIN_RAM_PER_GPU_GB
+
+    @property
+    def journal_directory(self) -> str:
+        from cineforge.conditioning import ConditioningApproval
+        assert type(self.approval) is ConditioningApproval
+        value: str = strict_object(self.approval.subject_json)["cloud"]["journal_directory"]
+        return value
 
 
 _TERMINAL = {"released", "rejected", "not_created"}
@@ -199,10 +277,14 @@ class CloudBudgetSession:
                  clock: Callable[[], float] = time.time,
                  monotonic: Callable[[], float] = time.monotonic,
                  idle_seconds: float = 120, quote_max_age_seconds: float = 30) -> None:
-        if (not isinstance(approval, BudgetApproval) or type(guard_deployment_configured) is not bool
+        if (type(approval) not in {BudgetApproval, ConditioningBudgetApproval}
+                or type(guard_deployment_configured) is not bool
                 or not _number(idle_seconds) or idle_seconds > 300
                 or not _number(quote_max_age_seconds) or quote_max_age_seconds > 30):
             raise CloudBudgetError("invalid cloud budget configuration")
+        if (type(approval) is ConditioningBudgetApproval
+                and str(Path(path).absolute()) != approval.journal_directory):
+            raise CloudBudgetError("M4 journal path differs from the independently approved scope")
         self.approval, self.transport = approval, transport
         self.clock, self.monotonic = clock, monotonic
         self.idle_seconds, self.quote_max_age_seconds = idle_seconds, quote_max_age_seconds
@@ -226,6 +308,8 @@ class CloudBudgetSession:
                 raise ValueError
             self._last_wall, self._last_mono, self._effective = wall, mono, wall
             if self._journal.initial is None:
+                if type(self.approval) is ConditioningBudgetApproval:
+                    raise CloudBudgetError("M4 journal must be initialized by offline preflight")
                 self._data = {"schema_version": 1, "approval_sha256": self.approval.subject_sha256,
                               "last_wall": wall, "records": {}}
             else:

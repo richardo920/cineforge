@@ -77,13 +77,17 @@ def ssh_environment() -> dict[str, str]:
 
 
 def run_process(command: list[str], *, timeout: float, payload: bytes = b"",
-                check: Callable[[], None] = lambda: None, max_output: int = 65536) -> bytes:
+                check: Callable[[], None] = lambda: None, max_output: int = 65536,
+                decode_setup_failure: bool = False) -> bytes:
     """No shell; bounded request/response, killed process group on timeout/interruption."""
     failed = False
     answer = None
     try:
         answer = worker_bootstrap.bounded_process(command, timeout=timeout, payload=payload,
-            max_output=max_output, check=check, environment=ssh_environment())
+            max_output=max_output, check=check, environment=ssh_environment(),
+            decode_setup_failure=decode_setup_failure)
+    except worker_bootstrap.SetupFailure:
+        raise
     except (Exception, KeyboardInterrupt):
         failed = True
     if failed or answer is None:
@@ -123,6 +127,11 @@ class SSHWorker:
         self._claimed: PrivateRunDirectory | None = None
         self._enforce: Callable[[], tuple[str, ...]] | None = None
         self._source = read_private_input(Path(worker_bootstrap.__file__), max_bytes=128*1024)
+        from cineforge.conditioning import ConditioningSelection
+        self._profile = selection.worker_profile if type(selection) is ConditioningSelection else None
+        self.runtime_evidence: dict[str, Any] | None = None
+        self.setup_failure: dict[str, Any] | None = None
+        self._reference_staged = False
 
     def __enter__(self) -> SSHWorker:
         self._claimed = PrivateRunDirectory(self.state_dir).__enter__()
@@ -180,10 +189,22 @@ class SSHWorker:
             -> dict[str, Any]:
         request = dict(request, allow_live=True, timeout_seconds=timeout,
                        guard_sha256=worker_guard_source_sha256())
+        if self._profile is not None:
+            request["profile"] = self._profile
         command = self._command() + [self._host, "python3 -c " + shlex.quote(self._source.decode())]
-        raw = run_process(command, timeout=timeout, payload=canonical(request),
-                          check=self.check if supervise else lambda: None)
-        return strict_object(raw)
+        diagnostic_setup = self._profile is not None and request.get("operation") == "setup"
+        try:
+            raw = run_process(command, timeout=timeout, payload=canonical(request),
+                check=self.check if supervise else lambda: None,
+                **({"decode_setup_failure": True} if diagnostic_setup else {}))
+        except worker_bootstrap.SetupFailure as error:
+            if diagnostic_setup and self.setup_failure is None:
+                self.setup_failure = worker_bootstrap.checked_setup_failure(error.diagnostic)
+            raise WorkerError("worker setup failed") from None
+        reply = strict_object(raw)
+        if diagnostic_setup and set(reply) != {"verification", "runtime"}:
+            raise WorkerError("worker setup response rejected")
+        return reply
 
     def probe(self, snapshot: LeaseSnapshot, timeout: float) -> WorkerObservation | None:
         if self.plan is not None:
@@ -212,6 +233,8 @@ class SSHWorker:
         receipt = GuardReceipt.from_dict(reply["receipt"])
         self.budget.arm_guard(snapshot.key, receipt)
         runtime = reply["runtime"]
+        if self._profile is not None:
+            self.runtime_evidence = self._runtime_evidence(runtime)
         self.observation = WorkerObservation(GPUDevice(str(snapshot.resource_id), Backend.CUDA,
             runtime["gpu_memory_mib"], frozenset({self.selection.model.required_precision})),
             runtime["gpu_raw_name"])
@@ -273,10 +296,41 @@ class SSHWorker:
             timeout)
         result = WorkerVerification.from_dict(reply["verification"])
         result.require_matches(self.selection)
+        if self._profile is not None:
+            self.runtime_evidence = self._runtime_evidence(reply["runtime"])
         if (result.record["worker_id"] != self.plan.pod_id
                 or result.record["image_digest"] != self.spec.image.split("@", 1)[1]):
             raise WorkerError("worker verification identity differs")
         return result
+
+    @staticmethod
+    def _runtime_evidence(runtime: dict[str, Any]) -> dict[str, Any]:
+        fields = {"python_version", "torch_version", "torchvision_version", "cuda_version",
+                  "gpu_raw_name", "gpu_memory_mib", "cuda_available", "arch_list", "capability",
+                  "cuda_kernel_ok", "device_count", "nvml_total_mib",
+                  "nvml_reserved_mib", "driver_version"} | worker_bootstrap.M4_RESOURCE_FIELDS
+        if set(runtime) != fields or len(canonical(runtime)) > 4096:
+            raise WorkerError("invalid bounded M4 runtime evidence")
+        worker_bootstrap.validate_m4_runtime(runtime)
+        return strict_object(canonical(runtime))
+
+    def stage_reference(self) -> dict[str, Any]:
+        from cineforge.conditioning import ConditioningSelection
+        if (type(self.selection) is not ConditioningSelection or self._profile is None
+                or self.plan is None or self._reference_staged):
+            raise WorkerError("reference staging is unavailable or already consumed")
+        self.selection.gate.preflight()
+        payload = self.selection.gate.reference.read()
+        timeout = min(30, self.budget.remaining_seconds(self._key) - 60)
+        if timeout <= 0:
+            raise WorkerError("insufficient owned lease for reference staging")
+        # Consume even uncertain outcomes. A lost acknowledgement never invites overwrite/retry.
+        self._reference_staged = True
+        reply = self._request({"operation": "stage_reference", "plan": self.plan.to_dict(),
+            "payload": base64.b64encode(payload).decode()}, timeout)
+        if reply != {"reference": self._profile["reference"]}:
+            raise WorkerError("staged reference evidence differs")
+        return reply["reference"]  # type: ignore[no-any-return]
 
     def endpoint(self) -> str:
         self.check()
