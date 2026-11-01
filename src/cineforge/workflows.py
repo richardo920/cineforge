@@ -38,6 +38,55 @@ def strict_object(raw: bytes | str) -> dict[str, Any]:
         raise ProviderError("malformed ComfyUI JSON object") from None
 
 
+def workflow_links(graph: dict[str, Any]) -> dict[str, list[str]]:
+    """Shared flat-link/DAG validation for reviewed and lower-level API graphs."""
+    edges: dict[str, list[str]] = {}
+    for identity, node in graph.items():
+        if (not isinstance(identity, str) or not identity or not isinstance(node, dict)
+                or not isinstance(node.get("inputs"), dict)):
+            raise ProviderError("malformed workflow node")
+        edges[identity] = []
+        for value in node["inputs"].values():
+            if isinstance(value, list):
+                if (len(value) != 2 or not isinstance(value[0], str) or value[0] not in graph
+                        or type(value[1]) is not int or value[1] < 0):
+                    raise ProviderError("unknown workflow input reference")
+                edges[identity].append(value[0])
+            elif isinstance(value, dict):
+                raise ProviderError("nested workflow input object is not supported")
+    visited: set[str] = set()
+
+    def visit(identity: str, active: set[str]) -> None:
+        if identity in active:
+            raise ProviderError("cyclic workflow")
+        if identity not in visited:
+            for dependency in edges[identity]:
+                visit(dependency, active | {identity})
+            visited.add(identity)
+
+    try:
+        for identity in edges:
+            visit(identity, set())
+    except RecursionError:
+        raise ProviderError("workflow graph exceeds supported depth") from None
+    return edges
+
+
+def reference_inputs(graph: dict[str, Any]) -> bool:
+    """Fail closed on core image loaders or explicit image-reference inputs.
+
+    Inspect every submitted node: Comfy can execute additional output nodes too.
+    This covers intermediate/advanced/custom sampler paths without guessing sampler
+    names. Image utility graphs also require an approved adapter; they are not an
+    ungated escape hatch. This is not a classifier for arbitrary custom-node code.
+    """
+    loaders = {"LoadImage", "LoadImageMask", "LoadImageOutput"}
+    inputs = {"start_image", "end_image", "reference_image", "ref_pad_image", "clip_vision_output"}
+    return any(node["class_type"] in loaders or any(
+               name in node["inputs"] and node["inputs"][name] is not None for name in inputs)
+               for node in graph.values())
+
+
 @dataclass(frozen=True)
 class InputBinding:
     node_id: str
@@ -54,6 +103,8 @@ class WorkflowTemplate:
 
     The digest covers the canonical API graph before prompt/seed substitution.
     Duration and other model-specific controls remain pinned in that graph.
+    Core image-loader/reference-input graphs, including image utilities, require
+    the checked conditioning adapter; only reference-free graphs can omit it.
     """
 
     graph_json: str
@@ -94,11 +145,17 @@ class WorkflowTemplate:
             if (binding.node_id not in graph
                     or binding.input_name not in graph[binding.node_id]["inputs"]):
                 raise ProviderError("workflow input binding is missing")
+        workflow_links(graph)
         object.__setattr__(self, "graph_json", canonical(graph).decode("utf-8"))
 
     @property
     def digest(self) -> str:
         return hashlib.sha256(self.graph_json.encode("utf-8")).hexdigest()
+
+    def _requires_conditioning(self, request: ExecutionRequest) -> bool:
+        return (request.shot.character_revision is not None or self.conditioning is not None
+                or request.model.task == "image-to-video"
+                or reference_inputs(strict_object(self.graph_json)))
 
     def translate(self, request: ExecutionRequest) -> dict[str, Any]:
         if (not isinstance(request, ExecutionRequest)
@@ -107,7 +164,7 @@ class WorkflowTemplate:
                 or request.shot.workflow_digest != self.digest or request.shot.seed is None
                 or request.shot.duration_seconds != self.duration_seconds):
             raise ProviderError("request must pin this workflow/model and an explicit seed")
-        if request.shot.character_revision is not None or self.conditioning is not None:
+        if self._requires_conditioning(request):
             # Creative JSON cannot manufacture this non-serialized, byte-verified gate.
             from cineforge.conditioning import VerifiedConditioning
             if type(self.conditioning) is not VerifiedConditioning:
@@ -119,7 +176,7 @@ class WorkflowTemplate:
         return graph
 
     def require_submission(self, request: ExecutionRequest, worker_id: str | None) -> None:
-        if request.shot.character_revision is not None or self.conditioning is not None:
+        if self._requires_conditioning(request):
             from cineforge.conditioning import VerifiedConditioning
             if type(self.conditioning) is not VerifiedConditioning:
                 raise ProviderError("workflow does not support verified reference submission")

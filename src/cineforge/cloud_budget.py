@@ -166,6 +166,7 @@ class BudgetApproval:
         return (intent.requirements == self.model and spec.image == self.image
                 and spec.gpu_id == self.gpu_id and spec.data_center_id == self.region
                 and spec.min_cuda_version == self.min_cuda and spec.disk_gb == self.disk_gb
+                and spec.min_ram_per_gpu_gb == getattr(self, "min_ram_per_gpu_gb", None)
                 and spec.registry_id is None and spec.max_hourly_usd <= self.hourly_ceiling_usd
                 and intent.startup_timeout_seconds + 60 < intent.lease_seconds
                 and intent.lease_seconds <= self.lifetime_seconds)
@@ -195,6 +196,7 @@ class ConditioningBudgetApproval(BudgetApproval):
         if not isinstance(region, str) or region not in profile.REGIONS:
             raise CloudBudgetError("M4 approval must bind one reviewed data center")
         expected = {"image": profile.IMAGE, "gpu_id": profile.GPU_ID, "region": region,
+                    "min_ram_per_gpu_gb": profile.MIN_RAM_PER_GPU_GB,
                     "journal_directory": directory,
                     "region_fallback": False,
                     "min_cuda": "12.8", "aggregate_usd": 1, "max_attempts": 1,
@@ -233,6 +235,11 @@ class ConditioningBudgetApproval(BudgetApproval):
         return cls(approval.subject_sha256, approval.subject_sha256, profile.model(),
                    profile.IMAGE, profile.GPU_ID, region, "12.8", 1, 1, 1, 1800, 1.25, 80,
                    approval)
+
+    @property
+    def min_ram_per_gpu_gb(self) -> int:
+        from cineforge import conditioning_profile as profile
+        return profile.MIN_RAM_PER_GPU_GB
 
     @property
     def journal_directory(self) -> str:

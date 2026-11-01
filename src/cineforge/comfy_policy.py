@@ -13,9 +13,15 @@ from cineforge.comfy import SUPPORTED_SERVER_REVISION
 from cineforge.contracts import Shot
 from cineforge.devices import Backend, GPUDevice, ModelSpec, Precision, select_device
 from cineforge.private_store import read_private_input
-from cineforge.providers import ExecutionRequest
+from cineforge.providers import ExecutionRequest, ProviderError
 from cineforge.selection import require_selection_approval
-from cineforge.workflows import InputBinding, WorkflowTemplate, canonical, strict_object
+from cineforge.workflows import (
+    InputBinding,
+    WorkflowTemplate,
+    canonical,
+    strict_object,
+    workflow_links,
+)
 
 CORE_CLASSES = frozenset({
     "CLIPLoader", "CLIPTextEncode", "EmptyHunyuanLatentVideo", "KSampler",
@@ -125,31 +131,10 @@ class ApprovedComfySelection:
 
     @staticmethod
     def _links(graph: dict[str, Any]) -> None:
-        edges: dict[str, list[str]] = {}
-        for identity, node in graph.items():
-            if not isinstance(identity, str) or not identity or not isinstance(node["inputs"], dict):
-                raise ComfyPolicyError("malformed workflow node")
-            edges[identity] = []
-            for value in node["inputs"].values():
-                if isinstance(value, list):
-                    if (len(value) != 2 or not isinstance(value[0], str) or value[0] not in graph
-                            or type(value[1]) is not int or value[1] < 0):
-                        raise ComfyPolicyError("unknown workflow input reference")
-                    edges[identity].append(value[0])
-                elif isinstance(value, dict):
-                    raise ComfyPolicyError("nested workflow input object is not supported")
-        visited: set[str] = set()
-
-        def visit(identity: str, active: set[str]) -> None:
-            if identity in active:
-                raise ComfyPolicyError("cyclic workflow")
-            if identity not in visited:
-                for dependency in edges[identity]:
-                    visit(dependency, active | {identity})
-                visited.add(identity)
-
-        for identity in edges:
-            visit(identity, set())
+        try:
+            workflow_links(graph)
+        except ProviderError:
+            raise ComfyPolicyError("invalid workflow links") from None
 
     @property
     def declarations(self) -> dict[str, Any]:

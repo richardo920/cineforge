@@ -85,8 +85,9 @@ def _require_spec(spec: RunpodPodSpec, region: str) -> None:
     if region not in profile.REGIONS:
         raise ConditioningError("M4 requires one explicitly approved data center")
     if ((spec.image, spec.gpu_id, spec.data_center_id, spec.disk_gb,
-         spec.min_cuda_version, spec.max_hourly_usd, spec.registry_id) !=
-            (profile.IMAGE, profile.GPU_ID, region, 80, "12.8", 1.25, None)):
+         spec.min_cuda_version, spec.max_hourly_usd, spec.registry_id, spec.min_ram_per_gpu_gb) !=
+            (profile.IMAGE, profile.GPU_ID, region, 80, "12.8", 1.25, None,
+             profile.MIN_RAM_PER_GPU_GB)):
         raise ConditioningError("worker spec differs from the closed M4 scope")
 
 

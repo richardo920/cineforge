@@ -86,7 +86,8 @@
       "Keep1280x704/20steps/CFG5/uni_pc/simple/shift8; shorten121 to49frames.",
       "Use existing SaveWEBM vp9/CRF32 at24fps, adapted from MIT template output nodes.",
       "Exact private reference, character/skill/rights snapshots, prompts/seeds and journal directory bind the separate approval subject."
-    ]
+    ],
+    "reference_gate_policy": "All submitted core image-loader or non-null image-reference paths require the checked adapter, regardless of omitted character metadata or sampler/model names. Ungated image utility graphs are unsupported; reference-free T2V remains valid."
   },
   "hardware": {
     "gpu": "NVIDIA GeForce RTX 5090",
@@ -96,7 +97,8 @@
       "minimum_available_ram_bytes": 34359738368,
       "minimum_filesystem_free_bytes": 32212254720,
       "note": "Conservative pre-download planning allowances, not measured model minima; 64GB is decimal, available RAM/disk thresholds use GiB; no swap counted."
-    }
+    },
+    "min_ram_per_gpu_gb": 64
   },
   "state": "proposed_not_approved",
   "scope": {
@@ -111,7 +113,8 @@
       "EU-CZ-1",
       "EU-RO-1"
     ],
-    "region_fallback": false
+    "region_fallback": false,
+    "min_ram_per_gpu_gb": 64
   },
   "readiness": {
     "owner_receipt": "pending",

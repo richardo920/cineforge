@@ -13,6 +13,7 @@ MODEL_ID = "Wan-AI/Wan2.2-TI2V-5B"
 GPU_ID = "NVIDIA GeForce RTX 5090"
 REGION = "EU-RO-1"
 REGIONS = frozenset({"EU-RO-1", "EU-CZ-1"})
+MIN_RAM_PER_GPU_GB = 64  # RESTv2 placement filter in GB, not a measured RAM/VRAM quantity.
 # Conservative admission allowance, not a measured minimum for the model.
 MEMORY_MIB = 30 * 1024
 DURATION = 49 / 24
@@ -114,4 +115,5 @@ def declarations(reference_sha256: str) -> dict[str, Any]:
                 "output_node": "47", "output_kind": "images", "output_index": 0,
                 "artifact_license": "LicenseRef-Generated-Unreviewed",
                 "media_type": "video/webm", "duration_seconds": DURATION},
-            "hardware": {"gpu": GPU_ID, "vram_gib": 32, "resource_policy": dict(RESOURCE_POLICY)}}
+            "hardware": {"gpu": GPU_ID, "vram_gib": 32, "min_ram_per_gpu_gb": MIN_RAM_PER_GPU_GB,
+                         "resource_policy": dict(RESOURCE_POLICY)}}

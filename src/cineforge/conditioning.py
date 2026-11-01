@@ -226,6 +226,7 @@ class VerifiedConditioning:
                 "proposed_operations": ["download_exact_model_files", "stage_exact_reference",
                     "acquire_one_guarded_pod", "generate_three_private_shots"],
                 "cloud": {"image": profile.IMAGE, "gpu_id": profile.GPU_ID,
+                    "min_ram_per_gpu_gb": profile.MIN_RAM_PER_GPU_GB,
                     "journal_directory": self.journal_directory,
                     "region": self.region, "region_fallback": False,
                     "min_cuda": "12.8", "aggregate_usd": 1,

@@ -59,7 +59,7 @@ from cineforge.devices import Backend, GPUDevice, Precision
 from cineforge.providers import ExecutionRequest, ProviderError
 from cineforge.rights import EvidenceRef, RightsLedger, RightsRecord, RightsRef, SubjectRef, Use
 from cineforge.rights import with_review as review_rights
-from cineforge.runpod import WorkerObservation
+from cineforge.runpod import AcquisitionIntent, RunpodPodProvisioner, WorkerObservation
 from cineforge.skills import (
     CatalogEntry,
     Compatibility,
@@ -71,7 +71,7 @@ from cineforge.skills import (
 )
 from cineforge.ssh_worker import SSHWorker, WorkerError
 from cineforge.worker_guard import GuardReceipt, worker_guard_source_sha256
-from cineforge.workflows import canonical
+from cineforge.workflows import InputBinding, WorkflowTemplate, canonical
 
 EVIDENCE = EvidenceRef("private://synthetic/review", "f"*64)
 
@@ -201,6 +201,13 @@ class Worker:
             raise ConditioningError("synthetic lease expired")
 
     def probe(self, snapshot, timeout):
+        if self.mode == "insufficient_ram":
+            # Model a guard-started ARM whose resource probe fails before returning a
+            # usable-worker receipt. The known create identity must still be releasable.
+            self.events.append("remote_guard_started")
+            memory = bootstrap.memory_accounting(512*1024**3, 128*1024**3,
+                [{"limit_bytes": 32_000_000_000, "usage_bytes": 1_000_000_000}], "v2")
+            bootstrap.validate_m4_runtime(dict(runtime_fixture(), **memory))
         self.budget.arm_guard(snapshot.key, GuardReceipt(self.budget.guard_plan(snapshot.key),
             worker_guard_source_sha256(), 123, time.time(), True, True))
         self.identity = snapshot.resource_id
@@ -249,6 +256,83 @@ class Fixture(unittest.TestCase):
 
 
 class AdmissionTests(Fixture):
+    def bare_workflow(self, graph, model, *, rename=False):
+        names = {key: "renamed-"+key if rename else key for key in graph}
+        copied = copy.deepcopy(graph)
+        for node in copied.values():
+            for key, value in node["inputs"].items():
+                if isinstance(value, list):
+                    node["inputs"][key] = [names[value[0]], value[1]]
+        copied = {names[key]: node for key, node in copied.items()}
+        workflow = WorkflowTemplate(canonical(copied).decode(), model.model_id, model.revision,
+            frozenset(node["class_type"] for node in copied.values()), InputBinding(names["6"], "text"),
+            InputBinding(names["3"], "seed"), names["47"], "images",
+            "LicenseRef-Generated-Unreviewed", duration_seconds=profile.DURATION)
+        shot = replace(self.gate.requests[0], model_id=model.model_id, model_revision=model.revision,
+                       character_revision=None, workflow_digest=workflow.digest)
+        return workflow, ExecutionRequest(shot, model)
+
+    def assert_bare_reference_blocked(self, graph, model, *, rename=False):
+        workflow, request = self.bare_workflow(graph, model, rename=rename)
+        wire = Mock()
+        wire.request.return_value = canonical({"prompt_id": "11111111-1111-4111-8111-111111111111",
+                                              "node_errors": {}})
+        with self.assertRaises((ProviderError, ConditioningError)):
+            ComfyExecutionProvider(wire, workflow).submit(request, "bare-reference")
+        wire.request.assert_not_called()
+
+    def test_bare_i2v_graph_requires_gate_without_character_or_model_metadata(self):
+        for model in (profile.model(), replace(profile.model(), model_id="independent/synthetic-i2v",
+                                               task="text-to-video")):
+            for rename in (False, True):
+                with self.subTest(model=model.model_id, renamed=rename):
+                    self.assert_bare_reference_blocked(self.gate.graph, model, rename=rename)
+
+    def test_image_ancestry_through_advanced_custom_and_unknown_samplers_requires_gate(self):
+        for kind in ("KSampler", "KSamplerAdvanced", "SamplerCustom", "SamplerCustomAdvanced",
+                     "UnknownCallerReviewedSampler"):
+            graph = self.gate.graph
+            del graph["55"]
+            graph["encode"] = {"class_type": "VAEEncode", "inputs": {
+                "pixels": ["56", 0], "vae": ["39", 0]}}
+            graph["3"]["class_type"] = kind
+            graph["3"]["inputs"]["latent_image"] = ["encode", 0]
+            with self.subTest(sampler=kind):
+                self.assert_bare_reference_blocked(graph, replace(profile.model(),
+                    model_id="independent/reference-path", task="text-to-video"), rename=True)
+
+    def test_reference_free_hybrid_t2v_still_works_without_reference_gate(self):
+        graph = self.gate.graph
+        del graph["56"]
+        del graph["55"]["inputs"]["start_image"]
+        for explicit_none in (False, True):
+            if explicit_none:
+                graph["55"]["inputs"]["start_image"] = None
+            workflow, request = self.bare_workflow(graph, replace(profile.model(), task="text-to-video"))
+            wire = Mock()
+            wire.request.return_value = canonical({"prompt_id": "11111111-1111-4111-8111-111111111111",
+                                                  "node_errors": {}})
+            ComfyExecutionProvider(wire, workflow).submit(request, "reference-free")
+            self.assertEqual(wire.request.call_args.args[:2], ("POST", "/prompt"))
+
+    def test_reference_inputs_without_loader_and_extra_image_outputs_require_gate(self):
+        graph = self.gate.graph
+        graph["56"] = {"class_type": "EmptyImage", "inputs": {"width": 1280, "height": 704}}
+        self.assert_bare_reference_blocked(graph, replace(profile.model(),
+            model_id="independent/generated-reference", task="text-to-video"), rename=True)
+        for loader in ("LoadImage", "LoadImageMask", "LoadImageOutput"):
+            graph = self.gate.graph
+            del graph["56"]
+            del graph["55"]["inputs"]["start_image"]
+            graph["extra-image"] = {"class_type": loader, "inputs": {"image": "unapproved.png"}}
+            graph["extra-output"] = {"class_type": "SaveImage", "inputs": {
+                "images": ["extra-image", 0], "filename_prefix": "extra"}}
+            # Comfy may execute output nodes beyond the selected result node47. Utility
+            # image-loader graphs are not supported as an ungated alternative either.
+            with self.subTest(loader=loader):
+                self.assert_bare_reference_blocked(graph, replace(profile.model(),
+                    model_id="independent/image-utility", task="text-to-video"), rename=True)
+
     def test_public_proposal_contains_only_exact_unapproved_model_profile(self):
         root = Path(__file__).resolve().parents[1]
         proposal = json.loads((root / "config/comfy/wan22-ti2v5b-proposal.json").read_text())
@@ -427,7 +511,8 @@ class ManagedTests(Fixture):
     def run_case(self, name="run", mode="success", **options):
         chosen = selected(self.gate)
         spec = replace(legacy_spec(), image=profile.IMAGE, gpu_id=profile.GPU_ID,
-                       data_center_id=profile.REGION, max_hourly_usd=1.25)
+                       data_center_id=profile.REGION, max_hourly_usd=1.25,
+                       min_ram_per_gpu_gb=profile.MIN_RAM_PER_GPU_GB)
         cloud = options.pop("cloud", Cloud(Clock()))
         cloud.catalog.update(id=profile.GPU_ID, price=dict(secure=1.19), memory=32,
                              dataCenters=[dict(id=profile.REGION, availability="LOW")])
@@ -456,6 +541,61 @@ class ManagedTests(Fixture):
         self.assertIsNone(report["costs"]["actual_total_usd"])
         self.assertEqual(len({s["translated_graph_sha256"] for s in report["shots"]}), 3)
 
+    def test_m4_native_create_requests_the_approved_ram_placement_filter(self):
+        self.run_case()
+        body = next(body for method, _path, body in self.cloud.calls if method == "POST")
+        self.assertEqual(body["gpu"]["minRamPerGpu"], 64)
+        self.assertEqual(selected(self.gate).gate.subject["cloud"]["min_ram_per_gpu_gb"], 64)
+
+    def test_legacy_unset_ram_preserves_spec_digest_intent_and_entire_native_body(self):
+        spec = legacy_spec()
+        names = ("session_id", "image", "gpu_id", "data_center_id", "ssh_public_key",
+                 "max_hourly_usd", "disk_gb", "min_cuda_version", "registry_id")
+        expected = {name: getattr(spec, name) for name in names}
+        self.assertIsNone(spec.min_ram_per_gpu_gb)
+        self.assertEqual(spec.to_dict(), expected)
+        self.assertEqual(spec.digest, hashlib.sha256(canonical(expected)).hexdigest())
+        intent = AcquisitionIntent("legacy-proof", spec, "a"*32, "legacy-proof",
+                                   legacy_selection().model, 1, 1800, 240, 30)
+        provider = RunpodPodProvisioner(spec, Mock(), probe=Mock(), before_create=Mock(),
+                                       event_sink=Mock())
+        self.assertEqual(provider._body(intent), {
+            "name": intent.name, "image": spec.image, "disk": spec.disk_gb, "cloud": "SECURE",
+            "dataCenterIds": [spec.data_center_id],
+            "gpu": {"id": spec.gpu_id, "count": 1, "minCudaVersion": spec.min_cuda_version},
+            "env": {"PUBLIC_KEY": spec.ssh_public_key, "CINEFORGE_SESSION": spec.session_id,
+                    "CINEFORGE_LEASE": intent.owner_token}, "ports": ["22/tcp"], "mounts": {},
+            "startSsh": True, "startJupyter": False, "globalNetworking": False,
+            "registry": spec.registry_id})
+        self.assertEqual(AcquisitionIntent.from_dict(intent.to_dict()).to_dict(), intent.to_dict())
+        self.assertTrue(legacy_budget().admits(intent))
+        self.assertFalse(legacy_budget().admits(replace(intent, spec=replace(spec, min_ram_per_gpu_gb=64))))
+
+    def test_m4_ram_constraint_is_exact_and_bound_before_network_or_staging(self):
+        chosen = selected(self.gate)
+        budget = ConditioningBudgetApproval.for_selection(chosen)
+        spec = replace(legacy_spec(), image=profile.IMAGE, gpu_id=profile.GPU_ID,
+            data_center_id=profile.REGION, max_hourly_usd=1.25, min_ram_per_gpu_gb=64)
+        intent = AcquisitionIntent("m4-proof", spec, "a"*32, "m4-proof", profile.model(),
+                                   .64, 1800, 240, 30)
+        self.assertTrue(budget.admits(intent))
+        for value in (None, 32, 128):
+            changed = replace(spec, min_ram_per_gpu_gb=value)
+            self.assertFalse(budget.admits(replace(intent, spec=changed)))
+            transport, factory = Mock(), Mock()
+            with self.assertRaises(ConditioningError):
+                run_conditioned(chosen, changed, transport, self.root / "budget",
+                    self.root / "no-output", factory, allow_live=True)
+            transport.request.assert_not_called()
+            factory.assert_not_called()
+        subject = copy.deepcopy(self.gate.subject)
+        del subject["cloud"]["min_ram_per_gpu_gb"]
+        record = json.loads(chosen.approval.record_json)
+        record["subject_sha256"] = digest(subject)
+        assertion = ConditioningApproval(canonical(record).decode(), canonical(subject).decode())
+        with self.assertRaises(CloudBudgetError):
+            ConditioningBudgetApproval.for_approval(assertion)
+
     def test_no_optin_or_revoked_context_never_touches_cloud(self):
         with self.assertRaises(ConditioningError):
             self.run_case(allow_live=False)
@@ -477,6 +617,29 @@ class ManagedTests(Fixture):
             self.run_case(mode="stale_worker")
         self.assertNotIn("staged", self.workers[0].events)
         self.assertFalse(self.cloud.pods)
+
+    def test_ram_placement_does_not_turn_incompatible_owned_worker_into_foreign_resource(self):
+        with self.assertRaises(ConditioningError):
+            self.run_case(mode="insufficient_ram")
+        body = next(body for method, _path, body in self.cloud.calls if method == "POST")
+        self.assertEqual(body["gpu"]["minRamPerGpu"], 64)
+        self.assertEqual(self.workers[0].events, ["remote_guard_started", "closed"])
+        self.assertNotIn("prepared", self.workers[0].events)  # No weight setup/downloads.
+        self.assertFalse(self.cloud.pods)
+        self.assertEqual(sum(c[0] == "DELETE" for c in self.cloud.calls), 1)
+        report = json.loads((self.root / "run/run.json").read_bytes())
+        self.assertTrue(report["release_verified"])
+        self.assertEqual(report["costs"]["attempts"], 1)
+
+    def test_missing_provider_ram_telemetry_does_not_block_owned_cleanup(self):
+        cloud = Cloud(Clock())
+        def missing_telemetry(pod):
+            pod["gpu"].pop("memory", None)
+            return pod
+        cloud.get_change = missing_telemetry
+        report = self.run_case(cloud=cloud)
+        self.assertTrue(report["release_verified"])
+        self.assertFalse(cloud.pods)
 
     def test_revocation_between_outputs_blocks_later_submissions_and_cleans_up(self):
         def execute(*args, **kwargs):

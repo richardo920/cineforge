@@ -56,7 +56,8 @@ def command(args: Any) -> dict[str, Any]:
     selection = selection_from_approval(gate, strict_object(approval.record_json))
     # Only after exact context/receipt admission may externally supplied credentials be used.
     spec = RunpodPodSpec(args.session_id, profile.IMAGE, profile.GPU_ID, gate.region,
-        ssh_public_key(Path(args.ssh_private_key).expanduser()), max_hourly_usd=1.25)
+        ssh_public_key(Path(args.ssh_private_key).expanduser()), max_hourly_usd=1.25,
+        min_ram_per_gpu_gb=profile.MIN_RAM_PER_GPU_GB)
     transport = RunpodHTTPTransport(external_api_key(args.api_key_file), allow_live=True)
     report = run_conditioned(selection, spec, transport, args.budget_dir, args.output_dir,
         lambda budget, state: SSHWorker(spec, selection, budget, transport,
