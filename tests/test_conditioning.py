@@ -688,6 +688,51 @@ class ManagedTests(Fixture):
             with CloudBudgetSession(self.root / "old-budget", budget, cloud):
                 pass
 
+    def test_reviewed_region_variants_bind_one_native_target_and_one_shared_journal(self):
+        regions = {"EU-RO-1", "EU-CZ-1", "EUR-NO-1"}
+        self.assertEqual(profile.REGIONS, regions)
+        self.assertEqual(profile.REGION, "EUR-NO-1")
+        cloud = Cloud(Clock())
+        gates = {region: replace(self.gate, region=region) for region in regions}
+        selections = {region: selected(gate) for region, gate in gates.items()}
+        budgets = {region: ConditioningBudgetApproval.for_selection(selection)
+                   for region, selection in selections.items()}
+        self.assertEqual(len({budget.subject_sha256 for budget in budgets.values()}), 3)
+        for region in regions:
+            with self.subTest(region=region):
+                spec = replace(legacy_spec(), image=profile.IMAGE, gpu_id=profile.GPU_ID,
+                    data_center_id=region, max_hourly_usd=1.25, min_ram_per_gpu_gb=64)
+                intent = AcquisitionIntent("region-proof", spec, "a"*32, "region-proof",
+                                           profile.model(), .64, 1800, 240, 30)
+                provider = RunpodPodProvisioner(spec, cloud, probe=Mock(), before_create=Mock(),
+                                               event_sink=Mock())
+                body = provider._body(intent)
+                self.assertEqual(body["dataCenterIds"], [region])
+                self.assertEqual(body["gpu"]["minRamPerGpu"], 64)
+                self.assertFalse(gates[region].subject["cloud"]["region_fallback"])
+                self.assertTrue(budgets[region].admits(intent))
+                for other in regions - {region}:
+                    self.assertFalse(budgets[other].admits(intent))
+                    with self.assertRaises(ConditioningError):
+                        selection_from_approval(gates[other],
+                                                json.loads(selections[region].approval.record_json))
+        # Preparing all private variants does not initialize state. Selecting one
+        # locks the shared journal; another region cannot refund/retry that scope.
+        prepare_journal(gates["EUR-NO-1"])
+        path = self.root / "budget/budget.json"
+        before = path.read_bytes()
+        self.assertEqual(json.loads(before)["records"], {})
+        for region in regions - {"EUR-NO-1"}:
+            with self.assertRaises(ConditioningError):
+                prepare_journal(gates[region])
+            with self.assertRaises(CloudBudgetError):
+                with CloudBudgetSession(self.gate.journal_directory, budgets[region], cloud):
+                    self.fail("cross-region shared journal resumed")
+            self.assertEqual(path.read_bytes(), before)
+        with CloudBudgetSession(self.gate.journal_directory, budgets["EUR-NO-1"], cloud):
+            pass
+        self.assertEqual(cloud.calls, [])
+
     def test_unknown_create_retained_recovery_without_reference_bytes(self):
         cloud = Cloud(Clock())
         cloud.create_lost = True

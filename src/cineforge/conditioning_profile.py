@@ -11,8 +11,8 @@ from cineforge.workflows import canonical
 PROFILE_ID = "m4-wan22-ti2v5b-5090-v1"
 MODEL_ID = "Wan-AI/Wan2.2-TI2V-5B"
 GPU_ID = "NVIDIA GeForce RTX 5090"
-REGION = "EU-RO-1"
-REGIONS = frozenset({"EU-RO-1", "EU-CZ-1"})
+REGION = "EUR-NO-1"
+REGIONS = frozenset({"EU-RO-1", "EU-CZ-1", "EUR-NO-1"})
 MIN_RAM_PER_GPU_GB = 64  # RESTv2 placement filter in GB, not a measured RAM/VRAM quantity.
 # Conservative admission allowance, not a measured minimum for the model.
 MEMORY_MIB = 30 * 1024
