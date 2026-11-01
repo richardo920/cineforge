@@ -120,7 +120,7 @@ class RunpodTransportTests(unittest.TestCase):
 
     def test_path_method_payload_and_bound_validation_happens_before_dns(self):
         transport = RunpodHTTPTransport("fixture-value", allow_live=True)
-        requests = [("GET", "https://user:secret@other", None),
+        requests = [("GET", "https://user:secret@other", None),  # pragma: allowlist secret - invalid synthetic credential fixture
                     ("GET", "//other/v2/pods", None), ("GET", "/v2/pods/../account", None),
                     ("GET", "/v2/pods?api_key=private", None),
                     ("GET", "/v2/pods?limit=1001", None),
