@@ -260,13 +260,15 @@ class ShotTiming(_AudioContract):
 
 @dataclass(frozen=True, slots=True)
 class Cue(_AudioContract):
+    """Non-dialogue cues may use shot_id=None for explicit scene scope."""
+
     _objects: ClassVar[dict[str, type[Contract]]] = {"source": RightsBinding}
 
     cue_id: str
     stem_id: str
     kind: str
     scene_id: str
-    shot_id: str
+    shot_id: str | None
     start_ticks: int
     duration_ticks: int
     source: RightsBinding
@@ -274,8 +276,10 @@ class Cue(_AudioContract):
 
     def __post_init__(self) -> None:
         _AudioContract.__post_init__(self)
-        for value in (self.cue_id, self.stem_id, self.scene_id, self.shot_id):
+        for value in (self.cue_id, self.stem_id, self.scene_id):
             _identifier(value, "cue reference ID")
+        if self.shot_id is not None:
+            _identifier(self.shot_id, "cue shot ID")
         _member(self.kind, _KINDS, "cue kind")
         _interval(self.start_ticks, self.duration_ticks)
         _instance(self.source, RightsBinding, "cue source")
@@ -284,6 +288,7 @@ class Cue(_AudioContract):
         if self.source.subject.kind != expected:
             raise AudioError("cue source has incompatible subject kind")
         if self.kind == "dialogue":
+            _identifier(self.shot_id, "dialogue shot ID")
             _identifier(self.utterance_id, "dialogue utterance ID")
         elif self.utterance_id is not None:
             raise AudioError("only dialogue cues reference utterances")
@@ -336,9 +341,14 @@ class CueSheet(_AudioContract):
         timed_items: tuple[Utterance | Cue, ...] = (*self.script.utterances, *self.cues)
         for item in timed_items:
             self.timebase.check_interval(item.start_ticks, item.duration_ticks)
+            if item.scene_id != self.scene_id:
+                raise AudioError("unknown scene reference")
+            if item.shot_id is None:
+                # Utterance and dialogue Cue constructors require a real shot ID.
+                continue
             span = shots.get(item.shot_id)
-            if item.scene_id != self.scene_id or span is None:
-                raise AudioError("missing or unknown scene/shot reference")
+            if span is None:
+                raise AudioError("missing or unknown shot reference")
             if (item.start_ticks < span.start_ticks or item.start_ticks + item.duration_ticks
                     > span.start_ticks + span.duration_ticks):
                 raise AudioError("cue or utterance exceeds shot bounds")

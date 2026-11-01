@@ -6,6 +6,8 @@ Keep dialogue, ambience, Foley/effects, and music as separate stems with start/d
 
 Voice permission subjects match the logical voice ID and `vN` revision. `AudioTimebase.ticks_for_seconds()` bridges legacy shot seconds within one float ULP and strictly less than half a tick; all cue/end bounds remain exact integers (`49/24` seconds at `48000` ticks/second → `98000` ticks).
 
+Non-dialogue cues use explicit `shot_id: null` for scene scope and may cross real shot boundaries; dialogue remains shot-bound. The M5 baseline keeps one declared voice per speaker across English/Mandarin; per-language voice references remain unimplemented.
+
 M5 takes short approved script/台词 lines with text revision, language, speaker/character/voice identity, emotion/delivery, pronunciation and timing; English and Mandarin are the minimum. Full brief-to-screenplay planning remains M6; code-switching and multi-person scenes are outside the M5 baseline.
 
 Keep speech synthesis, lip-sync/talking-video generation, soundtrack mixing and audio/visual evaluation separate. Generate approved speech first, then drive talking video or post-process lip sync; bind both media revisions to the shared timeline, and invalidate affected audio/video, sync checks and approvals when script, speech, character or picture changes.

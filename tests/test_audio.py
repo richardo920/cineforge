@@ -161,6 +161,45 @@ class AudioTests(unittest.TestCase):
         self.assertTrue(result.allowed)
         self.assertEqual(result.reasons, ())
 
+    def test_scene_cues_cross_two_real_shots_without_a_fake_shot(self) -> None:
+        sound = sheet()
+        # Each real shot is half the scene; both bilingual lines remain shot-bound.
+        script = replace(sound.script, utterances=(sound.script.utterances[0],
+            replace(sound.script.utterances[1], shot_id="shot-2")))
+        cues = tuple(replace(cue, shot_id=None) if cue.kind in {"ambience", "music"}
+                     else replace(cue, shot_id="shot-2") if cue.utterance_id == "line-zh"
+                     else cue for cue in sound.cues)
+        sound = replace(sound, script=script,
+                        shots=(ShotTiming("shot", 1, 0, 2500),
+                               ShotTiming("shot-2", 1, 2500, 2500)), cues=cues)
+        plan, registry, ledger = context(sound)
+        first = replace(plan.shots[0], duration_seconds=2.5)
+        plan = replace(plan, shots=(first, replace(first, shot_id="shot-2")))
+        self.assertEqual(len(plan.shots), 2)
+        self.assertTrue(sound.preflight(plan, registry, ledger,
+                                        current_picture=sound.picture).allowed)
+        restored = CueSheet.from_json(sound.to_json())
+        self.assertEqual(restored, sound)
+        self.assertEqual(restored.digest(), sound.digest())
+        for cue in restored.cues[:2]:
+            self.assertIsNone(cue.shot_id)
+            self.assertEqual(cue.start_ticks + cue.duration_ticks, sound.timebase.duration_ticks)
+        for fields in ({"scene_id": "missing"}, {"shot_id": "missing"}, {"shot_id": "shot"},
+                       {"start_ticks": 1}, {"duration_ticks": 5001}):
+            with self.assertRaises(ContractError):
+                replace(sound, cues=(replace(sound.cues[0], **fields), *sound.cues[1:]))
+        with self.assertRaises(ContractError):
+            replace(sound.cues[2], shot_id=None)
+        with self.assertRaises(ContractError):
+            replace(sound.script.utterances[0], shot_id=None)
+        with self.assertRaises(AudioError):
+            Cue.from_dict({key: value for key, value in sound.cues[0].to_dict().items()
+                           if key != "shot_id"})
+        other = ProjectPlan(plan.project, (Scene("other", "project", 1),),
+                            tuple(replace(shot, scene_id="other") for shot in plan.shots))
+        self.assertIn("unknown_project_or_scene", sound.preflight(
+            other, registry, ledger, current_picture=sound.picture).reasons)
+
     def test_invalid_timing_bool_floats_nonfinite_bounds_and_overflow(self) -> None:
         sound = sheet()
         for invalid in (True, False, -1, 1.0, float("nan"), float("inf"), -float("inf"),
