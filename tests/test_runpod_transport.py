@@ -5,7 +5,7 @@ import threading
 import time
 import traceback
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from cineforge.runpod_transport import CloudTransportError, RunpodHTTPTransport, _open_connection
 
@@ -81,6 +81,46 @@ class RunpodTransportTests(unittest.TestCase):
                 transport.request("GET", "/v2/pods", timeout_seconds=1, max_bytes=100)
         self.assertIsNone(cm.exception.__context__)
         self.assertNotIn("fixture-sensitive", "".join(traceback.format_exception(cm.exception)))
+
+    def test_close_failure_does_not_erase_complete_create_identity(self):
+        fake = FakeConnection(FakeResponse(b'{"id":"pod_fixture"}'))
+        fake.response.status = 201
+        fake.close = Mock(side_effect=RuntimeError("Bearer fixture-sensitive-value"))
+        with patch("cineforge.runpod_transport._open_connection", return_value=fake):
+            response = RunpodHTTPTransport("fixture-value", allow_live=True).request(
+                "POST", "/v2/pods", {"name": "fixture"}, timeout_seconds=1, max_bytes=100)
+        self.assertEqual(response.status, 201)
+        self.assertEqual(response.body, b'{"id":"pod_fixture"}')
+        fake.close.assert_called_once()
+
+    def test_close_failure_cannot_replace_or_chain_a_sanitized_request_error(self):
+        fake = FakeConnection()
+        fake.getresponse = Mock(side_effect=OSError("private request diagnostic"))
+        fake.close = Mock(side_effect=RuntimeError("Bearer fixture-sensitive-value"))
+        with patch("cineforge.runpod_transport._open_connection", return_value=fake):
+            with self.assertRaises(CloudTransportError) as cm:
+                RunpodHTTPTransport("fixture-value", allow_live=True).request(
+                    "GET", "/v2/pods", timeout_seconds=1, max_bytes=100)
+        self.assertIsNone(cm.exception.__cause__)
+        self.assertIsNone(cm.exception.__context__)
+        rendered = "".join(traceback.format_exception(cm.exception))
+        self.assertNotIn("fixture-sensitive", rendered)
+        self.assertNotIn("private request diagnostic", rendered)
+
+    def test_raw_socket_finally_failure_does_not_mask_the_verified_tls_socket(self):
+        raw, secured = Mock(), Mock()
+        raw.close.side_effect = RuntimeError("Bearer fixture-sensitive-value")
+        context = Mock()
+        context.wrap_socket.return_value = secured
+        addresses = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 443))]
+        with patch("cineforge.runpod_transport.socket.getaddrinfo", return_value=addresses), \
+                patch("cineforge.runpod_transport.socket.socket", return_value=raw), \
+                patch("cineforge.runpod_transport.ssl.create_default_context", return_value=context):
+            connection = _open_connection(time.monotonic() + 1)
+        self.assertIs(connection.sock, secured)
+        context.wrap_socket.assert_called_once_with(raw, server_hostname="api.runpod.io")
+        raw.close.assert_called_once()
+        connection.close()
 
     def test_no_redirect_following_or_provider_body_in_exception(self):
         fake = FakeConnection(FakeResponse(b'private provider diagnostic'))

@@ -105,7 +105,10 @@ def _open_connection(deadline: float) -> http.client.HTTPSConnection:
         except (OSError, ssl.SSLError):
             pass
         finally:
-            raw.close()
+            try:
+                raw.close()
+            except (Exception, KeyboardInterrupt):
+                pass
     raise CloudTransportError("cloud TLS connection failed or exceeded deadline")
 
 
@@ -184,7 +187,12 @@ class RunpodHTTPTransport:
             if timer is not None:
                 timer.cancel()
             if connection is not None:
-                connection.close()
+                try:
+                    connection.close()
+                except (Exception, KeyboardInterrupt):
+                    # Local socket cleanup cannot erase a complete create response's
+                    # known identity, or leak diagnostics while masking a prior error.
+                    pass
         # Raise outside the handler: arbitrary socket/HTTP errors cannot survive in
         # traceback context or expose a key, response body or provider diagnostic.
         if failed or answer is None:
