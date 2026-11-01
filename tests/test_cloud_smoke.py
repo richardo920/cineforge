@@ -100,7 +100,8 @@ class Worker:
 
     def suspend_remote_heartbeat(self):
         if self.mode != "guard_denied":
-            self.cloud.pods[self.identity].update(status="EXITED", runtime=None)
+            self.cloud.pods[self.identity].update(status="EXITED",
+                runtime={} if self.mode == "retained_runtime" else None)
         return self.budget.guard_plan(self.budget.snapshots[-1].key)
 
 
@@ -217,6 +218,20 @@ class ManagedSmokeTests(unittest.TestCase):
         self.assertTrue(report["release_verified"])
         self.assertFalse(report["guard_stop_verified"])
         self.assertEqual(report["guard_observation"]["observed_status"], "RUNNING")
+        self.assertFalse(self.cloud.pods)
+        self.assertEqual(sum(c[0] == "POST" for c in self.cloud.calls), 1)
+        self.assertEqual(sum(c[0] == "DELETE" for c in self.cloud.calls), 1)
+
+    def test_exited_with_retained_runtime_matches_actual_observation_shape_and_still_deletes(self):
+        # Actual M3 case2 observed EXITED/runtime-present then404. IDs and the opaque
+        # runtime object here are synthetic; this regression is not another live run.
+        result = self.run_smoke(mode="retained_runtime", case="post-acquire-failure")
+        self.assertTrue(result["guard_stop_verified"])
+        self.assertTrue(result["release_verified"])
+        self.assertFalse(result["guard_observation"]["runtime_absent"])
+        self.assertEqual(result["guard_observation"]["stop_status_basis"],
+                         "observed_lifecycle_EXITED")
+        self.assertEqual(result["outcome"], "injected_post_acquire_failure")
         self.assertFalse(self.cloud.pods)
         self.assertEqual(sum(c[0] == "POST" for c in self.cloud.calls), 1)
         self.assertEqual(sum(c[0] == "DELETE" for c in self.cloud.calls), 1)

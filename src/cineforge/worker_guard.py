@@ -243,6 +243,11 @@ def _owned(pod: dict[str, Any], plan: WorkerGuardPlan) -> bool:
             and env.get("CINEFORGE_LEASE") == plan.lease_token and pod.get("mounts") == {})
 
 
+def pod_exited(status: object) -> bool:
+    """Observed EXITED means stopped; Runpod can retain runtime telemetry after stop."""
+    return isinstance(status, str) and status == "EXITED"
+
+
 def verify_own_pod(plan: WorkerGuardPlan, *, allow_live: bool = False) -> bool:
     """Worker-only arming preflight using its existing scoped credential; GET only."""
     if allow_live is not True:
@@ -254,7 +259,7 @@ def verify_own_pod(plan: WorkerGuardPlan, *, allow_live: bool = False) -> bool:
 
 
 def stop_own_pod(plan: WorkerGuardPlan, *, allow_live: bool = False) -> bool:
-    """GET ownership -> own-ID STOP -> GET terminal runtime. No DELETE or foreign ID."""
+    """GET ownership -> own-ID STOP -> GET terminal lifecycle. No DELETE or foreign ID."""
     if allow_live is not True:
         raise WorkerGuardError("worker shutdown needs explicit live opt-in")
     try:
@@ -262,13 +267,13 @@ def stop_own_pod(plan: WorkerGuardPlan, *, allow_live: bool = False) -> bool:
         pod = request("GET", False)
         if not _owned(pod, plan):
             return False
-        if pod.get("status") not in ("EXITED", "TERMINATED"):
+        if not pod_exited(pod.get("status")) and pod.get("status") != "TERMINATED":
             if "stop" not in pod.get("actions", []):
                 return False
             request("POST", True)
             pod = request("GET", False)
-        return (_owned(pod, plan) and pod.get("status") in ("EXITED", "TERMINATED")
-                and pod.get("runtime") is None)
+        return (_owned(pod, plan) and (pod_exited(pod.get("status"))
+                                     or pod.get("status") == "TERMINATED"))
     except (Exception, KeyboardInterrupt):
         return False
 

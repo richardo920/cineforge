@@ -2,7 +2,7 @@
 
 Private foundation for a modular AI filmmaking platform: brief → screenplay → storyboard → shots → edit → sound → review → delivery.
 
-**Status:** strict production metadata, offline mock runs, and an explicitly opted-in private ComfyUI single-shot command. [One approved RTX 4090 shot](docs/evidence/m2-live-shot.json) was generated and recovered manually after a history-number mismatch, now fixed; automated GPU provisioning remains M3.
+**Status:** strict production metadata, offline mock runs, private ComfyUI execution and managed Runpod Pod smoke with budget, shutdown and recovery controls. [M3 evidence](docs/evidence/m3-live-shot.json) records one normal video run and one controlled failure; its telemetry-classification correction was verified offline without another GPU run.
 
 ## Quick start
 
@@ -45,7 +45,7 @@ The default endpoint is a separately established `http://127.0.0.1:8188` tunnel;
 
 ## Managed cloud smoke
 
-The M3 smoke reuses the approved paper-boat shot and a verified prepared-endpoint reference; live acceptance remains pending. Supply external owned `0600` API/SSH files in private directories, `ffprobe`, and one durable budget directory for both attempts and recovery.
+The M3 smoke reuses the approved paper-boat shot and a verified prepared-endpoint reference. [Measured cases](docs/evidence/m3-live-shot.json) retain the original CLI exits: success `0`, failure test `2` despite observed `EXITED` and deletion; the observer and guard classifiers were corrected/replayed offline. Supply external owned `0600` API/SSH files in private directories, `ffprobe`, and one durable budget directory for both attempts and recovery.
 
 ```sh
 cineforge cloud-smoke --allow-live \

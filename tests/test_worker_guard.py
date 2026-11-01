@@ -13,6 +13,7 @@ from cineforge.worker_guard import (
     GuardReceipt,
     WorkerGuardError,
     WorkerGuardPlan,
+    pod_exited,
     read_heartbeat,
     run_guard,
     stop_own_pod,
@@ -194,6 +195,27 @@ class GuardTests(unittest.TestCase):
             own["env"]["CINEFORGE_LEASE"] = "1"*32
             self.assertFalse(stop_own_pod(plan(), allow_live=True))
             self.assertEqual([c[0] for c in calls], ["GET"])
+
+    def test_exited_classifier_ignores_retained_runtime_but_never_guesses_other_states(self):
+        self.assertTrue(pod_exited("EXITED"))
+        for status in ("RUNNING", "STARTING", "PROVISIONING", "ERROR", "TERMINATED", None, True, {}):
+            self.assertFalse(pod_exited(status))
+
+    def test_owned_guard_stop_accepts_exited_with_runtime_present_and_keeps_ownership(self):
+        own = dict(id="fixture-pod", env=dict(CINEFORGE_SESSION="fixture-session",
+            CINEFORGE_LEASE="0"*32), mounts={}, status="RUNNING", actions=["stop"], runtime={})
+        calls = []
+        def request(method, stop=False):
+            calls.append((method, stop))
+            return dict(own, status="EXITED" if len(calls) >= 2 else own["status"])
+        with patch("cineforge.worker_guard._worker_request", return_value=request):
+            self.assertTrue(stop_own_pod(plan(), allow_live=True))
+            self.assertEqual(calls, [("GET", False), ("POST", True), ("GET", False)])
+            calls.clear()
+            own["status"] = "EXITED"
+            own["env"]["CINEFORGE_LEASE"] = "foreign"
+            self.assertFalse(stop_own_pod(plan(), allow_live=True))
+            self.assertEqual(calls, [("GET", False)])
 
     def test_standalone_fake_guard_process_proves_no_orchestrator_dependency(self):
         code = '''import json

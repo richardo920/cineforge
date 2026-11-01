@@ -30,7 +30,7 @@ from cineforge.runpod import (
 )
 from cineforge.runpod_transport import CloudTransport, RunpodHTTPTransport
 from cineforge.ssh_worker import SSHWorker, private_file, run_process, ssh_public_key
-from cineforge.worker_guard import WorkerGuardPlan
+from cineforge.worker_guard import WorkerGuardPlan, pod_exited
 from cineforge.workflows import canonical, strict_object
 
 # Public owner receipt binds these declarations; the coordinator authenticates it separately.
@@ -224,7 +224,8 @@ def _observe_guard_stop(worker: ManagedWorker, provider: RunpodPodProvisioner,
             if pod.get("status") in {"RUNNING", "EXITED", "ERROR", "TERMINATED"} else "unknown",
             runtime_absent=pod.get("runtime") is None,
             elapsed_seconds=clock()-started)
-        if pod.get("status") == "EXITED" and pod.get("runtime") is None:
+        if pod_exited(pod.get("status")):
+            report["guard_observation"]["stop_status_basis"] = "observed_lifecycle_EXITED"
             report["guard_stop_verified"] = True
             return
         sleep(min(2, max(0, wait-(clock()-started))))
