@@ -11,7 +11,7 @@ from typing import Any, Protocol
 from cineforge import conditioning_profile as profile
 from cineforge.cloud_budget import CloudBudgetSession, ConditioningBudgetApproval
 from cineforge.cloud_journal import CloudJournal
-from cineforge.cloud_smoke import probe_media
+from cineforge.cloud_smoke import read_media
 from cineforge.comfy_policy import WorkerVerification
 from cineforge.comfy_run import execute_comfy
 from cineforge.conditioning import (
@@ -93,7 +93,7 @@ def _require_spec(spec: RunpodPodSpec, region: str) -> None:
 
 
 def technical_result(manifest: RunManifest, directory: Path,
-                     inspect_media: Callable[[Path], dict[str, Any]]) -> dict[str, Any]:
+                     inspect_media: Callable[[Path], dict[str, Any]] = read_media) -> dict[str, Any]:
     if (len(manifest.artifacts) != 1 or len(manifest.shot_runs) != 1
             or manifest.shot_runs[0].status.value != "succeeded"):
         raise ConditioningError("incomplete M4 output")
@@ -122,7 +122,7 @@ def run_conditioned(selection: ConditioningSelection, spec: RunpodPodSpec,
                     transport: CloudTransport, budget_dir: str | Path, output_dir: str | Path,
                     worker_factory: WorkerFactory, *, allow_live: bool = False,
                     execute: Callable[..., RunManifest] = execute_comfy,
-                    inspect_media: Callable[[Path], dict[str, Any]] = probe_media,
+                    inspect_media: Callable[[Path], dict[str, Any]] = read_media,
                     clock: Callable[[], float] = time.monotonic) -> dict[str, Any]:
     """Opt-in execution only. No retries; success never means human identity approval."""
     if allow_live is not True or type(selection) is not ConditioningSelection:

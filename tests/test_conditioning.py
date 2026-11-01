@@ -521,7 +521,10 @@ class ManagedTests(Fixture):
             worker = Worker(budget, chosen, spec, mode)
             self.workers.append(worker)
             return worker
-        values = dict(allow_live=True, inspect_media=technical)
+        use_default_media = options.pop("use_default_media", False)
+        values = dict(allow_live=True)
+        if not use_default_media:
+            values["inspect_media"] = technical
         values.update(options)
         if values["allow_live"]:
             prepare_journal(self.gate)  # Explicit offline proposal initialization, never a grant.
