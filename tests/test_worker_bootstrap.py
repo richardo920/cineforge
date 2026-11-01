@@ -4,6 +4,8 @@ import base64
 import hashlib
 import io
 import json
+import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -29,6 +31,36 @@ from cineforge.worker_bootstrap import (
     private_write,
     setup,
 )
+
+
+def exercise_descendant_pipe(test, root, module, function):
+    """The outer process has its own timeout; always remove only this fixture's child group."""
+    marker = root / "pipe-holder.pid"
+    parent = ("import subprocess,sys;from pathlib import Path;"
+              "p=subprocess.Popen([sys.executable,'-c','import time;time.sleep(10)'],"
+              "start_new_session=True);Path(" + repr(str(marker)) + ").write_text(str(p.pid));"
+              "print('synthetic parent exited')")
+    harness = ("import time;from " + module + " import " + function + ";"
+               "started=time.monotonic()\n"
+               "try:\n " + function + "([" + repr(sys.executable) + ",'-c',"
+               + repr(parent) + "],timeout=.2,payload=b'x'*262144)\n"
+               "except Exception:\n print(round(time.monotonic()-started,3))\n"
+               "else:\n raise SystemExit('fixture unexpectedly succeeded')\n")
+    environment = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1] / "src"))
+    try:
+        result = subprocess.run([sys.executable, "-c", harness], capture_output=True,
+                                text=True, timeout=2, env=environment)
+        test.assertEqual(result.returncode, 0, result.stderr)
+        test.assertLess(float(result.stdout), 1.5)
+        test.assertTrue(marker.exists(), "fixture did not start its pipe-holder child")
+    finally:
+        if marker.exists():
+            identity = int(marker.read_text())
+            try:
+                if os.getpgid(identity) == identity:
+                    os.killpg(identity, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
 
 class Reply:
@@ -242,6 +274,24 @@ class BootstrapTests(unittest.TestCase):
         self.assertLess(time.monotonic()-started, 3)
         with self.assertRaises(BootstrapError):
             bounded_process([sys.executable, "-c", "print('x'*100000)"], timeout=2, max_output=100)
+
+    def test_exited_parent_detached_descendant_and_backpressure_cannot_hold_worker_deadline(self):
+        exercise_descendant_pipe(self, self.root, "cineforge.worker_bootstrap", "bounded_process")
+
+    def test_selector_initialization_failure_still_reaps_child_and_closes_pipes(self):
+        original = subprocess.Popen
+        children = []
+        def spawn(*args, **kwargs):
+            child = original(*args, **kwargs)
+            children.append(child)
+            return child
+        with patch("cineforge.worker_bootstrap.subprocess.Popen", side_effect=spawn), \
+                patch("cineforge.worker_bootstrap.selectors.DefaultSelector", side_effect=OSError):
+            with self.assertRaises(OSError):
+                bounded_process([sys.executable, "-c", "import time;time.sleep(10)"], timeout=.2)
+        self.assertIsNotNone(children[0].poll())
+        self.assertTrue(children[0].stdin.closed)
+        self.assertTrue(children[0].stdout.closed)
 
     def test_standalone_failure_does_not_echo_input_or_traceback(self):
         request = {"operation": "fixture-sensitive-value", "allow_live": False, "timeout_seconds": 1}

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import ipaddress
-import math
 import os
 import shlex
 import signal
@@ -80,71 +79,13 @@ def ssh_environment() -> dict[str, str]:
 def run_process(command: list[str], *, timeout: float, payload: bytes = b"",
                 check: Callable[[], None] = lambda: None, max_output: int = 65536) -> bytes:
     """No shell; bounded request/response, killed process group on timeout/interruption."""
-    if (not isinstance(payload, bytes) or len(payload) > 256 * 1024
-            or type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0):
-        raise WorkerError("invalid process bounds")
-    process = None
     failed = False
     answer = None
     try:
-        process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, env=ssh_environment(), start_new_session=True)
-        data = bytearray()
-        overflow = Event()
-
-        def read() -> None:
-            assert process is not None and process.stdout is not None
-            try:
-                while block := process.stdout.read(4096):
-                    if len(data) + len(block) > max_output:
-                        overflow.set()
-                        break
-                    data.extend(block)
-            except OSError:
-                overflow.set()
-
-        def write() -> None:
-            assert process is not None and process.stdin is not None
-            try:
-                process.stdin.write(payload)
-                process.stdin.flush()
-            except OSError:
-                pass
-            finally:
-                try:
-                    process.stdin.close()
-                except OSError:
-                    pass
-
-        reader, writer = Thread(target=read, daemon=True), Thread(target=write, daemon=True)
-        reader.start()
-        writer.start()
-        deadline = time.monotonic() + timeout
-        while process.poll() is None:
-            check()
-            if overflow.is_set() or time.monotonic() >= deadline:
-                raise WorkerError("process bounds exceeded")
-            time.sleep(min(.05, max(0, deadline - time.monotonic())))
-        reader.join(timeout=max(0, deadline - time.monotonic()))
-        check()
-        if reader.is_alive() or overflow.is_set() or process.returncode != 0:
-            raise WorkerError("remote process failed")
-        answer = bytes(data)
+        answer = worker_bootstrap.bounded_process(command, timeout=timeout, payload=payload,
+            max_output=max_output, check=check, environment=ssh_environment())
     except (Exception, KeyboardInterrupt):
         failed = True
-    finally:
-        if process is not None:
-            if process.poll() is None:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-            try:
-                process.wait(timeout=2)
-            except (OSError, subprocess.TimeoutExpired):
-                failed = True
-            if process.stdout is not None:
-                process.stdout.close()
     if failed or answer is None:
         raise WorkerError("bounded SSH process failed")
     return answer

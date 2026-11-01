@@ -13,6 +13,7 @@ import json
 import math
 import os
 import re
+import selectors
 import signal
 import stat
 import subprocess
@@ -20,7 +21,6 @@ import sys
 import time
 import urllib.request
 from pathlib import Path
-from threading import Event, Thread
 from typing import Any
 
 REVISION = "6d352802d8f8b9133f664a1757d6c6d26390c335"  # pragma: allowlist secret - public source revision
@@ -44,65 +44,81 @@ def clean_environment() -> dict[str, str]:
 
 def bounded_process(command: list[str], *, timeout: float, cwd: Path | None = None,
                     payload: bytes | None = None, max_output: int = 65536,
-                    check: Any = None) -> bytes:
+                    check: Any = None, environment: dict[str, str] | None = None) -> bytes:
     """Bound wall time and buffered bytes; kill this process group on every failure."""
-    process = subprocess.Popen(command, cwd=cwd, env=clean_environment(),
+    if (type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0
+            or type(max_output) is not int or not 1 <= max_output <= 1024*1024
+            or payload is not None and (not isinstance(payload, bytes) or len(payload) > 256*1024)):
+        raise BootstrapError("invalid worker process bounds")
+    process = subprocess.Popen(command, cwd=cwd,
+        env=clean_environment() if environment is None else environment,
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-        start_new_session=True)
+        start_new_session=True, bufsize=0)
+    assert process.stdin is not None and process.stdout is not None
     output = bytearray()
-    overflow = Event()
-
-    def read() -> None:
-        assert process.stdout is not None
-        try:
-            while block := process.stdout.read(4096):
-                if len(output) + len(block) > max_output:
-                    overflow.set()
-                    break
-                output.extend(block)
-        except OSError:
-            overflow.set()
-
-    def write() -> None:
-        assert process.stdin is not None
-        try:
-            if payload:
-                process.stdin.write(payload)
-                process.stdin.flush()
-        except OSError:
-            pass
-        finally:
-            try:
-                process.stdin.close()
-            except OSError:
-                pass
-
-    reader, writer = Thread(target=read, daemon=True), Thread(target=write, daemon=True)
-    reader.start()
-    writer.start()
+    payload = payload or b""
+    written = 0
     deadline = time.monotonic() + timeout
+    selector: selectors.BaseSelector | None = None
     try:
-        while process.poll() is None:
-            if overflow.is_set() or time.monotonic() >= deadline:
+        selector = selectors.DefaultSelector()
+        os.set_blocking(process.stdout.fileno(), False)
+        os.set_blocking(process.stdin.fileno(), False)
+        selector.register(process.stdout, selectors.EVENT_READ)
+        if payload:
+            selector.register(process.stdin, selectors.EVENT_WRITE)
+        else:
+            process.stdin.close()
+        while selector.get_map() or process.poll() is None:
+            if time.monotonic() >= deadline:
                 raise BootstrapError("worker process bounds exceeded")
             if check is not None:
                 check()
-            time.sleep(min(.05, max(0, deadline - time.monotonic())))
-        reader.join(timeout=max(0, deadline - time.monotonic()))
-        if reader.is_alive() or overflow.is_set() or process.returncode != 0:
+            for key, event in selector.select(min(.05, max(0, deadline-time.monotonic()))):
+                if event & selectors.EVENT_READ:
+                    try:
+                        block = os.read(key.fd, min(4096, max_output+1-len(output)))
+                    except BlockingIOError:
+                        continue
+                    output.extend(block)
+                    if len(output) > max_output:
+                        raise BootstrapError("worker process output exceeded its limit")
+                    if not block:
+                        selector.unregister(key.fileobj)
+                        process.stdout.close()
+                else:
+                    try:
+                        written += os.write(key.fd, payload[written:written+65536])
+                    except BlockingIOError:
+                        continue
+                    except BrokenPipeError:
+                        written = len(payload)
+                    if written == len(payload):
+                        selector.unregister(key.fileobj)
+                        process.stdin.close()
+        if process.returncode != 0:
             raise BootstrapError("worker process did not complete")
         if check is not None:
             check()
         return bytes(output)
     finally:
-        if process.poll() is None:
+        # A completed parent can leave descendants holding its pipes open. Always
+        # tear down the dedicated group; nonblocking pipes cannot hold close() hostage.
+        try:
             try:
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-        process.wait(timeout=2)
-        if process.stdout is not None:
-            process.stdout.close()
+            process.wait(timeout=2)
+        finally:
+            try:
+                if selector is not None:
+                    selector.close()
+            finally:
+                try:
+                    process.stdin.close()
+                finally:
+                    process.stdout.close()
 
 
 def private_write(root: Path, name: str, payload: bytes, *, replace: bool = False) -> None:

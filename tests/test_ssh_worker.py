@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 from test_cloud_budget import Clock, Cloud, approval, selection
 from test_runpod import spec
+from test_worker_bootstrap import exercise_descendant_pipe
 
 from cineforge.cloud_budget import CloudBudgetSession
 from cineforge.cloud_smoke import _provider
@@ -285,6 +286,9 @@ class SSHTests(unittest.TestCase):
         with self.assertRaises(WorkerError):
             run_process([sys.executable, "-c", "print('done')"], timeout=2,
                         check=lambda: (_ for _ in ()).throw(KeyboardInterrupt()))
+
+    def test_exited_parent_detached_descendant_and_backpressure_cannot_hold_ssh_deadline(self):
+        exercise_descendant_pipe(self, self.root, "cineforge.ssh_worker", "run_process")
 
     def test_source_and_payload_are_separate_not_shell_interpolated(self):
         worker = self.worker(allow_live=True)
