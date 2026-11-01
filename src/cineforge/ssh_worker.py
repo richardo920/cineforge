@@ -13,7 +13,7 @@ import stat
 import subprocess
 import time
 from pathlib import Path
-from threading import Event, Thread
+from threading import Event, Lock, Thread
 from types import TracebackType
 from typing import Any, Callable
 
@@ -175,6 +175,7 @@ class SSHWorker:
         self.observation: WorkerObservation | None = None
         self._host, self._port = "", 0
         self._stop, self._failed = Event(), Event()
+        self._remote_suspended, self._remote_lock = Event(), Lock()
         self._thread: Thread | None = None
         self._tunnel: subprocess.Popen[bytes] | None = None
         self._endpoint = ""
@@ -232,7 +233,8 @@ class SSHWorker:
 
     def _request(self, request: dict[str, Any], timeout: float, *, supervise: bool = True) \
             -> dict[str, Any]:
-        request = dict(request, allow_live=True, timeout_seconds=timeout)
+        request = dict(request, allow_live=True, timeout_seconds=timeout,
+                       guard_sha256=worker_guard_source_sha256())
         command = self._command() + [self._host, "python3 -c " + shlex.quote(self._source.decode())]
         raw = run_process(command, timeout=timeout, payload=canonical(request),
                           check=self.check if supervise else lambda: None)
@@ -279,31 +281,48 @@ class SSHWorker:
             try:
                 self.check()
                 assert self.plan is not None
-                self._request({"operation": "heartbeat", "plan": self.plan.to_dict()},
-                    min(5, self.budget.remaining_seconds(self._key)), supervise=False)
+                with self._remote_lock:
+                    if not self._remote_suspended.is_set():
+                        self._request({"operation": "heartbeat", "plan": self.plan.to_dict()},
+                            min(5, self.budget.remaining_seconds(self._key)), supervise=False)
                 self.budget.heartbeat(self._key)
             except (Exception, KeyboardInterrupt):
                 self._failed.set()
                 break
 
     def check(self) -> None:
-        if (self._failed.is_set() or self._stop.is_set()
+        if self._stop.is_set():
+            raise WorkerError("worker supervision stopped")
+        # Run admission's cleanup decision before interpreting zero remaining time;
+        # the decision releases outside the budget lock and can race a blocked probe.
+        if self._enforce is not None and self._enforce():
+            raise WorkerError("worker lease or idle budget expired")
+        if (self._failed.is_set()
                 or self.plan is not None and self.budget.remaining_seconds(self._key) <= 0
                 or self._tunnel is not None and self._tunnel.poll() is not None):
             raise WorkerError("worker supervision or lease deadline failed")
-        if self._enforce is not None and self._enforce():
-            raise WorkerError("worker lease or idle budget expired")
 
     def set_enforcer(self, enforce: Callable[[], tuple[str, ...]]) -> None:
         if self._enforce is not None or not callable(enforce):
             raise WorkerError("worker budget enforcer already configured")
         self._enforce = enforce
 
+    def suspend_remote_heartbeat(self) -> WorkerGuardPlan:
+        """Smoke fault injection only: keep local budget supervision, stop worker refreshes."""
+        self.check()
+        if self.plan is None:
+            raise WorkerError("worker guard not armed")
+        with self._remote_lock:
+            self._remote_suspended.set()
+        return self.plan
+
     def prepare(self) -> WorkerVerification:
         self.check()
         if self.plan is None:
             raise WorkerError("worker guard not armed")
-        timeout = self.budget.remaining_seconds(self._key)
+        timeout = min(1200, self.budget.remaining_seconds(self._key) - 120)
+        if timeout <= 0:
+            raise WorkerError("insufficient lease time for setup and shot retrieval")
         reply = self._request({"operation": "setup", "plan": self.plan.to_dict(),
             "selection": self.selection.declarations, "image_digest": self.spec.image.split("@", 1)[1]},
             timeout)

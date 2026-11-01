@@ -2,6 +2,7 @@
 
 import copy
 import hashlib
+import io
 import json
 import os
 import subprocess
@@ -29,6 +30,7 @@ from cineforge.cloud_smoke import (
     normalize,
     probe_media,
     recover_managed,
+    recovery_inputs,
     run_managed_smoke,
 )
 from cineforge.comfy_policy import WorkerVerification
@@ -46,9 +48,10 @@ def technical(_path):
 
 
 class Worker:
-    def __init__(self, budget, selected, pod_spec, mode="success"):
+    def __init__(self, budget, selected, pod_spec, cloud, mode="success"):
         self.budget, self.selected, self.spec = budget, selected, pod_spec
         self.mode, self.observation = mode, None
+        self.cloud = cloud
         self.closed = False
         self.prepared = False
         self.wire = WireFixture(selected)
@@ -95,12 +98,17 @@ class Worker:
     def set_enforcer(self, enforce):
         self.enforce = enforce
 
+    def suspend_remote_heartbeat(self):
+        if self.mode != "guard_denied":
+            self.cloud.pods[self.identity].update(status="EXITED", runtime=None)
+        return self.budget.guard_plan(self.budget.snapshots[-1].key)
+
 
 class ManagedSmokeTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="cineforge-m34-", dir="/private/tmp")
+        self.temp = tempfile.TemporaryDirectory(prefix="cineforge-m34-")
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.selection = selection()
         self.spec = replace(spec(), image="registry.invalid/fixture@sha256:"
                             + hashlib.sha256(b"synthetic image").hexdigest())
@@ -117,7 +125,7 @@ class ManagedSmokeTests(unittest.TestCase):
 
     def run_smoke(self, name="success", *, mode="success", **options):
         def factory(budget, state):
-            worker = Worker(budget, self.selection, self.spec, mode)
+            worker = Worker(budget, self.selection, self.spec, self.cloud, mode)
             self.workers.append(worker)
             return worker
         values = dict(allow_live=True, inspect_media=technical)
@@ -128,6 +136,7 @@ class ManagedSmokeTests(unittest.TestCase):
     def test_managed_success_and_second_injected_failure_release_owned_pods(self):
         result = self.run_smoke()
         self.assertEqual(result["outcome"], "succeeded")
+        self.assertFalse(result["guard_stop_verified"])
         self.assertTrue(result["release_verified"])
         self.assertEqual(result["managed"]["contract"], result["reference"]["contract"])
         self.assertIsNone(result["costs"]["actual_total_usd"])
@@ -135,6 +144,7 @@ class ManagedSmokeTests(unittest.TestCase):
         second = self.run_smoke("injected", case="post-acquire-failure")
         self.assertEqual(second["outcome"], "injected_post_acquire_failure")
         self.assertTrue(second["release_verified"])
+        self.assertTrue(second["guard_stop_verified"])
         self.assertEqual(second["costs"]["attempts"], 2)
         self.assertFalse(self.workers[1].prepared)
         self.assertTrue(all(worker.closed for worker in self.workers))
@@ -151,7 +161,7 @@ class ManagedSmokeTests(unittest.TestCase):
             with self.subTest(mode=mode):
                 # A fresh fixture has an independent synthetic scope. Live drivers never
                 # reset a budget journal or retry paid creates after these failures.
-                self.root = Path(self.temp.name) / mode
+                self.root = Path(self.temp.name).resolve() / mode
                 self.root.mkdir(mode=0o700)
                 self.cloud = Cloud(Clock())
                 try:
@@ -198,6 +208,19 @@ class ManagedSmokeTests(unittest.TestCase):
         self.assertFalse(self.cloud.pods)
         self.assertEqual(sum(c[0] == "POST" for c in self.cloud.calls), 1)
 
+    def test_guard_stop_denied_or_timeout_still_deletes_and_never_claims_stop(self):
+        clock = Clock()
+        with self.assertRaises(CloudSmokeError):
+            self.run_smoke(mode="guard_denied", case="post-acquire-failure",
+                           clock=clock.monotonic, sleep=clock.sleep)
+        report = json.loads((self.root / "success/run.json").read_text())
+        self.assertTrue(report["release_verified"])
+        self.assertFalse(report["guard_stop_verified"])
+        self.assertEqual(report["guard_observation"]["observed_status"], "RUNNING")
+        self.assertFalse(self.cloud.pods)
+        self.assertEqual(sum(c[0] == "POST" for c in self.cloud.calls), 1)
+        self.assertEqual(sum(c[0] == "DELETE" for c in self.cloud.calls), 1)
+
     def test_cleanup_uncertain_retains_identity_until_separate_recovery(self):
         self.cloud.delete_effect = False
         # Keep this offline timeout instantaneous without changing paid driver defaults.
@@ -223,6 +246,59 @@ class ManagedSmokeTests(unittest.TestCase):
             recover_managed(self.spec, self.approval, self.cloud, self.root / "budget",
                             allow_live=True)
         self.assertFalse(any(call[0] == "DELETE" for call in self.cloud.calls))
+
+    def test_recovery_cli_uses_original_journal_spec_without_ssh_or_an_acquisition(self):
+        from cineforge.cli import main
+        self.cloud.create_lost = True
+        with self.assertRaises(CloudSmokeError):
+            self.run_smoke()
+        self.cloud.create_lost = False
+        output = io.StringIO()
+        arguments = ["cineforge", "cloud-recover", "--selection", "trusted-ledger",
+            "--proposal", "trusted-proposal", "--budget-dir", str(self.root/"budget"),
+            "--api-key-file", "external-credential", "--allow-live"]
+        with patch.object(sys, "argv", arguments), patch("sys.stdout", output), \
+                patch("cineforge.cli.recovery_inputs", return_value=(self.approval,
+                    self.spec, self.cloud)) as inputs, \
+                patch("cineforge.cloud_smoke.ssh_public_key") as ssh:
+            main()
+        ssh.assert_not_called()
+        self.assertTrue(json.loads(output.getvalue())["release_verified"])
+        self.assertEqual(inputs.call_args.args[2], str(self.root/"budget"))
+        self.assertEqual(sum(c[0] == "POST" for c in self.cloud.calls), 1)
+        self.assertFalse(self.cloud.pods)
+
+    def test_recovery_inputs_authenticates_scope_and_reads_immutable_intents_not_ssh_key(self):
+        proposal = Path(__file__).resolve().parents[1]/"config/cloud/runpod-pod-proposal.json"
+        declared = json.loads(proposal.read_bytes())
+        self.spec = replace(self.spec, image=declared["proposed_validation"]["image"])
+        self.approval = replace(self.approval, image=self.spec.image)
+        baseline = self.root/"baseline/run.json"
+        record = json.loads(baseline.read_bytes())
+        record["worker_verification"]["image_digest"] = self.spec.image.split("@", 1)[1]
+        baseline.write_bytes(canonical(record))
+        self.reference = load_reference(baseline, self.selection, inspect_media=technical)
+        self.run_smoke(case="post-acquire-failure")
+        credentials = self.root/"credentials"
+        credentials.mkdir(mode=0o700)
+        key = credentials/"key"
+        key.write_text("synthetic-external-value")
+        key.chmod(0o600)
+        selected_path = str(Path(__file__).resolve().parents[1]/"config/comfy/wan21-t2v-1.3b.json")
+        with patch("cineforge.cloud_smoke.RunpodHTTPTransport", return_value=self.cloud), \
+                patch("cineforge.cloud_smoke.ssh_public_key") as ssh:
+            approval, original_spec, transport = recovery_inputs(selected_path, str(proposal),
+                str(self.root/"budget"), str(key), allow_live=True)
+        self.assertEqual(original_spec, self.spec)
+        self.assertEqual(approval.subject_sha256, SCOPE_SHA256)
+        self.assertIs(transport, self.cloud)
+        ssh.assert_not_called()
+
+    def test_recovery_missing_live_opt_in_refuses_before_input_reads_or_network(self):
+        with patch("cineforge.cloud_smoke.read_private_input") as read:
+            with self.assertRaises(CloudSmokeError):
+                recovery_inputs("absent", "absent", "absent", "absent")
+        read.assert_not_called()
 
     def test_used_budget_refuses_different_session_spec_without_spend(self):
         self.run_smoke(case="post-acquire-failure")

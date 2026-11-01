@@ -43,6 +43,32 @@ The default endpoint is a separately established `http://127.0.0.1:8188` tunnel;
 
 `--timeout-seconds`, `--request-timeout-seconds`, `--max-polls`, and `--max-result-bytes` bound client work; a failure allows one separately bounded owned-job cancellation attempt. Acknowledgements do not prove GPU work stopped: inspect the retained job ID/state before any new submission, manage the Pod separately, and never treat these bounds as cloud billing enforcement; live resume is unsupported.
 
+## Managed cloud smoke
+
+The M3 smoke reuses the approved paper-boat shot and a verified prepared-endpoint reference; live acceptance remains pending. Supply external owned `0600` API/SSH files in private directories, `ffprobe`, and one durable budget directory for both attempts and recovery.
+
+```sh
+cineforge cloud-smoke --allow-live \
+  --selection config/comfy/wan21-t2v-1.3b.json \
+  --proposal config/cloud/runpod-pod-proposal.json \
+  --session-id mysession --ssh-private-key "$HOME/.ssh/cineforge" \
+  --api-key-file "$HOME/.config/cineforge/runpod-api-key" \
+  --budget-dir /path/to/private/m3-budget \
+  --reference-run /path/to/prepared/run.json --output-dir /path/to/new-run
+```
+
+The recorded approval permits at most two sequential RTX4090/US-IL-1 Pods within USD3; the second `--case post-acquire-failure` withdraws only the remote heartbeat, observes independent STOP, then verifies deletion. Keep the same session/key/budget; use a new output directory, never reset the journal to retry.
+
+```sh
+cineforge cloud-recover --allow-live \
+  --selection config/comfy/wan21-t2v-1.3b.json \
+  --proposal config/cloud/runpod-pod-proposal.json \
+  --api-key-file "$HOME/.config/cineforge/runpod-api-key" \
+  --budget-dir /path/to/private/m3-budget
+```
+
+Recovery discovers/releases journal-owned workers without acquiring or requiring SSH; unavailable invoices remain unknown. [Controls and limitations](docs/design/providers.md#m3-provider-review) include independent worker supervision, private outputs, isolated SSH host-key TOFU, and no account-wide hard billing cap.
+
 ## CI guards
 
 CI builds/installs wheel and sdist on Python 3.11–3.14; pinned Ruff, mypy, detect-secrets and synthetic failure fixtures run offline. `python scripts/ci_guard.py artifacts` limits tracked blobs to 1 MiB and rejects private/media/model/credential paths, symlinks, and submodules; dependency changes require matching reviewed pins in `config/dependency-policy.json`.

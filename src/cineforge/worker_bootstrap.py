@@ -37,6 +37,7 @@ def clean_environment() -> dict[str, str]:
     return {"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
             "HOME": "/root", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
             "PYTHONUNBUFFERED": "1", "PIP_CONFIG_FILE": "/dev/null",
+            "LD_LIBRARY_PATH": "/usr/local/nvidia/lib:/usr/local/nvidia/lib64:/usr/local/cuda/lib64",
             "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
             "GIT_TERMINAL_PROMPT": "0"}
 
@@ -174,6 +175,31 @@ def heartbeat(root: Path, plan: dict[str, Any], *, first: bool = False) -> None:
         "heartbeat_unix": time.time()}), replace=not first)
 
 
+def guard_alive(root: Path, pid: int) -> None:
+    """Linux worker: reject a dead/zombie/reused PID rather than refreshing its heartbeat."""
+    if type(pid) is not int or pid <= 0:
+        raise BootstrapError("invalid worker guardian PID")
+    valid = False
+    try:
+        os.kill(pid, 0)
+        proc = Path("/proc") / str(pid)
+        with (proc / "stat").open("rb") as stream:
+            status = stream.read(8193)
+        with (proc / "cmdline").open("rb") as stream:
+            command = stream.read(8193)
+        expected = [str(root / "guard.py").encode(), b"--plan", str(root / "plan.json").encode(),
+                    b"--heartbeat", str(root / "heartbeat.json").encode(), b"--allow-live"]
+        valid = (len(status) <= 8192 and len(command) <= 8192
+                 and status.startswith(str(pid).encode() + b" (") and b")" in status
+                 and status.rsplit(b")", 1)[-1].split()[0] in
+                 (b"R", b"S", b"D", b"T", b"t", b"K", b"W", b"P", b"I")
+                 and command.rstrip(b"\0").split(b"\0")[1:] == expected)
+    except (Exception, KeyboardInterrupt):
+        pass
+    if not valid:
+        raise BootstrapError("worker guardian is not the expected live process")
+
+
 def runtime_probe(timeout: float, python: str = sys.executable) -> dict[str, Any]:
     code = ("import json,platform,torch,importlib.metadata as m;"
             "p=torch.cuda.get_device_properties(0);"
@@ -217,6 +243,7 @@ def arm(request: dict[str, Any], deadline: float) -> dict[str, Any]:
     time.sleep(.1)
     if process.poll() is not None:
         raise BootstrapError("worker guard exited")
+    guard_alive(root, process.pid)
     private_write(root, "guard-pid.json", encode({"pid": process.pid}))
     runtime = runtime_probe(max(.01, deadline - time.monotonic()))
     return {"receipt": {"plan": plan, "source_sha256": hashlib.sha256(source).hexdigest(),
@@ -360,7 +387,9 @@ def dispatch(request: dict[str, Any]) -> dict[str, Any]:
     if encode(_json((root / "plan.json").read_bytes())) != encode(request["plan"]):
         raise BootstrapError("worker lease plan differs")
     pid = _json((root / "guard-pid.json").read_bytes())["pid"]
-    os.kill(pid, 0)
+    if hashlib.sha256((root / "guard.py").read_bytes()).hexdigest() != request["guard_sha256"]:
+        raise BootstrapError("worker guardian source changed")
+    guard_alive(root, pid)
     if operation == "heartbeat":
         heartbeat(root, request["plan"])
         return {"status": "heartbeat"}

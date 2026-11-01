@@ -6,6 +6,7 @@ import hashlib
 import os
 import re
 import shutil
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from fractions import Fraction
@@ -29,6 +30,7 @@ from cineforge.runpod import (
 )
 from cineforge.runpod_transport import CloudTransport, RunpodHTTPTransport
 from cineforge.ssh_worker import SSHWorker, private_file, run_process, ssh_public_key
+from cineforge.worker_guard import WorkerGuardPlan
 from cineforge.workflows import canonical, strict_object
 
 # Public owner receipt binds these declarations; the coordinator authenticates it separately.
@@ -164,6 +166,7 @@ class ManagedWorker(Protocol):
     def execution_transport(self) -> ComfyTransport: ...
     def check(self) -> None: ...
     def set_enforcer(self, enforce: Callable[[], tuple[str, ...]]) -> None: ...
+    def suspend_remote_heartbeat(self) -> WorkerGuardPlan: ...
 
 
 WorkerFactory = Callable[[CloudBudgetSession, Path], ManagedWorker]
@@ -181,12 +184,61 @@ def _provider(spec: RunpodPodSpec, transport: CloudTransport, budget: CloudBudge
         request_timeout_seconds=30, cleanup_timeout_seconds=20, max_polls=300)
 
 
+def _observe_guard_stop(worker: ManagedWorker, provider: RunpodPodProvisioner,
+                        budget: CloudBudgetSession, transport: CloudTransport,
+                        key: str, report: dict[str, Any], *,
+                        clock: Callable[[], float], sleep: Callable[[float], None]) -> None:
+    plan = worker.suspend_remote_heartbeat()
+    if plan != budget.guard_plan(key):
+        raise CloudSmokeError("injected heartbeat-loss plan differs from owned lease")
+    intent = provider.intent(key)
+    started = clock()
+    wait = plan.idle_seconds + 20
+    if budget.remaining_seconds(key) < wait + 10:
+        raise CloudSmokeError("insufficient lease time for bounded guardian observation")
+    report["guard_observation"] = {"remote_heartbeat_withdrawn": True,
+        "local_supervision_continues": True, "wait_limit_seconds": wait,
+        "observed_status": None, "runtime_absent": False}
+    while clock() - started < wait:
+        worker.check()  # Real enforcer stays active; local heartbeat cannot revive expired leases.
+        budget.heartbeat(key)
+        # Acquisition proved the immutable lease; each read rechecks its unguessable
+        # owner nonce before interpreting state. Deletion performs full verification.
+        snapshot = next(s for s in provider.snapshots if s.key == key)
+        if snapshot.resource_id is None:
+            raise CloudSmokeError("guard observation lost its known identity")
+        reply = transport.request("GET", "/v2/pods/" + snapshot.resource_id,
+            timeout_seconds=min(3, wait-(clock()-started), budget.remaining_seconds(key)),
+            max_bytes=1024*1024)
+        if reply.status != 200:
+            raise CloudSmokeError("independent worker stop was not observed")
+        pod = strict_object(reply.body)
+        env = pod.get("env")
+        if (pod.get("id") != plan.pod_id or not isinstance(env, dict)
+                or env.get("CINEFORGE_SESSION") != plan.session_id
+                or env.get("CINEFORGE_LEASE") != plan.lease_token
+                or pod.get("image") != intent.spec.image or pod.get("mounts") != {}
+                or pod.get("dataCenterId") != intent.spec.data_center_id):
+            raise CloudSmokeError("guard observation ownership differs")
+        report["guard_observation"].update(observed_status=pod.get("status")
+            if pod.get("status") in {"RUNNING", "EXITED", "ERROR", "TERMINATED"} else "unknown",
+            runtime_absent=pod.get("runtime") is None,
+            elapsed_seconds=clock()-started)
+        if pod.get("status") == "EXITED" and pod.get("runtime") is None:
+            report["guard_stop_verified"] = True
+            return
+        sleep(min(2, max(0, wait-(clock()-started))))
+    raise CloudSmokeError("independent worker stop was not confirmed within its grace")
+
+
 def run_managed_smoke(selection: ApprovedComfySelection, approval: BudgetApproval,
                       spec: RunpodPodSpec, transport: CloudTransport, budget_dir: str | Path,
                       output_dir: str | Path, reference: ParityReference, worker_factory: WorkerFactory,
                       *, case: str = "success", allow_live: bool = False,
                       inspect_media: Callable[[Path], dict[str, Any]] = probe_media,
-                      execute: Callable[..., RunManifest] = execute_comfy) -> dict[str, Any]:
+                      execute: Callable[..., RunManifest] = execute_comfy,
+                      clock: Callable[[], float] = time.monotonic,
+                      sleep: Callable[[float], None] = time.sleep) -> dict[str, Any]:
     """One attempt, always cleanup; no automatic live job/submission resumption."""
     if (allow_live is not True or case not in {"success", "post-acquire-failure"}
             or not isinstance(reference, ParityReference)
@@ -200,7 +252,7 @@ def run_managed_smoke(selection: ApprovedComfySelection, approval: BudgetApprova
         "reference_record_sha256": reference.record_sha256,
         "reference_provenance": reference.provenance, "reference": reference.normalized,
         "approved_scope_sha256": approval.subject_sha256, "release_verified": False,
-        "costs": None, "leases": []}
+        "costs": None, "leases": [], "guard_stop_verified": False}
     failed = False
     output_dir = Path(output_dir)
     try:
@@ -222,6 +274,8 @@ def run_managed_smoke(selection: ApprovedComfySelection, approval: BudgetApprova
                         report.update(outcome="acquired", worker_id=device.device_id)
                         store.checkpoint(canonical(report))
                         if case == "post-acquire-failure":
+                            _observe_guard_stop(worker, provider, budget, transport,
+                                provider.snapshots[-1].key, report, clock=clock, sleep=sleep)
                             raise _InjectedFailure
                         else:
                             verification = worker.prepare()

@@ -2,6 +2,7 @@
 
 import base64
 import hashlib
+import io
 import json
 import subprocess
 import sys
@@ -11,9 +12,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from test_cloud_budget import selection
+
 from cineforge import worker_bootstrap, worker_guard
 from cineforge.worker_bootstrap import (
     MODEL_REVISION,
+    REVISION,
     BootstrapError,
     _DownloadRedirect,
     arm,
@@ -21,7 +25,9 @@ from cineforge.worker_bootstrap import (
     clean_environment,
     dispatch,
     download,
+    guard_alive,
     private_write,
+    setup,
 )
 
 
@@ -42,9 +48,9 @@ class Reply:
 
 class BootstrapTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="cineforge-bootstrap-", dir="/private/tmp")
+        self.temp = tempfile.TemporaryDirectory(prefix="cineforge-bootstrap-")
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.payload = b"synthetic weights fixture; no tensor content"
         path = "split_files/vae/fixture.safetensors"
         self.asset = {"path": path, "revision": MODEL_REVISION,
@@ -106,6 +112,7 @@ class BootstrapTests(unittest.TestCase):
         with patch("cineforge.worker_bootstrap.worker_root", return_value=self.root), \
                 patch("cineforge.worker_bootstrap.load_guard", return_value=guard), \
                 patch("cineforge.worker_bootstrap.subprocess.Popen", return_value=process), \
+                patch("cineforge.worker_bootstrap.guard_alive"), \
                 patch("cineforge.worker_bootstrap.runtime_probe", return_value={"fixture": True}):
             result = arm(request, time.monotonic()+5)
         guard.verify_own_pod.assert_called_once_with(plan, allow_live=True)
@@ -120,6 +127,98 @@ class BootstrapTests(unittest.TestCase):
         with self.assertRaises(BootstrapError):
             arm(request, time.monotonic()+1)
         self.assertFalse(list(self.root.iterdir()))
+
+    def test_guard_pid_reuse_zombie_missing_or_different_command_rejected(self):
+        command = b"\0".join(str(x).encode() for x in ["/usr/bin/python3",
+            self.root / "guard.py", "--plan", self.root / "plan.json", "--heartbeat",
+            self.root / "heartbeat.json", "--allow-live"]) + b"\0"
+        for status, cmdline, valid in [(b"123 (python3) S 1 1", command, True),
+                                      (b"123 (python3) Z 1 1", command, False),
+                                      (b"123 (python3) S 1 1", b"python3\0foreign.py\0", False),
+                                      (b"malformed", command, False)]:
+            with patch("cineforge.worker_bootstrap.os.kill"), \
+                    patch("cineforge.worker_bootstrap.Path.open", side_effect=[io.BytesIO(status),
+                                                                            io.BytesIO(cmdline)]):
+                if valid:
+                    guard_alive(self.root, 123)
+                else:
+                    with self.assertRaises(BootstrapError):
+                        guard_alive(self.root, 123)
+
+    def setup_fixture(self, *, failure=None, changed_runtime=False):
+        selected = selection().declarations
+        runtime = {"python_version": "3.12.3", "torch_version": "2.8.0+cu128",
+            "torchvision_version": "0.23.0+cu128", "cuda_version": "12.8",
+            "gpu_memory_mib": 24082, "gpu_raw_name": "NVIDIA GeForce RTX 4090"}
+        calls = []
+        def process(command, **options):
+            calls.append((command, options))
+            if command[:2] == ["git", "init"]:
+                comfy = Path(command[-1])
+                comfy.mkdir()
+                (comfy / "requirements.txt").write_text("synthetic-package==1\n")
+            if command[-1] == "HEAD":
+                return REVISION.encode()+b"\n"
+            if "freeze" in command:
+                return b"synthetic-package==1\n"
+            if failure == "pip" and "install" in command:
+                raise TimeoutError("synthetic tool error")
+            if failure == "git" and "fetch" in command:
+                raise TimeoutError("synthetic tool error")
+            return b""
+        record_files = [{k: asset[k] for k in ("path", "sha256", "size_bytes")}
+                        for asset in selected["model"]["files"]]
+        downloader = Mock(side_effect=record_files if failure != "download" else TimeoutError())
+        server = Mock(pid=123)
+        server.poll.return_value = None
+        opener = Mock()
+        reply = Reply(b"")
+        reply.status = 200
+        opener.open.return_value = reply
+        request = {"plan": {"session_id": "fixture", "pod_id": "pod_1"}, "selection": selected,
+                   "image_digest": "sha256:" + hashlib.sha256(b"fixture image").hexdigest()}
+        installed = dict(runtime, torch_version="changed") if changed_runtime else runtime
+        with patch("cineforge.worker_bootstrap.worker_root", return_value=self.root), \
+                patch("cineforge.worker_bootstrap.runtime_probe", side_effect=[runtime, installed]), \
+                patch("cineforge.worker_bootstrap.bounded_process", side_effect=process), \
+                patch("cineforge.worker_bootstrap.download", downloader), \
+                patch("cineforge.worker_bootstrap.subprocess.Popen", return_value=server) as popen, \
+                patch("cineforge.worker_bootstrap.urllib.request.build_opener", return_value=opener):
+            try:
+                result = setup(request, time.monotonic()+1)
+            except (BootstrapError, TimeoutError):
+                if not failure and not changed_runtime:
+                    raise
+                self.assertFalse(popen.called)
+                return calls, None
+            return calls, (result, popen.call_args)
+
+    def test_setup_pins_source_constrains_stack_and_exposes_only_loopback_core_nodes(self):
+        calls, value = self.setup_fixture()
+        result, invocation = value
+        self.assertEqual(result["verification"]["server_revision"], REVISION)
+        self.assertEqual(result["verification"]["gpu"]["memory_mib"], 24082)
+        self.assertTrue(result["verification"]["custom_nodes_disabled"])
+        self.assertTrue(any(cmd[-1] == REVISION and "fetch" in cmd for cmd, opts in calls))
+        pip = next(cmd for cmd, opts in calls if "install" in cmd)
+        self.assertIn("--constraint", pip)
+        self.assertIn("--isolated", pip)
+        self.assertIn("https://pypi.org/simple", pip)
+        command = invocation.args[0]
+        self.assertEqual(command[command.index("--listen")+1], "127.0.0.1")
+        self.assertIn("--disable-all-custom-nodes", command)
+        self.assertIn("--disable-api-nodes", command)
+        self.assertTrue(all(0 < opts["timeout"] <= 1 for cmd, opts in calls))
+        self.assertNotIn("RUNPOD_API_KEY", invocation.kwargs["env"])
+
+    def test_setup_git_pip_download_timeout_never_starts_server_and_changed_stack_rejects(self):
+        for mode in ["git", "pip", "download", "stack"]:
+            with self.subTest(mode=mode):
+                self.root = Path(self.temp.name).resolve() / mode
+                self.root.mkdir(mode=0o700)
+                calls, result = self.setup_fixture(failure=None if mode == "stack" else mode,
+                                                   changed_runtime=mode == "stack")
+                self.assertIsNone(result)
 
     def test_private_heartbeat_updates_do_not_follow_symlinks(self):
         private_write(self.root, "heartbeat.json", b"first")

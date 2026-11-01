@@ -106,8 +106,10 @@ def main() -> None:
             failed = True
         if failed or report is None:
             parser.application_error("cloud command rejected or incomplete; retain private journals")
-        print(canonical_json({name: report[name] for name in
-              ("release_verified", "costs", "leases")}).decode())
+        output_report = {name: report[name] for name in ("release_verified", "costs", "leases")}
+        if "guard_stop_verified" in report:
+            output_report["guard_stop_verified"] = report["guard_stop_verified"]
+        print(canonical_json(output_report).decode())
         return
     if args.command == "comfy-run":
         failed = False

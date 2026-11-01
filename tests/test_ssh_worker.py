@@ -9,15 +9,19 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from threading import Event, Thread
 from unittest.mock import patch
 
-from test_cloud_budget import selection
+from test_cloud_budget import Clock, Cloud, approval, selection
 from test_runpod import spec
 
-from cineforge.runpod import LeaseSnapshot
+from cineforge.cloud_budget import CloudBudgetSession
+from cineforge.cloud_smoke import _provider
+from cineforge.devices import Backend, GPUDevice, Precision
+from cineforge.runpod import LeaseSnapshot, WorkerObservation
 from cineforge.runpod_transport import CloudResponse
 from cineforge.ssh_worker import SSHWorker, WorkerError, run_process, ssh_environment
-from cineforge.worker_guard import WorkerGuardPlan, worker_guard_source_sha256
+from cineforge.worker_guard import GuardReceipt, WorkerGuardPlan, worker_guard_source_sha256
 from cineforge.workflows import canonical
 
 
@@ -57,9 +61,9 @@ class Transport:
 
 class SSHTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="cineforge-ssh-", dir="/private/tmp")
+        self.temp = tempfile.TemporaryDirectory(prefix="cineforge-ssh-")
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.key = self.root / "synthetic-key"
         self.key.write_text("synthetic fixture, not a private key")
         self.key.chmod(0o600)
@@ -150,6 +154,99 @@ class SSHTests(unittest.TestCase):
         with self.assertRaises(WorkerError):
             worker.check()
         self.assertEqual(calls, ["enforce"])
+
+    def test_remote_heartbeat_loss_keeps_local_supervision_and_enforcer_active(self):
+        worker = self.worker(allow_live=True)
+        worker.plan, worker._key = self.budget.plan, "first"
+        enforcements = []
+        worker.set_enforcer(lambda: enforcements.append("tick") or ())
+        self.assertEqual(worker.suspend_remote_heartbeat(), self.budget.plan)
+        with patch.object(worker._stop, "wait", side_effect=[False, True]), \
+                patch.object(worker, "_request") as request:
+            worker._supervise()
+        request.assert_not_called()
+        self.assertEqual(self.budget.beats, ["first"])
+        self.assertTrue(enforcements)
+        self.assertFalse(worker._failed.is_set())
+
+    def test_remote_heartbeat_request_failure_blocks_subsequent_work(self):
+        worker = self.worker(allow_live=True)
+        worker.plan, worker._key = self.budget.plan, "first"
+        with patch.object(worker._stop, "wait", return_value=False), \
+                patch.object(worker, "_request", side_effect=WorkerError("fixture failed")):
+            worker._supervise()
+        self.assertTrue(worker._failed.is_set())
+        self.assertFalse(self.budget.beats)
+        with self.assertRaises(WorkerError):
+            worker.check()
+
+    def test_setup_reserves_inference_time_inside_the_same_lease_cutoff(self):
+        worker = self.worker(allow_live=True)
+        worker.plan, worker._key = self.budget.plan, "first"
+        with patch.object(worker, "_request") as request:
+            with self.assertRaises(WorkerError):
+                worker.prepare()  # only100 seconds remain; no setup starts
+        request.assert_not_called()
+        self.budget.remaining = 500
+        with patch.object(worker, "_request", side_effect=WorkerError("synthetic remote failure")) as call:
+            with self.assertRaises(WorkerError):
+                worker.prepare()
+        self.assertEqual(call.call_args.args[1], 380)
+
+    def test_real_driver_enforcer_and_acquire_probe_do_not_invert_locks_at_cutoff(self):
+        clock = Clock()
+        cloud = Cloud(clock)
+        probe_entered, release_probe, release_entered = Event(), Event(), Event()
+        errors = []
+        with CloudBudgetSession(self.root / "journal", approval(), cloud,
+                guard_deployment_configured=True, clock=clock.time,
+                monotonic=clock.monotonic) as budget:
+            worker = SSHWorker(spec(), selection(), budget, cloud, self.key,
+                               self.root / "concurrent-state", allow_live=True)
+            def probe(snapshot, timeout):
+                plan = budget.guard_plan(snapshot.key)
+                budget.arm_guard(snapshot.key, GuardReceipt(plan, worker_guard_source_sha256(),
+                    123, clock.time(), True, True))
+                worker.plan, worker._key = plan, snapshot.key
+                probe_entered.set()
+                if not release_probe.wait(3):
+                    raise ValueError("test probe release timed out")
+                return WorkerObservation(GPUDevice(snapshot.resource_id, Backend.CUDA, 24082,
+                    frozenset({Precision.FP16})), spec().gpu_id)
+            provider = _provider(spec(), cloud, budget, probe)
+            worker.set_enforcer(lambda: budget.enforce_limits(provider))
+            original_release = budget._release
+            def marked_release(*args):
+                release_entered.set()
+                return original_release(*args)
+            def acquire():
+                try:
+                    provider.acquire(selection().model, max_cost_usd=.51, idempotency_key="threaded")
+                except Exception as error:
+                    errors.append(type(error).__name__)
+            def enforce():
+                try:
+                    clock.sleep(1741)
+                    worker.check()
+                except Exception as error:
+                    errors.append(type(error).__name__)
+            first = Thread(target=acquire, daemon=True)
+            second = Thread(target=enforce, daemon=True)
+            with patch.object(budget, "_release", side_effect=marked_release):
+                first.start()
+                self.assertTrue(probe_entered.wait(2))
+                second.start()
+                self.assertTrue(release_entered.wait(2))
+                release_probe.set()
+                first.join(3)
+                second.join(3)
+            self.assertFalse(first.is_alive(), "acquisition deadlocked on budget/provisioner locks")
+            self.assertFalse(second.is_alive(), "driver supervision deadlocked on provider lock")
+            self.assertEqual(budget.snapshots[0].state, "released")
+            self.assertFalse(cloud.pods)
+            self.assertEqual(sum(call[0] == "POST" for call in cloud.calls), 1)
+            self.assertEqual(sum(call[0] == "DELETE" for call in cloud.calls), 1)
+            self.assertIn("WorkerError", errors)
 
     def test_subprocess_timeout_output_and_local_environment_bounds(self):
         self.assertEqual(run_process([sys.executable, "-c", "print('fixture')"], timeout=2),
