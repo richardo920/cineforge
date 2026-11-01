@@ -82,7 +82,7 @@ Do not select an open-source code license on the owner's behalf. The initial pac
 ## Implementation sequence
 
 1. Foundation: package, mock provider, GPU selection, character revisions, cue validation, skill provenance, demo, and offline CI.
-2. One real vertical slice: local ComfyUI adapter, a reviewed model/workflow, private artifact store, run manifest, and one-shot generation.
+2. One real vertical slice: the laptop orchestrates a private ComfyUI endpoint on a manually prepared Runpod GPU worker, with a reviewed model/workflow, private artifact store, run manifest, and one-shot generation. Automated cloud lifecycle and budgets remain M3.
 3. Cloud lifecycle and budgets; character conditioning; audio generation, analysis, mixing, and human review.
 4. Timeline orchestration, resumable multi-shot jobs, editorial UI, and a rights/security review before an open-source release.
 

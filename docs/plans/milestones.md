@@ -30,9 +30,9 @@ M1 completion marks take effect only after M1.5 passes current-head CI and indep
 - [x] M1.4 Add CLI plan validation and mock-run commands with synthetic examples. Acceptance: valid plan produces metadata-only output and provenance; invalid plans return nonzero without partial success claims.
 - [x] M1.5 Implement local artifact manifests and resumable job records. Acceptance: checksums, atomic writes, interrupted runs, failed jobs, and retry-without-regenerating-completed-shots are tested.
 
-## M2 — First real shot through local ComfyUI
+## M2 — First real shot through a private ComfyUI endpoint
 
-Depends on M1. Exit: one explicitly approved model/workflow produces a short shot with provenance and bounded execution.
+Depends on M1. The laptop orchestrates a private ComfyUI endpoint on a manually prepared Runpod GPU worker; M3 retains automated cloud lifecycle and budgets. Exit: one explicitly approved model/workflow produces a short shot with provenance and bounded execution.
 
 - [ ] M2.1 Select and review a pinned model/workflow with supported hardware and usage terms. Acceptance: rights ledger, memory expectations, immutable versions, and owner approval precede downloading weights or paid execution.
 - [ ] M2.2 Implement ComfyUI transport and workflow translation. Acceptance: mocked transport covers submit/poll/result/cancel, malformed replies, timeouts, and connection loss; default CI stays offline.
