@@ -1,4 +1,4 @@
-"""Compute lifecycle boundary only; no hardware detection or provisioning implementation."""
+"""Provider-neutral compute lifecycle boundary; importing it performs no I/O."""
 
 from typing import Protocol, runtime_checkable
 
@@ -7,7 +7,7 @@ from cineforge.devices import GPUDevice, ModelSpec
 
 @runtime_checkable
 class Provisioner(Protocol):
-    """Future adapters enforce budget/cleanup; execution providers need no provisioner."""
+    """Adapters manage compute separately from workflow execution and artifact storage."""
 
     def acquire(self, requirements: ModelSpec, *, max_cost_usd: float) -> GPUDevice: ...
 
