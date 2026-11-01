@@ -65,11 +65,11 @@ Keep actual images, embeddings, and voice recordings in private artifact storage
 
 ## Audio subsystem
 
-Plan dialogue, ambience, Foley, effects, and music as separate stems on a shared timeline. Cue sheets contain start, duration, purpose, speaker/character reference, source, and license metadata; picture changes invalidate affected cues and synchronization checks.
+Plan dialogue, ambience, Foley, effects, and music as separate stems on a shared timeline. M5 takes short approved script/台词 lines with language (at least English/Mandarin), speaker/character/voice identity, emotion/delivery, pronunciation and timing; full brief-to-screenplay planning remains M6. Cue sheets retain source/rights and media revisions; script, speech, character or picture changes invalidate affected audio/video, synchronization checks and approvals.
 
-Future adapters synthesize or retrieve licensed sound, align speech, analyze transcripts/speaker timing, measure loudness/true peak/clipping/silence, and mix with FFmpeg or a DAW. Audio-capable models can contribute listening judgments when available; numerical analysis and human listening remain separate review signals.
+Separate speech synthesis, lip-sync/talking-video adapters, mixing and audio/visual evaluation. Approved speech drives talking video or post-process lip sync; M5 proves an original visible-mouth actor speaking at least one short clip each in English and Mandarin, preserving identity. Unsupported face, pose, style or language fails explicitly; the mouthless M4 robot is not lip-sync evidence.
 
-The first audio implementation will validate cue timing and define an analysis-result contract only. Final delivery should check intelligibility, synchronization, unwanted artifacts, clipping, music rights, and platform-specific loudness targets; record human listening approval before export.
+Future adapters analyze speech timing, loudness/true peak/clipping/silence and mix licensed stems; audio-model feedback is optional. Timeline alignment alone cannot prove visible lip sync: technical checks and actual human listening/visual review of exact media revisions must pass before export. See the [audio design](audio.md) for scope and later pinned model, rights, hardware and budget approvals; no download or execution is authorized here.
 
 ## Skills management
 
