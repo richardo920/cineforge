@@ -176,6 +176,18 @@ class RunpodLifecycleTests(unittest.TestCase):
         self.assertFalse(self.cloud.pods)
         self.assertEqual(sum(c[0] == "POST" for c in self.cloud.calls), 1)
 
+    def test_restored_created_lease_inspection_emits_ready_after_measured_probe(self):
+        p = self.provider()
+        self.acquire(p)
+        restored = self.provider()
+        snapshot = replace(p.snapshots[0], state="created")
+        restored.restore_owned(p.intent("first"), snapshot)
+        measured = restored.inspect("pod_1")
+        self.assertEqual(measured.memory_mib, 24082)
+        self.assertEqual(restored.snapshots[0].state, "ready")
+        self.assertEqual(self.acquire(restored).device_id, "pod_1")
+        self.assertEqual(sum(c[0] == "POST" for c in self.cloud.calls), 1)
+
     def test_startup_timeout_releases_the_known_identity(self):
         self.cloud.status = "STARTING"
         p = self.provider()
@@ -255,6 +267,14 @@ class RunpodLifecycleTests(unittest.TestCase):
             self.assertEqual(p.snapshots[0].state, "not_created")
             self.assertNotIn("fixture-sensitive", str(cm.exception))
 
+    def test_policy_and_sink_must_complete_the_synchronous_none_contract(self):
+        for hooks in ({"before_create": lambda i: False},
+                      {"event_sink": lambda i, s: "not persisted"}):
+            p = self.provider(**hooks)
+            with self.assertRaises(ProvisioningError):
+                self.acquire(p)
+            self.assertFalse(self.cloud.calls)
+
     def test_postcreate_persistence_failure_retains_identity_and_attempts_cleanup(self):
         def sink(intent, snapshot):
             self.events.append((intent, snapshot))
@@ -267,6 +287,61 @@ class RunpodLifecycleTests(unittest.TestCase):
         self.assertFalse(self.cloud.pods)  # GET/DELETE still ran despite sink failures.
         self.assertTrue(any(c[0] == "DELETE" for c in self.cloud.calls))
         self.assertFalse(self.probes)
+
+    def test_ready_event_failure_cleans_up_after_a_successful_probe(self):
+        def sink(intent, snapshot):
+            if snapshot.state == "ready":
+                raise RuntimeError("private persistence diagnostic")
+            self.events.append((intent, snapshot))
+        p = self.provider(event_sink=sink)
+        with self.assertRaises(ProvisioningError) as cm:
+            self.acquire(p)
+        self.assertEqual(len(self.probes), 1)
+        self.assertEqual(cm.exception.snapshot.state, "released")
+        self.assertFalse(self.cloud.pods)
+
+    def test_transient_startup_inspection_failure_cleans_up_using_fresh_read(self):
+        count = 0
+
+        def transient(pod):
+            nonlocal count
+            count += 1
+            if count == 1:
+                raise RuntimeError("private cloud diagnostic")
+            return pod
+
+        self.cloud.get_change = transient
+        p = self.provider()
+        with self.assertRaises(ProvisioningError) as cm:
+            self.acquire(p)
+        self.assertEqual(cm.exception.snapshot.resource_id, "pod_1")
+        self.assertEqual(cm.exception.snapshot.state, "released")
+        self.assertFalse(self.cloud.pods)
+
+    def test_late_complete_create_response_retains_its_id_for_cleanup(self):
+        original = self.cloud.request
+
+        def late(method, path, body=None, **bounds):
+            result = original(method, path, body, **bounds)
+            if method == "POST":
+                self.clock.sleep(4)
+            return result
+
+        self.cloud.request = late
+        p = self.provider()
+        with self.assertRaises(ProvisioningError) as cm:
+            self.acquire(p)
+        self.assertEqual(cm.exception.snapshot.resource_id, "pod_1")
+        self.assertEqual(cm.exception.snapshot.state, "released")
+        self.assertFalse(self.cloud.pods)
+        self.assertFalse(self.probes)
+
+    def test_non_cuda_requirements_fail_before_paid_create(self):
+        p = self.provider()
+        with self.assertRaises(ProvisioningError):
+            p.acquire(replace(model(), allowed_backends=frozenset({Backend.METAL})),
+                      max_cost_usd=1)
+        self.assertFalse(self.cloud.calls)
 
     def test_foreign_or_configuration_drift_never_authorizes_deletion(self):
         for field, value in [("env", {}), ("mounts", {"persistent": {"size": 20}}),

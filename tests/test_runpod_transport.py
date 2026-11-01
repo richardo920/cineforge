@@ -99,6 +99,15 @@ class RunpodTransportTests(unittest.TestCase):
                     "GET", path, timeout_seconds=1, max_bytes=100)
                 self.assertEqual(opening.call_count, 1)
 
+    def test_catalog_read_for_policy_preflight_is_fixed_origin_and_exact(self):
+        path = ("/v2/catalog/gpus/NVIDIA%20GeForce%20RTX%204090?include=AVAILABILITY"
+                "&product=POD&cloud=SECURE&count=1&minCudaVersion=12.8")
+        with patch("cineforge.runpod_transport._open_connection",
+                   return_value=FakeConnection()) as opening:
+            RunpodHTTPTransport("fixture-value", allow_live=True).request(
+                "GET", path, timeout_seconds=1, max_bytes=100)
+            self.assertEqual(opening.call_count, 1)
+
     def test_oversized_and_truncated_responses_fail_and_close(self):
         for response in (FakeResponse(b'123456'), FakeResponse(b'{}', unread=4)):
             with self.subTest(response=response):
@@ -117,6 +126,9 @@ class RunpodTransportTests(unittest.TestCase):
                     ("GET", "/v2/pods?limit=1001", None),
                     ("GET", "/v2/pods?limit=1&limit=2", None),
                     ("POST", "/v2/pods?limit=20", {}),
+                    ("POST", "/v2/catalog/gpus/NVIDIA%20GeForce%20RTX%204090", {}),
+                    ("GET", "/v2/catalog/gpus/..%2Faccount", None),
+                    ("GET", "/v2/catalog/gpus/fixture?api_key=private", None),
                     ("GET", "/v2/pods/fixture\r\nX-Key: secret", None),
                     ("PATCH", "/v2/pods/fixture", {}), ("GET", "/v2/pods", {}),
                     ("POST", "/v2/pods", {"x": float("nan")})]

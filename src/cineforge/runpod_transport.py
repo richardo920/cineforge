@@ -13,7 +13,7 @@ import time
 from dataclasses import dataclass
 from threading import Thread, Timer
 from typing import Protocol
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 
 class CloudTransportError(ValueError):
@@ -45,14 +45,24 @@ def _request_path(method: str, path: object) -> bool:
         return True
     try:
         url = urlsplit(path)
-        fields = parse_qsl(url.query, strict_parsing=True, max_num_fields=2)
-        if (method != "GET" or url.path != "/v2/pods" or url.scheme or url.netloc
-                or url.fragment or not fields or len(dict(fields)) != len(fields)):
+        fields = parse_qsl(url.query, strict_parsing=True, max_num_fields=8)
+        if (method != "GET" or url.scheme or url.netloc or url.fragment
+                or len(dict(fields)) != len(fields)):
             return False
-        return all((key == "limit" and value.isascii() and value.isdigit()
-                    and 1 <= int(value) <= 1000)
-                   or (key == "cursor" and 0 < len(value) <= 8192 and value.isprintable())
-                   for key, value in fields)
+        if url.path == "/v2/pods":
+            return bool(fields) and all(
+                (key == "limit" and value.isascii() and value.isdigit() and 1 <= int(value) <= 1000)
+                or (key == "cursor" and 0 < len(value) <= 8192 and value.isprintable())
+                for key, value in fields)
+        prefix = "/v2/catalog/gpus/"
+        if not url.path.startswith(prefix) or not re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9 ._-]{1,100}", unquote(url.path[len(prefix):])):
+            return False
+        allowed = {"include": {"AVAILABILITY"}, "product": {"POD"},
+                   "cloud": {"SECURE"}, "count": {"1"}}
+        return all(value in allowed.get(key, set()) or (
+            key == "minCudaVersion" and re.fullmatch(r"\d{1,2}\.\d{1,2}", value) is not None
+            and tuple(map(int, value.split("."))) >= (12, 8)) for key, value in fields)
     except ValueError:
         return False
 

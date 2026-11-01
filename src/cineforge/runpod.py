@@ -253,6 +253,8 @@ class RunpodPodProvisioner:
                  sleep: Callable[[float], None] = time.sleep) -> None:
         if (not isinstance(spec, RunpodPodSpec) or not callable(probe)
                 or not callable(before_create) or not callable(event_sink)
+                or not callable(getattr(transport, "request", None))
+                or not callable(clock) or not callable(sleep)
                 or type(max_polls) is not int or not 1 <= max_polls <= 10000
                 or type(poll_interval_seconds) not in (int, float)
                 or not math.isfinite(poll_interval_seconds)
@@ -287,7 +289,8 @@ class RunpodPodProvisioner:
         lease.snapshot = replace(lease.snapshot, **changes)
         failed = False
         try:
-            self._sink(lease.intent, lease.snapshot)
+            if self._sink(lease.intent, lease.snapshot) is not None:
+                raise ValueError
         except (Exception, KeyboardInterrupt):
             failed = True
         if failed:
@@ -306,7 +309,8 @@ class RunpodPodProvisioner:
                                              max_bytes=2 * 1024 * 1024)
             if (not isinstance(result, CloudResponse) or type(result.status) is not int
                     or not 100 <= result.status <= 599 or not isinstance(result.body, bytes)
-                    or len(result.body) > 2 * 1024 * 1024 or self._clock() >= deadline):
+                    or len(result.body) > 2 * 1024 * 1024
+                    or method != "POST" and self._clock() >= deadline):
                 raise ValueError
         except (Exception, KeyboardInterrupt):
             failed = True
@@ -436,6 +440,7 @@ class RunpodPodProvisioner:
             return lease.snapshot
 
     def _measurement(self, lease: _Lease, timeout: float) -> WorkerObservation | None:
+        bounded_seconds(timeout)
         failed = False
         observation = None
         try:
@@ -459,16 +464,21 @@ class RunpodPodProvisioner:
             pod = self._get(lease, deadline)
             if pod is None or pod["status"] != "RUNNING" or pod.get("runtime") is None:
                 raise ProvisioningError("owned worker is not ready for measurement", lease.snapshot)
+            rate = pod.get("cost")
+            if not _money(rate) or rate > self.spec.max_hourly_usd:
+                raise ProvisioningError("worker hourly rate exceeds operator ceiling", lease.snapshot)
             observation = self._measurement(lease, max(0, deadline - self._clock()))
             if observation is None or self._clock() >= deadline:
                 raise ProvisioningError("worker measurement did not complete", lease.snapshot)
             lease.observation = observation
+            self._emit(lease, state="ready", hourly_usd=float(rate))
             return observation.device
 
     def acquire(self, requirements: ModelSpec, *, max_cost_usd: float,
                 idempotency_key: str | None = None,
                 cancelled: Callable[[], bool] = lambda: False) -> GPUDevice:
-        if (not isinstance(requirements, ModelSpec) or not _money(max_cost_usd)
+        if (not isinstance(requirements, ModelSpec) or Backend.CUDA not in requirements.allowed_backends
+                or not _money(max_cost_usd)
                 or not callable(cancelled)):
             raise ProvisioningError("invalid cloud acquisition requirements")
         key = uuid.uuid4().hex if idempotency_key is None else idempotency_key
@@ -502,9 +512,13 @@ class RunpodPodProvisioner:
             try:
                 reason = "event_sink"
                 self._emit(lease)
-                self._before(intent)
+                if self._before(intent) is not None:
+                    raise ValueError
                 if cancelled():
                     reason = "cancelled"
+                    raise ValueError
+                if self._clock() >= deadline:
+                    reason = "startup_timeout"
                     raise ValueError
                 reason = "transport"
                 created_request = True
@@ -549,8 +563,9 @@ class RunpodPodProvisioner:
                         observation = self._measurement(lease, min(
                             self._request, max(0, deadline - self._clock())))
                         if observation is not None:
-                            if cancelled() or self._clock() >= deadline:
-                                reason = "cancelled" if cancelled() else "startup_timeout"
+                            cancel_now = cancelled()
+                            if cancel_now or self._clock() >= deadline:
+                                reason = "cancelled" if cancel_now else "startup_timeout"
                                 raise ValueError
                             lease.observation = observation
                             self._emit(lease, state="ready")
