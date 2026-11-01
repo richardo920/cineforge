@@ -1,0 +1,185 @@
+{
+  "schema_version": 1,
+  "task": "M4.3",
+  "reviewer": "m43-curation-4f9ed59e",
+  "reviewed_at": "2026-11-01",
+  "scope": "Metadata-only source/terms inspection for reference consultation. No third-party skill bodies, scripts, assets or weights imported; no execution, installation or publication authorized. Review assertions are operator evidence, not legal certification.",
+  "sources": [
+    {
+      "entry_id": "write-screenplay",
+      "category": "story",
+      "source": {
+        "repository": "https://github.com/badgids/Story-Film-Skills",
+        "revision": "5ec9daf3950a987424a879ab5fef583b013afa8a", "revision_note": "# pragma: allowlist secret - public source metadata",
+        "path": "skills/write-screenplay/SKILL.md",
+        "sha256": "f1a52d598da38ef23dcf5ac93f568a8c0e1747e655474e6604e4b98c892fe0a5", "sha256_note": "# pragma: allowlist secret - public source metadata"
+      },
+      "terms": {
+        "repository": "https://github.com/badgids/Story-Film-Skills",
+        "revision": "5ec9daf3950a987424a879ab5fef583b013afa8a", "revision_note": "# pragma: allowlist secret - public source metadata",
+        "path": "LICENSE",
+        "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30", "sha256_note": "# pragma: allowlist secret - public source metadata"
+      },
+      "notice_source": {
+        "repository": "https://github.com/badgids/Story-Film-Skills",
+        "revision": "5ec9daf3950a987424a879ab5fef583b013afa8a", "revision_note": "# pragma: allowlist secret - public source metadata",
+        "path": "NOTICE",
+        "sha256": "fe90d2f70dc20379f535c8961bec205faf968429f9a4fd06539ce1994bf97de3", "sha256_note": "# pragma: allowlist secret - public source metadata"
+      },
+      "finding": "Filmable screenplay, character-specific dialogue and scene/line manifest guidance; wider core/style dependencies and script invocation are not adopted.",
+      "permitted_context": "internal noncommercial reference consultation only",
+      "unadopted": "No dependency loading, copying of skill bodies, installation, tool execution, model calls or prescribed filesystem writes."
+    },
+    {
+      "entry_id": "shot-design",
+      "category": "camera",
+      "source": {
+        "repository": "https://github.com/badgids/Story-Film-Skills",
+        "revision": "5ec9daf3950a987424a879ab5fef583b013afa8a", "revision_note": "# pragma: allowlist secret - public source metadata",
+        "path": "skills/shot-design/SKILL.md",
+        "sha256": "29950bfcef4e84d3426d15fba694e63064e4ac1868679099fa5edb0c7662a1f2", "sha256_note": "# pragma: allowlist secret - public source metadata"
+      },
+      "terms": {
+        "repository": "https://github.com/badgids/Story-Film-Skills",
+        "revision": "5ec9daf3950a987424a879ab5fef583b013afa8a", "revision_note": "# pragma: allowlist secret - public source metadata",
+        "path": "LICENSE",
+        "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30", "sha256_note": "# pragma: allowlist secret - public source metadata"
+      },
+      "notice_source": {
+        "repository": "https://github.com/badgids/Story-Film-Skills",
+        "revision": "5ec9daf3950a987424a879ab5fef583b013afa8a", "revision_note": "# pragma: allowlist secret - public source metadata",
+        "path": "NOTICE",
+        "sha256": "fe90d2f70dc20379f535c8961bec205faf968429f9a4fd06539ce1994bf97de3", "sha256_note": "# pragma: allowlist secret - public source metadata"
+      },
+      "finding": "Motivated framing, movement, eye trace, eyelines and continuity guidance; wider suite schemas and execution dependencies are not adopted.",
+      "permitted_context": "internal noncommercial reference consultation only",
+      "unadopted": "No dependency loading, copying of skill bodies, installation, tool execution, model calls or prescribed filesystem writes."
+    },
+    {
+      "entry_id": "sound-design",
+      "category": "audio",
+      "source": {
+        "repository": "https://github.com/badgids/Story-Film-Skills",
+        "revision": "5ec9daf3950a987424a879ab5fef583b013afa8a", "revision_note": "# pragma: allowlist secret - public source metadata",
+        "path": "skills/sound-design/SKILL.md",
+        "sha256": "5c7a65a32f942a67e4f5af190ba0bdb742400bb590cb2606c0919056aa9313a2", "sha256_note": "# pragma: allowlist secret - public source metadata"
+      },
+      "terms": {
+        "repository": "https://github.com/badgids/Story-Film-Skills",
+        "revision": "5ec9daf3950a987424a879ab5fef583b013afa8a", "revision_note": "# pragma: allowlist secret - public source metadata",
+        "path": "LICENSE",
+        "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30", "sha256_note": "# pragma: allowlist secret - public source metadata"
+      },
+      "notice_source": {
+        "repository": "https://github.com/badgids/Story-Film-Skills",
+        "revision": "5ec9daf3950a987424a879ab5fef583b013afa8a", "revision_note": "# pragma: allowlist secret - public source metadata",
+        "path": "NOTICE",
+        "sha256": "fe90d2f70dc20379f535c8961bec205faf968429f9a4fd06539ce1994bf97de3", "sha256_note": "# pragma: allowlist secret - public source metadata"
+      },
+      "finding": "Separate ambience, Foley, effects, perspective, synchronization and silence; routing to named audio models is not adopted.",
+      "permitted_context": "internal noncommercial reference consultation only",
+      "unadopted": "No dependency loading, copying of skill bodies, installation, tool execution, model calls or prescribed filesystem writes."
+    },
+    {
+      "entry_id": "edit-plan",
+      "category": "editing",
+      "source": {
+        "repository": "https://github.com/badgids/Story-Film-Skills",
+        "revision": "5ec9daf3950a987424a879ab5fef583b013afa8a", "revision_note": "# pragma: allowlist secret - public source metadata",
+        "path": "skills/edit-plan/SKILL.md",
+        "sha256": "47286eec6f1f35638840fe5272ed2214dd208333424545bfd3856ce94ba70850", "sha256_note": "# pragma: allowlist secret - public source metadata"
+      },
+      "terms": {
+        "repository": "https://github.com/badgids/Story-Film-Skills",
+        "revision": "5ec9daf3950a987424a879ab5fef583b013afa8a", "revision_note": "# pragma: allowlist secret - public source metadata",
+        "path": "LICENSE",
+        "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30", "sha256_note": "# pragma: allowlist secret - public source metadata"
+      },
+      "notice_source": {
+        "repository": "https://github.com/badgids/Story-Film-Skills",
+        "revision": "5ec9daf3950a987424a879ab5fef583b013afa8a", "revision_note": "# pragma: allowlist secret - public source metadata",
+        "path": "NOTICE",
+        "sha256": "fe90d2f70dc20379f535c8961bec205faf968429f9a4fd06539ce1994bf97de3", "sha256_note": "# pragma: allowlist secret - public source metadata"
+      },
+      "finding": "Cut order, pacing, transitions, bridges and pickups; file-writing conventions are not adopted.",
+      "permitted_context": "internal noncommercial reference consultation only",
+      "unadopted": "No dependency loading, copying of skill bodies, installation, tool execution, model calls or prescribed filesystem writes."
+    },
+    {
+      "entry_id": "wan21-model-guidance",
+      "category": "model_card",
+      "source": {
+        "repository": "https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B",
+        "revision": "37ec512624d61f7aa208f7ea8140a131f93afc9a", "revision_note": "# pragma: allowlist secret - public source metadata",
+        "path": "README.md",
+        "sha256": "d19fb6c377090790940f64af3423c87d289abc9fdee4d45963018e18e5d84119", "sha256_note": "# pragma: allowlist secret - public source metadata"
+      },
+      "terms": {
+        "repository": "https://github.com/Wan-Video/Wan2.1",
+        "revision": "9737cba9c1c3c4d04b33fcad41c111989865d315", "revision_note": "# pragma: allowlist secret - public source metadata",
+        "path": "LICENSE.txt",
+        "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4", "sha256_note": "# pragma: allowlist secret - public source metadata"
+      },
+      "supplemental_sources": [
+        {
+          "repository": "https://github.com/Wan-Video/Wan2.1",
+          "revision": "9737cba9c1c3c4d04b33fcad41c111989865d315", "revision_note": "# pragma: allowlist secret - public source metadata",
+          "path": "README.md",
+          "sha256": "3bdaca69aa116222a49859dc21d4a735b60a580af7e1b81531085c87227e4486", "sha256_note": "# pragma: allowlist secret - public source metadata"
+        },
+        {
+          "repository": "https://github.com/Wan-Video/Wan2.1",
+          "revision": "9737cba9c1c3c4d04b33fcad41c111989865d315", "revision_note": "# pragma: allowlist secret - public source metadata",
+          "path": "wan/configs/wan_t2v_1_3B.py",
+          "sha256": "6976ec4c03f737b69ae17afe13339b32905739205d4c19f16c8b329f9f06e986", "sha256_note": "# pragma: allowlist secret - public source metadata"
+        }
+      ],
+      "finding": "Official model card and maintainer native-inference configuration. 480p, guide scale6 and shift8-12 are upstream advice. Native8.19GB memory statement is not a ComfyUI minimum. Optional prompt expansion has not been adopted. Model/output rights and live authorization remain separate.",
+      "permitted_context": "internal noncommercial reference consultation only"
+    },
+    {
+      "entry_id": "wan21-comfy-recipe",
+      "category": "recipe",
+      "source": {
+        "repository": "https://github.com/comfyanonymous/ComfyUI_examples",
+        "revision": "f9431bb000ce792094ff345446e22cac1ea6cef3", "revision_note": "# pragma: allowlist secret - public source metadata",
+        "path": "wan/text_to_video_wan.json",
+        "sha256": "436b9c074b677011b0f50a9feb8c4b4128abbbd9e4acaf34d8eeb80efbd74a64", "sha256_note": "# pragma: allowlist secret - public source metadata"
+      },
+      "terms": {
+        "repository": "https://github.com/comfyanonymous/ComfyUI_examples",
+        "revision": "f9431bb000ce792094ff345446e22cac1ea6cef3", "revision_note": "# pragma: allowlist secret - public source metadata",
+        "path": "LICENSE",
+        "sha256": "b43f63a6847e68df94f5757fbca5c9dd83db1db1c7d638689181eae33f58d955", "sha256_note": "# pragma: allowlist secret - public source metadata"
+      },
+      "supplemental_sources": [
+        {
+          "repository": "https://github.com/comfyanonymous/ComfyUI_examples",
+          "revision": "f9431bb000ce792094ff345446e22cac1ea6cef3", "revision_note": "# pragma: allowlist secret - public source metadata",
+          "path": "wan/README.md",
+          "sha256": "704c31de4abf39dfeb1db1b6fd208d1ceccaa6dfb8aaa15be5fbb5d5b5d4c4d6", "sha256_note": "# pragma: allowlist secret - public source metadata"
+        },
+        {
+          "repository": "https://github.com/richardo920/cineforge",
+          "revision": "3c70f19772b37f6e61795287cfedc0361ee374ce", "revision_note": "# pragma: allowlist secret - public source metadata",
+          "path": "config/comfy/wan21-t2v-1.3b-api.json",
+          "sha256": "8baab77ae0a01374dfad997d753eba2d7bad84945088dc1f90fdf7f9cf04d529", "sha256_note": "# pragma: allowlist secret - public source metadata"
+        },
+        {
+          "repository": "https://github.com/richardo920/cineforge",
+          "revision": "3c70f19772b37f6e61795287cfedc0361ee374ce", "revision_note": "# pragma: allowlist secret - public source metadata",
+          "path": "config/comfy/wan21-t2v-1.3b.json",
+          "sha256": "f028fc75ba694605e327eb30ba5d411a8342e8841698f51cf9a6e399a0b1f60e", "sha256_note": "# pragma: allowlist secret - public source metadata"
+        },
+        {
+          "repository": "https://github.com/richardo920/cineforge",
+          "revision": "3c70f19772b37f6e61795287cfedc0361ee374ce", "revision_note": "# pragma: allowlist secret - public source metadata",
+          "path": "docs/evidence/m2-live-shot.json",
+          "sha256": "2d0b1ef79034300eff9d2738f4260887f71b58228ccb82158db8c1dc90af1d6c", "sha256_note": "# pragma: allowlist secret - public source metadata"
+        }
+      ],
+      "finding": "Official UI workflow verified against existing approved API adaptation. Upstream settings832x480/33frames/30steps/cfg6/uni_pc/simple/shift8 retained; local SaveWEBM16fps and synthetic prompts changed. One measured RTX4090 run47.645s and CUDA-usable24082MiB admission floor; neither measured minimum memory nor quality guarantee. Existing M2 owner approval is source history, not new GPU authority.",
+      "permitted_context": "internal noncommercial reference consultation only"
+    }
+  ]
+}
