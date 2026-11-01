@@ -72,12 +72,13 @@ Depends on M1 and M4 rights checks; picture integration depends on M2. Exit: one
 
 ## M6 — Auteur orchestration and editorial delivery
 
-Depends on M2, M4, M5; cloud mode also depends on M3. Exit: an approved brief becomes a reviewable multi-shot scene with final audio and complete lineage.
+Depends on M2, M4, M5; cloud mode also depends on M3. Exit: the owner reviews and approves a versioned plan through a private internal UI before production execution, then reviews the resulting multi-shot scene with final audio and complete lineage. Build CLI/backend contracts before the UI.
 
-- [ ] M6.1 Implement brief → scene/shot/storyboard plans with structured outputs and owner approval gates. Acceptance: malformed plans and unsupported requests fail validation before generation/spend.
+- [ ] M6.1 Implement brief → scene/shot/storyboard plans with structured outputs and owner approval of the exact plan revision. Acceptance: malformed plans, unsupported requests, and missing/stale approval block production generation/spend; any paid preview generation requires its own explicit budget approval.
 - [ ] M6.2 Implement dependency-aware scheduling, bounded retries, cancellation, and resume. Acceptance: injected failures preserve completed work, prevent duplicate charges where provider semantics permit, and report uncertain submission states without blind retries.
 - [ ] M6.3 Implement editorial timeline and picture-lock invalidation. Acceptance: trim/reorder transitions preserve timebase and invalidate dependent audio, captions, and prior approvals.
-- [ ] M6.4 Implement CLI-first scene review/export; evaluate a UI only after workflow validation. Acceptance: a short scene exports with captions, stems, picture/audio approvals, rights ledger, and full manifest; private assets never enter Git.
+- [ ] M6.4 Implement CLI-first scene review/export backend. Acceptance: a short scene exports with captions, stems, picture/audio approvals, rights ledger, and full manifest; private assets never enter Git.
+- [ ] M6.5 Build the private internal review UI after validating the CLI/backend contracts: storyboard, source images/video inputs, prompts, audio, characters, GPU/provider, pinned open models, and estimated cost/budget. Acceptance: comments are submitted when the owner finishes a review; the agent produces a new plan revision for repeated review until explicit approval of that exact snapshot permits production execution. Plan/model/provider/GPU/asset/budget changes invalidate prior approval; final picture/audio approval remains separate.
 
 ## M7 — Release readiness and possible open source
 
