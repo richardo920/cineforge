@@ -63,6 +63,36 @@ def exercise_descendant_pipe(test, root, module, function):
                 pass
 
 
+def exercise_post_spawn_clock_failure(test, function, expected_exception):
+    """Interrupt the first clock read after a real spawn; fixture cleanup also covers old code."""
+    original_spawn, original_clock = subprocess.Popen, time.monotonic
+    children = []
+    def spawn(*args, **kwargs):
+        child = original_spawn(*args, **kwargs)
+        children.append(child)
+        return child
+    def clock():
+        if children:
+            raise KeyboardInterrupt("synthetic post-spawn interruption")
+        return original_clock()
+    try:
+        with patch("cineforge.worker_bootstrap.subprocess.Popen", side_effect=spawn), \
+                patch("cineforge.worker_bootstrap.time.monotonic", side_effect=clock):
+            with test.assertRaises(expected_exception):
+                function([sys.executable, "-c", "import time;time.sleep(10)"], timeout=1)
+        test.assertEqual(len(children), 1)
+        test.assertIsNotNone(children[0].poll())
+        test.assertTrue(children[0].stdin.closed)
+        test.assertTrue(children[0].stdout.closed)
+    finally:
+        for child in children:
+            if child.poll() is None:
+                os.killpg(child.pid, signal.SIGKILL)
+            child.wait(timeout=2)
+            child.stdin.close()
+            child.stdout.close()
+
+
 class Reply:
     def __init__(self, payload):
         self.payload = payload
@@ -292,6 +322,9 @@ class BootstrapTests(unittest.TestCase):
         self.assertIsNotNone(children[0].poll())
         self.assertTrue(children[0].stdin.closed)
         self.assertTrue(children[0].stdout.closed)
+
+    def test_post_spawn_clock_interruption_reaps_worker_child_and_closes_pipes(self):
+        exercise_post_spawn_clock_failure(self, bounded_process, KeyboardInterrupt)
 
     def test_standalone_failure_does_not_echo_input_or_traceback(self):
         request = {"operation": "fixture-sensitive-value", "allow_live": False, "timeout_seconds": 1}

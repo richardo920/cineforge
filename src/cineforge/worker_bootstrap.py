@@ -50,17 +50,19 @@ def bounded_process(command: list[str], *, timeout: float, cwd: Path | None = No
             or type(max_output) is not int or not 1 <= max_output <= 1024*1024
             or payload is not None and (not isinstance(payload, bytes) or len(payload) > 256*1024)):
         raise BootstrapError("invalid worker process bounds")
-    process = subprocess.Popen(command, cwd=cwd,
-        env=clean_environment() if environment is None else environment,
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-        start_new_session=True, bufsize=0)
-    assert process.stdin is not None and process.stdout is not None
-    output = bytearray()
-    payload = payload or b""
-    written = 0
-    deadline = time.monotonic() + timeout
+    process: subprocess.Popen[bytes] | None = None
     selector: selectors.BaseSelector | None = None
+    # A failed clock read cannot strand a newly spawned child; startup counts too.
+    deadline = time.monotonic() + timeout
     try:
+        process = subprocess.Popen(command, cwd=cwd,
+            env=clean_environment() if environment is None else environment,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            start_new_session=True, bufsize=0)
+        assert process.stdin is not None and process.stdout is not None
+        output = bytearray()
+        payload = payload or b""
+        written = 0
         selector = selectors.DefaultSelector()
         os.set_blocking(process.stdout.fileno(), False)
         os.set_blocking(process.stdin.fileno(), False)
@@ -104,21 +106,24 @@ def bounded_process(command: list[str], *, timeout: float, cwd: Path | None = No
     finally:
         # A completed parent can leave descendants holding its pipes open. Always
         # tear down the dedicated group; nonblocking pipes cannot hold close() hostage.
-        try:
+        if process is not None:
             try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            process.wait(timeout=2)
-        finally:
-            try:
-                if selector is not None:
-                    selector.close()
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait(timeout=2)
             finally:
                 try:
-                    process.stdin.close()
+                    if selector is not None:
+                        selector.close()
                 finally:
-                    process.stdout.close()
+                    try:
+                        if process.stdin is not None:
+                            process.stdin.close()
+                    finally:
+                        if process.stdout is not None:
+                            process.stdout.close()
 
 
 def private_write(root: Path, name: str, payload: bytes, *, replace: bool = False) -> None:
