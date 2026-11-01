@@ -39,6 +39,8 @@ Current modules include `contracts.py`, `devices.py`, `providers.py`, `mock.py`,
 
 The future orchestration layer, Auteur, translates a brief into versioned scenes, shots, character references, and an audio cue sheet. Each shot resolves a model requirement, selects a compatible execution target, submits a job, and records output artifacts before editorial review; failed shots can be retried without regenerating the whole film.
 
+M6 requires a private internal review UI after the CLI/backend contracts are validated: the owner reviews storyboard/assets, prompts, audio, characters, GPU/model choices and cost, then submits completed-review comments for the agent to produce a new revision. Production execution requires approval of the exact plan snapshot; changes invalidate that approval, while final picture/audio review remains separate. See the [review flow](architecture.md) and [M6.5 acceptance criteria](../plans/milestones.md#m6--auteur-orchestration-and-editorial-delivery).
+
 Keep orchestration independent from execution. GPU providers provision compute; runners such as ComfyUI execute workflows; model adapters translate creative requests into runner inputs. Hosted APIs can implement the execution protocol without owning a GPU provisioner.
 
 The version-one production manifest records project/scene/shot IDs, revision, prompt, seed where supported, model revision, workflow digest, character revision, provider/job ID, timestamps, cost, and artifact checksums. Immutable run records support retries, comparison, and lineage; seeds are evidence, not a guarantee of identical outputs across hardware.
