@@ -7,7 +7,7 @@ import os
 import tempfile
 import traceback
 import unittest
-from dataclasses import replace
+from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -166,6 +166,27 @@ class BudgetTests(unittest.TestCase):
             self.assertLess(costs["estimated_usd"], costs["reserved_worst_case_usd"])
             self.assertEqual(self.cloud.calls[0][0], "GET")
             self.assertEqual(self.cloud.calls[1][0], "POST")
+
+    def test_intents_are_immutable_copies_and_reads_do_not_change_journal(self):
+        with self.session() as session:
+            provider = self.provider(session)
+            self.acquire(provider)
+            before = (self.path / "budget.json").read_bytes()
+            intents = session.intents
+            self.assertIsInstance(intents, tuple)
+            self.assertEqual(intents, (provider.intent("first"),))
+            with self.assertRaises(FrozenInstanceError):
+                intents[0].name = "changed"
+            with self.assertRaises(FrozenInstanceError):
+                intents[0].spec.session_id = "changed"
+            exported = intents[0].to_dict()
+            exported["spec"]["session_id"] = "changed"
+            self.assertEqual(session.intents[0].spec.session_id, spec().session_id)
+            self.assertIsNot(session.intents[0], intents[0])
+            self.assertEqual((self.path / "budget.json").read_bytes(), before)
+        with self.session() as session:
+            self.assertEqual(session.intents, intents)
+            session.recover_owned(self.provider(session))
 
     def test_scope_digest_and_operational_comparison_and_strict_types(self):
         proposal, digest = approval_fixture()

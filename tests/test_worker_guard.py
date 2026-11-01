@@ -155,7 +155,7 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(GuardReceipt.from_dict(receipt.to_dict()), receipt)
 
     def test_worker_credential_uses_only_same_pod_injected_pair(self):
-        with patch.dict(os.environ, dict(RUNPOD_API_KEY="fixture-scoped-key",
+        with patch.dict(os.environ, dict(RUNPOD_API_KEY="fixture-scoped-key",  # pragma: allowlist secret - fake
                                         RUNPOD_POD_ID="fixture-pod"), clear=True):
             self.assertEqual(worker_credential(plan()), "fixture-scoped-key")
             with self.assertRaises(WorkerGuardError):
@@ -163,7 +163,7 @@ class GuardTests(unittest.TestCase):
         # No shell sourcing, laptop store, key creation, or export; PID1 bytes stay local.
         with patch.dict(os.environ, {}, clear=True), patch("os.open", return_value=42), \
                 patch("os.read", return_value=b"RUNPOD_POD_ID=fixture-pod\0"
-                    b"RUNPOD_API_KEY=fixture-scoped-key\0"), patch("os.close"):
+                    b"RUNPOD_API_KEY=fixture-scoped-key\0"), patch("os.close"):  # pragma: allowlist secret - fake
             self.assertEqual(worker_credential(plan()), "fixture-scoped-key")
             self.assertNotIn("RUNPOD_API_KEY", os.environ)
 
@@ -178,7 +178,7 @@ class GuardTests(unittest.TestCase):
                 if len(calls) >= 2:
                     pod.update(status="EXITED", runtime=None)
                 return Reply(pod)
-        with patch.dict(os.environ, dict(RUNPOD_API_KEY="fixture-scoped-key",
+        with patch.dict(os.environ, dict(RUNPOD_API_KEY="fixture-scoped-key",  # pragma: allowlist secret - fake
             RUNPOD_POD_ID="fixture-pod"), clear=True), patch(
                 "urllib.request.build_opener", return_value=Opener()):
             with self.assertRaises(WorkerGuardError):

@@ -599,6 +599,13 @@ class CloudBudgetSession:
             self._save()
 
     @property
+    def intents(self) -> tuple[AcquisitionIntent, ...]:
+        """Immutable copies of trusted intents for exact-spec recovery reconstruction."""
+        with self._lock:
+            return tuple(AcquisitionIntent.from_dict(r["intent"])
+                         for r in self._data.get("records", {}).values())
+
+    @property
     def snapshots(self) -> tuple[LeaseSnapshot, ...]:
         with self._lock:
             return tuple(LeaseSnapshot.from_dict(r["snapshot"])
