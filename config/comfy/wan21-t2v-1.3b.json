@@ -1,0 +1,191 @@
+{
+  "schema_version": 1,
+  "task_id": "M2.1",
+  "state": "selection_approved",
+  "model": {
+    "model_id": "Wan-AI/Wan2.1-T2V-1.3B",
+    "revision": "123acf1cc74bccbb9bfff8ac1ee72edc08c2341d", "revision_note": "# pragma: allowlist secret - public provenance hash",
+    "task": "text-to-video",
+    "allowed_backends": [
+      "cuda"
+    ],
+    "minimum_memory_mib": 24576,
+    "required_precision": "fp16",
+    "license": "Apache-2.0",
+    "commercial_use": true,
+    "memory_note": "24GiB is a conservative approved device admission target, not a measured minimum. Native upstream reports8.19GB; exact ComfyUI peak remains unmeasured.",
+    "upstream_repository": "Wan-AI/Wan2.1-T2V-1.3B",
+    "upstream_revision": "37ec512624d61f7aa208f7ea8140a131f93afc9a", "upstream_revision_note": "# pragma: allowlist secret - public provenance hash",
+    "distribution": "Comfy-Org/Wan-2.1",
+    "files": [
+      {
+        "path": "split_files/diffusion_models/wan2.1_t2v_1.3B_fp16.safetensors",
+        "revision": "123acf1cc74bccbb9bfff8ac1ee72edc08c2341d", "revision_note": "# pragma: allowlist secret - public provenance hash",
+        "sha256": "be531024cd9018cb5b48c40cfbb6a6191645b1c792eb8bf4f8c1c6e10f924dc5", "sha256_note": "# pragma: allowlist secret - public provenance hash",
+        "size_bytes": 2838303560,
+        "hash_verification": "upstream LFS metadata only; actual bytes not downloaded",
+        "url": "https://huggingface.co/Comfy-Org/Wan-2.1/resolve/123acf1cc74bccbb9bfff8ac1ee72edc08c2341d/split_files/diffusion_models/wan2.1_t2v_1.3B_fp16.safetensors",
+        "license": "Apache-2.0 (repository declaration)"
+      },
+      {
+        "path": "split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+        "revision": "123acf1cc74bccbb9bfff8ac1ee72edc08c2341d", "revision_note": "# pragma: allowlist secret - public provenance hash",
+        "sha256": "c3355d30191f1f066b26d93fba017ae9809dce6c627dda5f6a66eaa651204f68", "sha256_note": "# pragma: allowlist secret - public provenance hash",
+        "size_bytes": 6735906897,
+        "hash_verification": "upstream LFS metadata only; actual bytes not downloaded",
+        "url": "https://huggingface.co/Comfy-Org/Wan-2.1/resolve/123acf1cc74bccbb9bfff8ac1ee72edc08c2341d/split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+        "license": "Apache-2.0 (repository declaration)"
+      },
+      {
+        "path": "split_files/vae/wan_2.1_vae.safetensors",
+        "revision": "123acf1cc74bccbb9bfff8ac1ee72edc08c2341d", "revision_note": "# pragma: allowlist secret - public provenance hash",
+        "sha256": "2fc39d31359a4b0a64f55876d8ff7fa8d780956ae2cb13463b0223e15148976b", "sha256_note": "# pragma: allowlist secret - public provenance hash",
+        "size_bytes": 253815318,
+        "hash_verification": "upstream LFS metadata only; actual bytes not downloaded",
+        "url": "https://huggingface.co/Comfy-Org/Wan-2.1/resolve/123acf1cc74bccbb9bfff8ac1ee72edc08c2341d/split_files/vae/wan_2.1_vae.safetensors",
+        "license": "Apache-2.0 (repository declaration)"
+      }
+    ],
+    "total_weight_bytes": 9828025775
+  },
+  "runner": {
+    "repository": "Comfy-Org/ComfyUI",
+    "revision": "6d352802d8f8b9133f664a1757d6c6d26390c335", "revision_note": "# pragma: allowlist secret - public provenance hash",
+    "license": "GPL-3.0",
+    "license_url": "https://github.com/Comfy-Org/ComfyUI/blob/6d352802d8f8b9133f664a1757d6c6d26390c335/LICENSE",
+    "custom_nodes": [],
+    "integration": "External HTTP service only; no runner code vendored.",
+    "environment": "Worker image, Python/PyTorch/CUDA versions and dependency hashes must be recorded before live execution."
+  },
+  "workflow": {
+    "path": "wan21-t2v-1.3b-api.json",
+    "canonical_sha256": "5f6860c7c9817023b37c0bbe707f7f50d922964a3b729cdac2d2831bf822c5a8", "canonical_sha256_note": "# pragma: allowlist secret - public provenance hash",
+    "canonicalization": "UTF-8 JSON, sorted keys, separators comma/colon, ensure_ascii=false, allow_nan=false; trailing newline excluded",
+    "source_repository": "comfyanonymous/ComfyUI_examples",
+    "source_revision": "f9431bb000ce792094ff345446e22cac1ea6cef3", "source_revision_note": "# pragma: allowlist secret - public provenance hash",
+    "source_path": "wan/text_to_video_wan.json",
+    "source_url": "https://github.com/comfyanonymous/ComfyUI_examples/blob/f9431bb000ce792094ff345446e22cac1ea6cef3/wan/text_to_video_wan.json",
+    "source_raw_sha256": "436b9c074b677011b0f50a9feb8c4b4128abbbd9e4acaf34d8eeb80efbd74a64", "source_raw_sha256_note": "# pragma: allowlist secret - public provenance hash",
+    "license": "LicenseRef-ComfyUI-Examples-Permissive",
+    "license_path": "WAN21-WORKFLOW-LICENSE",
+    "license_sha256": "b43f63a6847e68df94f5757fbca5c9dd83db1db1c7d638689181eae33f58d955", "license_sha256_note": "# pragma: allowlist secret - public provenance hash",
+    "allowed_classes": [
+      "CLIPLoader",
+      "CLIPTextEncode",
+      "EmptyHunyuanLatentVideo",
+      "KSampler",
+      "ModelSamplingSD3",
+      "SaveWEBM",
+      "UNETLoader",
+      "VAEDecode",
+      "VAELoader"
+    ],
+    "bindings": {
+      "prompt": {
+        "node_id": "6",
+        "input_name": "text"
+      },
+      "seed": {
+        "node_id": "3",
+        "input_name": "seed"
+      }
+    },
+    "output_node": "47",
+    "output_kind": "images",
+    "output_index": 0,
+    "artifact_license": "LicenseRef-Generated-Unreviewed",
+    "media_type": "video/webm",
+    "duration_seconds": 2.0625,
+    "changes": [
+      "Convert UI graph to API graph.",
+      "Remove redundant SaveAnimatedWEBP output; retain sole SaveWEBM node47.",
+      "Set benign text prompt, compact English negative prompt and fixed seed42.",
+      "Keep832x480/33frames/30steps/cfg6/uni_pc/simple/shift8; set WebM16fps for33/16=2.0625seconds."
+    ],
+    "output_kind_evidence": "https://github.com/Comfy-Org/ComfyUI/blob/6d352802d8f8b9133f664a1757d6c6d26390c335/comfy_api/latest/_ui.py"
+  },
+  "hardware": {
+    "vram_gib": 24,
+    "proposed_host_ram_gib": 32,
+    "proposed_free_disk_gib": 30,
+    "measured": false,
+    "evidence": "https://github.com/Wan-Video/Wan2.1/blob/9737cba9c1c3c4d04b33fcad41c111989865d315/README.md",
+    "limits": [
+      "32GiB RAM/30GiB disk are conservative planning allowances.",
+      "Upstream RTX4090/8.19GB native-inference evidence is not a ComfyUI peak-memory/performance guarantee.",
+      "MacBookAirM2/16GB is orchestration only; Metal compatibility is not claimed."
+    ],
+    "gpu": "NVIDIA RTX4090"
+  },
+  "rights_ledger": [
+    {
+      "component": "Wan diffusion model and VAE",
+      "license": "Apache-2.0",
+      "evidence": "https://github.com/Wan-Video/Wan2.1/blob/9737cba9c1c3c4d04b33fcad41c111989865d315/LICENSE.txt",
+      "obligations": "Keep license/required notices with redistributed copies; record modifications. Upstream README adds lawful/non-harmful-use responsibilities and disclaims ownership of generated content.",
+      "status": "source_terms_reviewed_owner_selection_approved",
+      "owner_approval_evidence": "https://github.com/richardo920/cineforge/issues/40#issuecomment-6553169092"
+    },
+    {
+      "component": "UMT5-XXL text encoder",
+      "license": "Apache-2.0",
+      "upstream_revision": "66cb9e7e85526fe440a945569e42c72fb6cbc0ad", "upstream_revision_note": "# pragma: allowlist secret - public provenance hash",
+      "evidence": "https://huggingface.co/google/umt5-xxl/tree/66cb9e7e85526fe440a945569e42c72fb6cbc0ad",
+      "note": "Comfy-Org distributes an FP8-scaled conversion under repository Apache declaration; no bit-equivalence/derivation audit performed.",
+      "status": "source_terms_reviewed_owner_selection_approved",
+      "owner_approval_evidence": "https://github.com/richardo920/cineforge/issues/40#issuecomment-6553169092"
+    },
+    {
+      "component": "ComfyUI runner",
+      "license": "GPL-3.0",
+      "evidence": "https://github.com/Comfy-Org/ComfyUI/blob/6d352802d8f8b9133f664a1757d6c6d26390c335/LICENSE",
+      "obligations": "Keep external runner source/license/required notices available when distributing it; no license selected for Cineforge.",
+      "status": "external_runner_reference_only"
+    },
+    {
+      "component": "Official example workflow",
+      "license": "LicenseRef-ComfyUI-Examples-Permissive",
+      "evidence": "https://github.com/comfyanonymous/ComfyUI_examples/blob/f9431bb000ce792094ff345446e22cac1ea6cef3/LICENSE",
+      "obligations": "Permission expressly covers use/copy/modify/distribute for any purpose, including paid; retain license text/source attribution if copied.",
+      "status": "owner_selection_approved",
+      "owner_approval_evidence": "https://github.com/richardo920/cineforge/issues/40#issuecomment-6553169092"
+    },
+    {
+      "component": "Smoke-test creative input/output",
+      "license": "LicenseRef-Generated-Unreviewed",
+      "evidence": "Original synthetic text prompt only; no image/audio/person/brand references.",
+      "obligations": "Generated output still requires owner visual review; no blanket copyright/consent assertion.",
+      "status": "synthetic_prompt_selected_visual_review_pending"
+    }
+  ],
+  "approval": {
+    "execution_target": {
+      "status": "approved",
+      "scope": "Laptop orchestration with private ComfyUI endpoint on a manually prepared Runpod GPU worker; M3 retains automated cloud lifecycle/budgets.",
+      "evidence": "Owner confirmed: yes, runpod gpu."
+    },
+    "model_workflow": {
+      "status": "approved",
+      "approved_by": "repository owner; recorded by coordinator",
+      "evidence": "https://github.com/richardo920/cineforge/issues/40#issuecomment-6553169092",
+      "model_approved": true,
+      "workflow_approved": true,
+      "hardware_approved": true,
+      "approved_subject_sha256": "e053351d7cac17b14212c9a91aad382697cb6790adb360268a42b7e01c50f155", "approved_subject_sha256_note": "# pragma: allowlist secret - public provenance hash"
+    },
+    "weight_downloads": true,
+    "live_execution": false,
+    "spend_limit_usd": 3,
+    "visual_review": false,
+    "download_scope": "Only the three pinned, checksum-verified model files on the approved GPU worker, within the setup/smoke budget; no laptop weights."
+  },
+  "readiness": {
+    "live_ready": false,
+    "blockers": [
+      "M2.2 adapter and M2.3 safety gates must pass.",
+      "Record and approve actual worker image/Python/PyTorch/CUDA versions and private endpoint.",
+      "Verify actual worker model-file bytes/checksums before generation."
+    ],
+    "future_evidence": "The first bounded M2.4 run will record measured compatibility, timing, output provenance, failure recovery and visual review; these are completion evidence, not prerequisites to the first run."
+  }
+}
