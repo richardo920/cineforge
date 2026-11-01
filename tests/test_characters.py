@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 import unittest
 from dataclasses import FrozenInstanceError, replace
 
@@ -223,6 +226,27 @@ class CharacterTests(unittest.TestCase):
                                                           ("voice",)),)}):
             with self.assertRaises(CharacterError):
                 replace(record, **fields)
+
+    def test_slotted_codecs_round_trip_in_fresh_interpreters(self) -> None:
+        """Exercise each overridden codec, including Python3.11/3.12 slots behavior."""
+        record = character()
+        hint = ConditioningHint("start_image", "synthetic/model", "v1", DIGEST, ("front",))
+        record = replace(record, conditioning=(hint,))
+        payload = json.dumps([record.wardrobe.to_dict(), hint.to_dict(), record.to_dict()])
+        code = (
+            "import json,sys; from cineforge.characters import "
+            "Wardrobe,ConditioningHint,CharacterRevision; "
+            "values=json.load(sys.stdin); "
+            "records=[kind.from_dict(value) for kind,value in "
+            "zip((Wardrobe,ConditioningHint,CharacterRevision),values)]; "
+            "assert all(type(record).from_json(record.to_json())==record for record in records)"
+        )
+        for seed in ("0", "1", "random"):
+            with self.subTest(hashseed=seed):
+                result = subprocess.run([sys.executable, "-c", code], input=payload, text=True,
+                                        capture_output=True, timeout=10,
+                                        env=dict(os.environ, PYTHONHASHSEED=seed))
+                self.assertEqual(result.returncode, 0, "fresh-process character codec failed")
 
     def test_missing_duplicate_wrong_format_or_digest_references_fail(self) -> None:
         record = character()

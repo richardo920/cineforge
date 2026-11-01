@@ -148,7 +148,8 @@ class Wardrobe(_CharacterContract):
 
     @classmethod
     def from_dict(cls, data: object) -> Self:
-        return super().from_dict(_string_tuple(data, "reference_ids"))
+        # slots=True replaces the class; no-arg super captures the old class on 3.11/3.12.
+        return super(Wardrobe, cls).from_dict(_string_tuple(data, "reference_ids"))
 
 
 def _string_tuple(data: object, name: str) -> object:
@@ -189,7 +190,7 @@ class ConditioningHint(_CharacterContract):
 
     @classmethod
     def from_dict(cls, data: object) -> Self:
-        return super().from_dict(_string_tuple(data, "reference_ids"))
+        return super(ConditioningHint, cls).from_dict(_string_tuple(data, "reference_ids"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -267,7 +268,7 @@ class CharacterRevision(_CharacterContract):
             for name, kind in (("likeness", RightsBinding), ("review", CharacterReview)):
                 if name in data and data[name] is not None:
                     data[name] = kind.from_dict(data[name])
-        return super().from_dict(data)
+        return super(CharacterRevision, cls).from_dict(data)
 
     def declaration_digest(self) -> str:
         return hashlib.sha256(replace(self, review=None).to_json().encode()).hexdigest()
