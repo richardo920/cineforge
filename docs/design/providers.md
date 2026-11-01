@@ -19,3 +19,11 @@ All fixtures are synthetic. Revision/license/commercial-use fields are declarati
 `FakeExecutionProvider` submits queued jobs; each status poll advances queued → running → succeeded (`fail=True`: failed). Terminal jobs stay terminal, duplicate keys return the existing snapshot, conflicting requests fail, and only succeeded jobs return results.
 
 Results contain synthetic JSON bytes with full shot/model provenance, actual SHA256/size, zero cost and fixed synthetic timestamps; `memory://` URIs do not write storage. IDs/bytes repeat for the same request/key across instances, but jobs are held only in memory; callers persist payloads separately. `provisioning.Provisioner` defines acquire/inspect/release only, with no implementation.
+
+`ComfyExecutionProvider(transport, workflow)` implements the same protocol with bounded requests, polling, selected-output download and actual checksums; it neither provisions compute nor persists bytes. `WorkflowTemplate` pins a canonical API graph/model, reviewed node-class allowlist, prompt/seed bindings, fixed duration and one output selection; each request must match its digest/model/duration.
+
+`ComfyHTTPTransport()` performs no network I/O until called with explicit `allow_live=True`; its default endpoint is `http://127.0.0.1:8188`, with no DNS/proxies/redirects or embedded credentials. Use an externally configured loopback tunnel for remote workers; model/hardware approval and live execution remain separate gates.
+
+API reference: [ComfyUI server.py at 6d352802](https://github.com/comfyanonymous/ComfyUI/blob/6d352802d8f8b9133f664a1757d6c6d26390c335/server.py). Running cancellation requires an explicit `verified_server_revision` equal to that full SHA, attesting the deployed source supports prompt-targeted interrupt; otherwise only queued deletion is available, never a global interrupt.
+
+Idempotency lasts only for one provider instance; an uncertain submission reserves its key and cannot replay, and a job missing from both queue/history stays uncertain. Client deadline/poll exhaustion does not prove GPU work stopped: callers must explicitly cancel; completed downloads are cached, while restart recovery remains unsupported.
