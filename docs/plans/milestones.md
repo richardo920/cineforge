@@ -45,7 +45,9 @@ The [pinned Wan2.1 selection](../../config/comfy/wan21-t2v-1.3b.json) and RTX409
 
 Depends on M2. Exit: one chosen cloud GPU provider can run the same shot with cleanup and cost controls.
 
-- [ ] M3.1 Compare candidate providers and select one after terms, region, storage, pricing, and data-retention review. Acceptance: owner approves a provider and explicit spend limit; no provisioning during research.
+The [owner-approved Runpod scope](../../config/cloud/runpod-pod-proposal.json) has a separate USD3 M3 validation cap; the M3.1 mark takes effect only after [PR #52](https://github.com/richardo920/cineforge/pull/52) passes current-head review/testing/CI and its merge is verified.
+
+- [x] M3.1 Compare candidate providers and select one after terms, region, storage, pricing, and data-retention review. Acceptance: owner approves a provider and explicit spend limit; no provisioning during research.
 - [ ] M3.2 Implement worker acquire/inspect/release with credentials supplied externally. Acceptance: fake-provider tests cover capacity failure, timeout, duplicate requests, cancellation, and cleanup after every failure path.
 - [ ] M3.3 Add budget preflight, execution deadlines, idle shutdown, and cost records. Acceptance: over-budget jobs refuse before launch; interrupted coordinator recovery finds/releases orphaned workers; cost estimates and actuals remain distinguishable.
 - [ ] M3.4 Add opt-in parity smoke test for local/cloud execution. Acceptance: normalized output contracts agree, secrets remain absent from logs, and worker release is verified after success and injected failure.
