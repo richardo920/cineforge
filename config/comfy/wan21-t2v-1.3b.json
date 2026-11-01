@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "task_id": "M2.1",
-  "state": "candidate_pending_owner_approval",
+  "state": "selection_approved",
   "model": {
     "model_id": "Wan-AI/Wan2.1-T2V-1.3B",
     "revision": "123acf1cc74bccbb9bfff8ac1ee72edc08c2341d", "revision_note": "# pragma: allowlist secret - public provenance hash",
@@ -13,7 +13,7 @@
     "required_precision": "fp16",
     "license": "Apache-2.0",
     "commercial_use": true,
-    "memory_note": "24GiB is a conservative proposed device admission target, not a measured minimum. Native upstream reports8.19GB; exact ComfyUI peak remains unmeasured.",
+    "memory_note": "24GiB is a conservative approved device admission target, not a measured minimum. Native upstream reports8.19GB; exact ComfyUI peak remains unmeasured.",
     "upstream_repository": "Wan-AI/Wan2.1-T2V-1.3B",
     "upstream_revision": "37ec512624d61f7aa208f7ea8140a131f93afc9a", "upstream_revision_note": "# pragma: allowlist secret - public provenance hash",
     "distribution": "Comfy-Org/Wan-2.1",
@@ -105,7 +105,6 @@
     "output_kind_evidence": "https://github.com/Comfy-Org/ComfyUI/blob/6d352802d8f8b9133f664a1757d6c6d26390c335/comfy_api/latest/_ui.py"
   },
   "hardware": {
-    "proposed_gpu": "NVIDIA RTX4090",
     "vram_gib": 24,
     "proposed_host_ram_gib": 32,
     "proposed_free_disk_gib": 30,
@@ -115,7 +114,8 @@
       "32GiB RAM/30GiB disk are conservative planning allowances.",
       "Upstream RTX4090/8.19GB native-inference evidence is not a ComfyUI peak-memory/performance guarantee.",
       "MacBookAirM2/16GB is orchestration only; Metal compatibility is not claimed."
-    ]
+    ],
+    "gpu": "NVIDIA RTX4090"
   },
   "rights_ledger": [
     {
@@ -123,7 +123,8 @@
       "license": "Apache-2.0",
       "evidence": "https://github.com/Wan-Video/Wan2.1/blob/9737cba9c1c3c4d04b33fcad41c111989865d315/LICENSE.txt",
       "obligations": "Keep license/required notices with redistributed copies; record modifications. Upstream README adds lawful/non-harmful-use responsibilities and disclaims ownership of generated content.",
-      "status": "source_terms_reviewed_not_owner_approved"
+      "status": "source_terms_reviewed_owner_selection_approved",
+      "owner_approval_evidence": "https://github.com/richardo920/cineforge/issues/40#issuecomment-6553169092"
     },
     {
       "component": "UMT5-XXL text encoder",
@@ -131,7 +132,8 @@
       "upstream_revision": "66cb9e7e85526fe440a945569e42c72fb6cbc0ad", "upstream_revision_note": "# pragma: allowlist secret - public provenance hash",
       "evidence": "https://huggingface.co/google/umt5-xxl/tree/66cb9e7e85526fe440a945569e42c72fb6cbc0ad",
       "note": "Comfy-Org distributes an FP8-scaled conversion under repository Apache declaration; no bit-equivalence/derivation audit performed.",
-      "status": "source_terms_reviewed_not_owner_approved"
+      "status": "source_terms_reviewed_owner_selection_approved",
+      "owner_approval_evidence": "https://github.com/richardo920/cineforge/issues/40#issuecomment-6553169092"
     },
     {
       "component": "ComfyUI runner",
@@ -145,14 +147,15 @@
       "license": "LicenseRef-ComfyUI-Examples-Permissive",
       "evidence": "https://github.com/comfyanonymous/ComfyUI_examples/blob/f9431bb000ce792094ff345446e22cac1ea6cef3/LICENSE",
       "obligations": "Permission expressly covers use/copy/modify/distribute for any purpose, including paid; retain license text/source attribution if copied.",
-      "status": "reviewed_for_candidate_derivation"
+      "status": "owner_selection_approved",
+      "owner_approval_evidence": "https://github.com/richardo920/cineforge/issues/40#issuecomment-6553169092"
     },
     {
       "component": "Smoke-test creative input/output",
-      "license": "Owner approval pending",
+      "license": "LicenseRef-Generated-Unreviewed",
       "evidence": "Original synthetic text prompt only; no image/audio/person/brand references.",
       "obligations": "Generated output still requires owner visual review; no blanket copyright/consent assertion.",
-      "status": "pending"
+      "status": "synthetic_prompt_selected_visual_review_pending"
     }
   ],
   "approval": {
@@ -162,22 +165,27 @@
       "evidence": "Owner confirmed: yes, runpod gpu."
     },
     "model_workflow": {
-      "status": "pending",
-      "approved_by": null,
-      "evidence": null
+      "status": "approved",
+      "approved_by": "repository owner; recorded by coordinator",
+      "evidence": "https://github.com/richardo920/cineforge/issues/40#issuecomment-6553169092",
+      "model_approved": true,
+      "workflow_approved": true,
+      "hardware_approved": true,
+      "approved_subject_sha256": "e053351d7cac17b14212c9a91aad382697cb6790adb360268a42b7e01c50f155", "approved_subject_sha256_note": "# pragma: allowlist secret - public provenance hash"
     },
-    "weight_downloads": false,
+    "weight_downloads": true,
     "live_execution": false,
-    "spend_limit_usd": null,
-    "visual_review": false
+    "spend_limit_usd": 3,
+    "visual_review": false,
+    "download_scope": "Only the three pinned, checksum-verified model files on the approved GPU worker, within the setup/smoke budget; no laptop weights."
   },
   "readiness": {
     "live_ready": false,
     "blockers": [
-      "Explicit owner approval of this exact model/workflow/hardware selection.",
-      "Separate concrete weight-download/live-spend authorization.",
-      "Pinned worker environment and actual model-file checksum verification.",
-      "M2.2 adapter and M2.3 safety gates; M2.4 measured run and visual review."
-    ]
+      "M2.2 adapter and M2.3 safety gates must pass.",
+      "Record and approve actual worker image/Python/PyTorch/CUDA versions and private endpoint.",
+      "Verify actual worker model-file bytes/checksums before generation."
+    ],
+    "future_evidence": "The first bounded M2.4 run will record measured compatibility, timing, output provenance, failure recovery and visual review; these are completion evidence, not prerequisites to the first run."
   }
 }

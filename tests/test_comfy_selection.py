@@ -1,11 +1,13 @@
 """Offline integrity/admission checks for the pending M2.1 candidate; no model bytes."""
 
+import copy
 import hashlib
 import json
 import unittest
 from pathlib import Path
 
 from cineforge.devices import Backend, GPUDevice, ModelSpec, Precision, select_device
+from cineforge.selection import SelectionError, require_selection_approval, selection_subject
 
 ROOT = Path(__file__).resolve().parents[1] / "config" / "comfy"
 LEDGER = ROOT / "wan21-t2v-1.3b.json"
@@ -22,9 +24,16 @@ ASSETS = {
 }
 
 
+def _unique_keys(pairs):
+    result = dict(pairs)
+    if len(result) != len(pairs):
+        raise ValueError("duplicate selection JSON key")
+    return result
+
+
 class ComfySelectionTests(unittest.TestCase):
     def setUp(self):
-        self.selection = json.loads(LEDGER.read_text(encoding="utf-8"))
+        self.selection = json.loads(LEDGER.read_text(encoding="utf-8"), object_pairs_hook=_unique_keys)
         self.workflow = self.selection["workflow"]
         self.assertEqual(self.workflow["path"], "wan21-t2v-1.3b-api.json")
         self.graph = json.loads((ROOT / self.workflow["path"]).read_text(encoding="utf-8"))
@@ -128,26 +137,88 @@ class ComfySelectionTests(unittest.TestCase):
         self.assertIn("Metal compatibility is not claimed", " ".join(
             self.selection["hardware"]["limits"]))
 
-    def test_target_approval_does_not_approve_model_downloads_or_live_execution(self):
+    def test_owner_approval_binds_selection_without_claiming_live_readiness(self):
         selection = self.selection
-        self.assertEqual(selection["state"], "candidate_pending_owner_approval")
+        self.assertEqual(selection["state"], "selection_approved")
         approval = selection["approval"]
         self.assertEqual(approval["execution_target"]["status"], "approved")
-        self.assertEqual(approval["model_workflow"]["status"], "pending")
-        self.assertIsNone(approval["model_workflow"]["approved_by"])
-        self.assertIsNone(approval["model_workflow"]["evidence"])
-        for flag in ("weight_downloads", "live_execution", "visual_review"):
-            self.assertIs(approval[flag], False)
-        self.assertIsNone(approval["spend_limit_usd"])
+        record = approval["model_workflow"]
+        self.assertEqual(record["status"], "approved")
+        self.assertEqual(record["evidence"],
+                         "https://github.com/richardo920/cineforge/issues/40#issuecomment-6553169092")
+        self.assertTrue(record["approved_by"])
+        for flag in ("model_approved", "workflow_approved", "hardware_approved"):
+            self.assertIs(record[flag], True)
+        self.assertIs(approval["weight_downloads"], True)
+        self.assertEqual(approval["spend_limit_usd"], 3)
+        self.assertIs(approval["live_execution"], False)
+        self.assertIs(approval["visual_review"], False)
         self.assertIs(selection["readiness"]["live_ready"], False)
         self.assertTrue(selection["readiness"]["blockers"])
+        self.assertTrue(all("M2.4" not in blocker
+                            for blocker in selection["readiness"]["blockers"]))
         self.assertEqual(self.workflow["artifact_license"], "LicenseRef-Generated-Unreviewed")
-        rights = selection["rights_ledger"]
-        self.assertEqual(len(rights), 5)
-        for item in rights:
-            self.assertTrue(item["license"])
-            self.assertTrue(item["status"])
-        self.assertTrue(all(item["status"] != "owner_approved" for item in rights))
+        self.assertEqual(len(selection["rights_ledger"]), 5)
+        require_selection_approval(selection, self.graph)
+        subject = json.dumps(selection_subject(selection), sort_keys=True, separators=(",", ":"),
+                             ensure_ascii=False, allow_nan=False).encode("utf-8")
+        self.assertEqual(hashlib.sha256(subject).hexdigest(), record["approved_subject_sha256"])
+
+    def test_missing_or_incomplete_approval_is_rejected(self):
+        cases = [
+            ("status", "pending"), ("evidence", None), ("evidence", "https://example.com/"),
+            ("approved_by", " "), ("model_approved", False), ("workflow_approved", False),
+            ("hardware_approved", False), ("approved_subject_sha256", "0" * 64),
+        ]
+        for key, value in cases:
+            with self.subTest(key=key, value=value):
+                changed = copy.deepcopy(self.selection)
+                changed["approval"]["model_workflow"][key] = value
+                with self.assertRaises(SelectionError):
+                    require_selection_approval(changed, self.graph)
+        for value in (None, False, -1, 0, float("nan"), float("inf")):
+            with self.subTest(budget=value):
+                changed = copy.deepcopy(self.selection)
+                changed["approval"]["spend_limit_usd"] = value
+                with self.assertRaises(SelectionError):
+                    require_selection_approval(changed, self.graph)
+        for key in ("model_workflow", "weight_downloads", "spend_limit_usd"):
+            changed = copy.deepcopy(self.selection)
+            del changed["approval"][key]
+            with self.assertRaises(SelectionError):
+                require_selection_approval(changed, self.graph)
+        changed = copy.deepcopy(self.selection)
+        changed["approval"]["weight_downloads"] = False
+        with self.assertRaises(SelectionError):
+            require_selection_approval(changed, self.graph)
+
+    def test_changed_model_assets_hardware_workflow_or_budget_reject_old_approval(self):
+        for section, key, value in (
+            ("model", "revision", "0" * 40), ("model", "model_id", "different"),
+            ("model", "allowed_backends", ["metal"]), ("model", "license", "different"),
+            ("hardware", "gpu", "different"), ("hardware", "vram_gib", 12),
+            ("workflow", "output_node", "28"), ("approval", "spend_limit_usd", 4),
+        ):
+            with self.subTest(section=section, key=key):
+                changed = copy.deepcopy(self.selection)
+                changed[section][key] = value
+                with self.assertRaises(SelectionError):
+                    require_selection_approval(changed, self.graph)
+        for key, value in (("size_bytes", 1), ("sha256", "0" * 64),
+                           ("url", "https://example.com/changed")):
+            changed = copy.deepcopy(self.selection)
+            changed["model"]["files"][0][key] = value
+            with self.assertRaises(SelectionError):
+                require_selection_approval(changed, self.graph)
+        graph = copy.deepcopy(self.graph)
+        graph["3"]["inputs"]["steps"] = 1
+        with self.assertRaises(SelectionError):
+            require_selection_approval(self.selection, graph)
+        changed = copy.deepcopy(self.selection)
+        canonical = json.dumps(graph, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        changed["workflow"]["canonical_sha256"] = hashlib.sha256(canonical.encode()).hexdigest()
+        with self.assertRaises(SelectionError):
+            require_selection_approval(changed, graph)
 
 
 if __name__ == "__main__":

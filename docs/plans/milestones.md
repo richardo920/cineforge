@@ -34,6 +34,8 @@ M1 completion marks take effect only after M1.5 passes current-head CI and indep
 
 Depends on M1. The laptop orchestrates a private ComfyUI endpoint on a manually prepared Runpod GPU worker; M3 retains automated cloud lifecycle and budgets. Exit: one explicitly approved model/workflow produces a short shot with provenance and bounded execution.
 
+The [pinned Wan2.1 selection](../../config/comfy/wan21-t2v-1.3b.json) and RTX4090/24GiB worker downloads are [owner-approved](https://github.com/richardo920/cineforge/issues/40#issuecomment-6553169092) within a USD3 setup/smoke cap; actual worker verification and M2.2/M2.3 gates still precede live execution.
+
 - [ ] M2.1 Select and review a pinned model/workflow with supported hardware and usage terms. Acceptance: rights ledger, memory expectations, immutable versions, and owner approval precede downloading weights or paid execution.
 - [ ] M2.2 Implement ComfyUI transport and workflow translation. Acceptance: mocked transport covers submit/poll/result/cancel, malformed replies, timeouts, and connection loss; default CI stays offline.
 - [ ] M2.3 Enforce artifact destinations, safe workflow inputs, secret redaction, and private endpoint defaults. Acceptance: path traversal and credential-bearing error fixtures are blocked/redacted; unapproved custom-node code is never installed automatically.
