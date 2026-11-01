@@ -243,15 +243,15 @@ class CharacterTests(unittest.TestCase):
 
     def test_malformed_json_and_ambiguous_pins_never_echo_private_input(self) -> None:
         data = character().to_dict()
-        secret = "private://secret-person/private-sentinel"
-        bad = (None, [], {}, dict(data, schema_version=secret), dict(data, unknown=secret),
-               dict(data, references="string"), dict(data, wardrobe={"private": secret}),
-               dict(data, references=[{}]), dict(data, review=secret),
-               dict(data, references=[dict(data["references"][0], artifact={"uri": secret})]))
+        marker = "private://synthetic-person/private-sentinel"
+        bad = (None, [], {}, dict(data, schema_version=marker), dict(data, unknown=marker),
+               dict(data, references="string"), dict(data, wardrobe={"private": marker}),
+               dict(data, references=[{}]), dict(data, review=marker),
+               dict(data, references=[dict(data["references"][0], artifact={"uri": marker})]))
         for value in bad:
             with self.assertRaises(CharacterError) as caught:
                 CharacterRevision.from_json(json.dumps(value))
-            self.assertNotIn(secret, str(caught.exception))
+            self.assertNotIn(marker, str(caught.exception))
         for raw in ('{"schema_version":1,"schema_version":1}', '{"private-sentinel":NaN}',
                     "not JSON"):
             with self.assertRaises(CharacterError):
@@ -259,7 +259,7 @@ class CharacterTests(unittest.TestCase):
         registry = CharacterRegistry()
         for key in ("robot", "robot@1", "robot@latest#" + DIGEST,
                     "robot@01#" + DIGEST, "robot@1#" + DIGEST.upper(),
-                    secret, "robot@9223372036854775808#" + DIGEST):
+                    marker, "robot@9223372036854775808#" + DIGEST):
             with self.assertRaises(CharacterError) as caught:
                 registry.resolve_shot(replace(shot(), character_revision=key), RightsLedger())
             self.assertNotIn("private-sentinel", str(caught.exception))
