@@ -104,9 +104,14 @@
     "max_acquisitions": 1,
     "lifetime_seconds": 1800,
     "gpu_compute_ceiling_usd_per_hour": 1.25,
-    "region": "EU-CZ-1",
+    "region": "EU-RO-1",
     "container_disk_gb": 80,
-    "persistent_volumes": []
+    "persistent_volumes": [],
+    "reviewed_data_centers": [
+      "EU-CZ-1",
+      "EU-RO-1"
+    ],
+    "region_fallback": false
   },
   "readiness": {
     "owner_receipt": "pending",

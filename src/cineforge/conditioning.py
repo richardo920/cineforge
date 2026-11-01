@@ -111,6 +111,7 @@ class VerifiedConditioning:
     character: CharacterPin
     model_rights: RightsRef
     journal_directory: str = field(repr=False)
+    region: str
     staging: StagedReference | None = field(default=None, repr=False)
 
     @property
@@ -203,6 +204,8 @@ class VerifiedConditioning:
                 or str(path) != self.journal_directory or not self.journal_directory.isprintable()
                 or any(c in self.journal_directory for c in "\\:%")):
             raise ConditioningError("M4 requires a fixed absolute private journal directory")
+        if self.region not in profile.REGIONS:
+            raise ConditioningError("M4 requires one explicitly reviewed data center")
         for shot in self.requests:
             self.require(ExecutionRequest(shot, profile.model()), self.workflow_digest)
 
@@ -224,7 +227,8 @@ class VerifiedConditioning:
                     "acquire_one_guarded_pod", "generate_three_private_shots"],
                 "cloud": {"image": profile.IMAGE, "gpu_id": profile.GPU_ID,
                     "journal_directory": self.journal_directory,
-                    "region": profile.REGION, "min_cuda": "12.8", "aggregate_usd": 1,
+                    "region": self.region, "region_fallback": False,
+                    "min_cuda": "12.8", "aggregate_usd": 1,
                     "max_attempts": 1, "max_concurrent": 1, "lifetime_seconds": 1800,
                     "hourly_ceiling_usd": 1.25, "disk_gb": 80, "volumes": [], "ports": ["22/tcp"]}}
 
@@ -341,7 +345,7 @@ def load_context(path: str | Path, reference_path: str | Path) -> VerifiedCondit
     try:
         data = strict_object(read_private_input(path))
         if set(data) != {"character", "rights", "revocations", "catalog", "bindings", "model_rights",
-                         "journal_directory"}:
+                         "journal_directory", "region"}:
             raise ValueError
         from cineforge.characters import CharacterRevision
         character = CharacterRevision.from_dict(data["character"])
@@ -356,7 +360,8 @@ def load_context(path: str | Path, reference_path: str | Path) -> VerifiedCondit
             raise ValueError
         gate = VerifiedConditioning(PrivateReference(character.references[0], Path(reference_path)),
             registry, ledger, catalog, tuple(ShotSkills.from_dict(v) for v in data["bindings"]),
-            character.pin(), RightsRef.from_dict(data["model_rights"]), data["journal_directory"])
+            character.pin(), RightsRef.from_dict(data["model_rights"]), data["journal_directory"],
+            data["region"])
         gate.preflight()
     except (ValueError, TypeError, KeyError, OSError, AttributeError):
         failed = True

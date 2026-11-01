@@ -191,19 +191,24 @@ class ConditioningBudgetApproval(BudgetApproval):
                 or ".." in Path(directory).parts or str(Path(directory)) != directory
                 or not directory.isprintable() or any(c in directory for c in "\\:%")):
             raise CloudBudgetError("M4 approval must bind a private absolute journal directory")
-        expected = {"image": profile.IMAGE, "gpu_id": profile.GPU_ID, "region": profile.REGION,
+        region = cloud.get("region")
+        if not isinstance(region, str) or region not in profile.REGIONS:
+            raise CloudBudgetError("M4 approval must bind one reviewed data center")
+        expected = {"image": profile.IMAGE, "gpu_id": profile.GPU_ID, "region": region,
                     "journal_directory": directory,
+                    "region_fallback": False,
                     "min_cuda": "12.8", "aggregate_usd": 1, "max_attempts": 1,
                     "max_concurrent": 1, "lifetime_seconds": 1800,
                     "hourly_ceiling_usd": 1.25, "disk_gb": 80, "volumes": [], "ports": ["22/tcp"]}
-        actual = {key: getattr(self, key) for key in expected if key not in {"volumes", "ports"}}
+        excluded = {"volumes", "ports", "region_fallback"}
+        actual = {key: getattr(self, key) for key in expected if key not in excluded}
         if (self.subject_sha256 != self.approval.subject_sha256
                 or self.model_workflow_sha256 != self.subject_sha256
                 or subject.get("task_id") != "M4.2"
                 or subject.get("profile_id") != profile.PROFILE_ID
                 or canonical(subject.get("cloud")) != canonical(expected)
                 or canonical(actual) != canonical({k: v for k, v in expected.items()
-                                                  if k not in {"volumes", "ports"}})
+                                                  if k not in excluded})
                 or self.model != profile.model()):
             raise CloudBudgetError("M4 budget differs from the approved closed scope")
 
@@ -221,8 +226,12 @@ class ConditioningBudgetApproval(BudgetApproval):
         from cineforge.conditioning import ConditioningApproval
         if type(approval) is not ConditioningApproval:
             raise CloudBudgetError("M4 requires its checked operator approval")
+        cloud = strict_object(approval.subject_json).get("cloud")
+        if not isinstance(cloud, dict) or not isinstance(cloud.get("region"), str):
+            raise CloudBudgetError("M4 approval requires one explicit data center")
+        region = cloud["region"]
         return cls(approval.subject_sha256, approval.subject_sha256, profile.model(),
-                   profile.IMAGE, profile.GPU_ID, profile.REGION, "12.8", 1, 1, 1, 1800, 1.25, 80,
+                   profile.IMAGE, profile.GPU_ID, region, "12.8", 1, 1, 1, 1800, 1.25, 80,
                    approval)
 
     @property

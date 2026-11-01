@@ -138,7 +138,8 @@ def context(root):
     requests = shots(character.pin(), graph_digest)
     bindings = tuple(bind_shot(shot, (entry.pin,)) for shot in requests)
     gate = VerifiedConditioning(PrivateReference(reference, path), registry, ledger,
-        SkillCatalog((entry,)), bindings, character.pin(), records[-1].ref, str(root / "budget"))
+        SkillCatalog((entry,)), bindings, character.pin(), records[-1].ref, str(root / "budget"),
+        profile.REGION)
     return gate, records, entry, character
 
 
@@ -241,7 +242,7 @@ class Fixture(unittest.TestCase):
         data = dict(character=self.character.to_dict(), rights=[r.to_dict() for r in self.records],
             revocations=[], catalog=[self.entry.to_dict()],
             bindings=[b.to_dict() for b in self.gate.bindings], model_rights=self.records[-1].ref.to_dict(),
-            journal_directory=self.gate.journal_directory)
+            journal_directory=self.gate.journal_directory, region=self.gate.region)
         path = self.root / "context.json"
         path.write_bytes(canonical(data))
         return path
@@ -505,9 +506,14 @@ class ManagedTests(Fixture):
     def test_cross_scope_budget_and_journal_cannot_be_reused(self):
         budget = ConditioningBudgetApproval.for_selection(selected(self.gate))
         for change in ({"gpu_id": legacy_spec().gpu_id}, {"region": "US-IL-1"},
+                       {"region": "EU-CZ-1"},
                        {"aggregate_usd": 3}, {"max_attempts": 2}, {"lifetime_seconds": 1801}):
             with self.assertRaises(CloudBudgetError):
                 replace(budget, **change)
+        changed_gate = replace(self.gate, region="EU-CZ-1", journal_directory=str(self.root / "cz-budget"))
+        explicit_cz = ConditioningBudgetApproval.for_selection(selected(changed_gate))
+        self.assertEqual(explicit_cz.region, "EU-CZ-1")
+        self.assertNotEqual(explicit_cz.subject_sha256, budget.subject_sha256)
         with self.assertRaises(CloudBudgetError):
             BudgetApproval(budget.subject_sha256, budget.model_workflow_sha256, budget.model,
                 budget.image, budget.gpu_id, budget.region, budget.min_cuda, 1, 1, 1, 1800, 1.25, 80)

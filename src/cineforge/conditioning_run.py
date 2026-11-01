@@ -81,10 +81,12 @@ def _provider(spec: RunpodPodSpec, transport: CloudTransport, budget: CloudBudge
         request_timeout_seconds=30, cleanup_timeout_seconds=20, max_polls=300)
 
 
-def _require_spec(spec: RunpodPodSpec) -> None:
+def _require_spec(spec: RunpodPodSpec, region: str) -> None:
+    if region not in profile.REGIONS:
+        raise ConditioningError("M4 requires one explicitly approved data center")
     if ((spec.image, spec.gpu_id, spec.data_center_id, spec.disk_gb,
          spec.min_cuda_version, spec.max_hourly_usd, spec.registry_id) !=
-            (profile.IMAGE, profile.GPU_ID, profile.REGION, 80, "12.8", 1.25, None)):
+            (profile.IMAGE, profile.GPU_ID, region, 80, "12.8", 1.25, None)):
         raise ConditioningError("worker spec differs from the closed M4 scope")
 
 
@@ -123,7 +125,7 @@ def run_conditioned(selection: ConditioningSelection, spec: RunpodPodSpec,
     """Opt-in execution only. No retries; success never means human identity approval."""
     if allow_live is not True or type(selection) is not ConditioningSelection:
         raise ConditioningError("M4 execution requires a checked selection and explicit opt-in")
-    _require_spec(spec)
+    _require_spec(spec, selection.gate.region)
     selection.gate.preflight()  # All three exact requests and current rights before any create.
     approval = ConditioningBudgetApproval.for_selection(selection)
     report: dict[str, Any] = {"schema_version": 1, "mode": "m4-three-shot",
@@ -237,7 +239,7 @@ def recover_conditioned(approval: ConditioningBudgetApproval, transport: CloudTr
             if not budget.intents:
                 raise ConditioningError("M4 recovery journal has no retained intents")
             spec = budget.intents[0].spec
-            _require_spec(spec)
+            _require_spec(spec, approval.region)
             if any(intent.spec.digest != spec.digest for intent in budget.intents):
                 raise ConditioningError("M4 recovery journal contains differing worker specs")
             def no_probe(*args: Any) -> Any:
