@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "task_id": "M3.4",
+  "scope": "Two actual managed Runpod Pod cases, followed by an offline lifecycle-classification correction; no extra paid run.",
+  "executed_head_sha": "9fbd331fbaf61ffeae783ca4f43af9bf1071d1e8", "executed_head_sha_note": "# pragma: allowlist secret - public provenance hash",
+  "approval_receipt": "https://github.com/richardo920/cineforge/issues/48#issuecomment-6554788309",
+  "approved_aggregate_limit_usd": 3,
+  "acquisitions": 2,
+  "gpu": "NVIDIA GeForce RTX 4090",
+  "region": "US-IL-1",
+  "executed_guard_source_sha256": "6e4788ccdd409166026a79b3989a08dd97d489909b58b6a5bd0279522aa369b1", "executed_guard_source_sha256_note": "# pragma: allowlist secret - public provenance hash",
+  "corrected_guard_source_sha256": "773592a771c9bf4729c3f40cd9dcfadbead301e1a2bcd8cf63a633e435eee70c", "corrected_guard_source_sha256_note": "# pragma: allowlist secret - public provenance hash",
+  "success": {
+    "pod_id": "2p9migxx7vgy3z",
+    "cli_exit_code": 0,
+    "wall_seconds": 203.31289608299267,
+    "artifact": {
+      "measured_duration_seconds": 2.063,
+      "origin": "cineforge.comfy-v1:381361c4-1681-478e-8d9d-9fc4873ec63b",
+      "sha256": "6961862b2ebdd3360a70898a26d9bbc976a3902c865cb939b54c26d48dd557d2", "sha256_note": "# pragma: allowlist secret - public provenance hash",
+      "size_bytes": 132902
+    },
+    "normalized_contract_sha256": "62c2d1771ffbbbc8835ef4caf94530d20ab94f475563448e231193754c12b1f9", "normalized_contract_sha256_note": "# pragma: allowlist secret - public provenance hash",
+    "media": {
+      "codec": "vp9",
+      "decoded_frames": 33,
+      "duration_seconds": 2.0625,
+      "fps": 16.0,
+      "height": 480,
+      "media_type": "video/webm",
+      "pixel_format": "yuv420p",
+      "width": 832
+    },
+    "release_verified": true,
+    "private_run_record_sha256": "c645526764c6b24c1442d2ed53ab6042af38e372315758a50347060a7d00b29d", "private_run_record_sha256_note": "# pragma: allowlist secret - public provenance hash"
+  },
+  "injected_failure": {
+    "pod_id": "b6w2h4u1c5033z",
+    "original_cli_exit_code": 2,
+    "original_wall_seconds": 173.18487929203548,
+    "original_outcome": "incomplete",
+    "original_guard_stop_verified": false,
+    "observed_lifecycle": "EXITED",
+    "runtime_absent": false,
+    "independent_watch_states": [
+      "RUNNING",
+      "EXITED",
+      "NOT_FOUND_404"
+    ],
+    "release_verified": true,
+    "private_run_record_sha256": "604e99c0ae763f9992db19b14a7960b62909d3eab38f09e0252973d781958328", "private_run_record_sha256_note": "# pragma: allowlist secret - public provenance hash",
+    "correction": "Original CLI required runtime=null despite observed EXITED. Official CLI ignores retained telemetry for EXITED; pure predicate fixed in observer and worker guard, then replayed offline. Original records remain unchanged; no corrected live rerun.",
+    "offline_reconciliation": {
+      "observed_EXITED_classifies_as_stopped": true,
+      "corrected_live_rerun": false,
+      "original_records_rewritten": false
+    }
+  },
+  "costs": {
+    "gpu_hourly_rate_usd": 0.89,
+    "reserved_worst_case_usd": 1.02,
+    "planned_lease_estimate_usd": 0.9009589,
+    "actual_total_usd": null,
+    "invoice_status": "unavailable, not zero",
+    "hard_account_spend_cap": false,
+    "measured_cli_wall_seconds": 376.49777537502814,
+    "wall_time_proxy_estimate_usd": 0.0942,
+    "wall_time_proxy_basis": "Combined CLI wall time at recorded GPU plus illustrative disk rate; not measured provider billing or a final invoice."
+  },
+  "unchanged_after_classifier_fix": {
+    "worker_HTTP_request": true,
+    "worker_ownership": true,
+    "observer_ownership": true,
+    "observer_HTTP_GET": true
+  },
+  "sources": [
+    "https://api.runpod.io/v2/openapi.json",
+    "https://github.com/runpod/runpodctl/blob/5b85fc45b7c850c776adc647137dab3dc0fdffe0/internal/podstate/podstate.go",
+    "https://github.com/runpod/runpodctl/blob/5b85fc45b7c850c776adc647137dab3dc0fdffe0/internal/podstate/podstate_test.go"
+  ],
+  "limits": [
+    "Actual GPU/STOP execution used the original guard SHA; corrected source has offline replay/tests, not another paid run.",
+    "Pod runtime presence was recorded; exact telemetry contents/age and machine-readable stop reason were not retained.",
+    "Raw media, journals, credentials and SSH keys remain private outside Git.",
+    "Generated-media license remains LicenseRef-Generated-Unreviewed; no publication or final creative approval."
+  ],
+  "private_actual_evidence_archive_sha256": "f041ee388f594372cae920572332f8e9f4be9f9d5f14741863b235d881cd29d2", "private_actual_evidence_archive_sha256_note": "# pragma: allowlist secret - public provenance hash"
+}

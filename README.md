@@ -2,7 +2,7 @@
 
 Private foundation for a modular AI filmmaking platform: brief → screenplay → storyboard → shots → edit → sound → review → delivery.
 
-**Status:** strict production metadata, offline mock runs, and an explicitly opted-in private ComfyUI single-shot command. [One approved RTX 4090 shot](docs/evidence/m2-live-shot.json) was generated and recovered manually after a history-number mismatch, now fixed; automated GPU provisioning remains M3.
+**Status:** strict production metadata, offline mock runs, private ComfyUI execution and managed Runpod Pod smoke with budget, shutdown and recovery controls. [M3 evidence](docs/evidence/m3-live-shot.json) records one normal video run and one controlled failure; its telemetry-classification correction was verified offline without another GPU run.
 
 ## Quick start
 
@@ -42,6 +42,32 @@ cineforge comfy-run /private/path/shot-plan.json \
 The default endpoint is a separately established `http://127.0.0.1:8188` tunnel; no cloud rental, SSH, weight download, or node installation occurs. The command checks core-node schemas/model filenames, runs exactly one matching shot, and stores `run.json` plus checksum-named bytes in a new private POSIX directory outside Git.
 
 `--timeout-seconds`, `--request-timeout-seconds`, `--max-polls`, and `--max-result-bytes` bound client work; a failure allows one separately bounded owned-job cancellation attempt. Acknowledgements do not prove GPU work stopped: inspect the retained job ID/state before any new submission, manage the Pod separately, and never treat these bounds as cloud billing enforcement; live resume is unsupported.
+
+## Managed cloud smoke
+
+The M3 smoke reuses the approved paper-boat shot and a verified prepared-endpoint reference. [Measured cases](docs/evidence/m3-live-shot.json) retain the original CLI exits: success `0`, failure test `2` despite observed `EXITED` and deletion; the observer and guard classifiers were corrected/replayed offline. Supply external owned `0600` API/SSH files in private directories, `ffprobe`, and one durable budget directory for both attempts and recovery.
+
+```sh
+cineforge cloud-smoke --allow-live \
+  --selection config/comfy/wan21-t2v-1.3b.json \
+  --proposal config/cloud/runpod-pod-proposal.json \
+  --session-id mysession --ssh-private-key "$HOME/.ssh/cineforge" \
+  --api-key-file "$HOME/.config/cineforge/runpod-api-key" \
+  --budget-dir /path/to/private/m3-budget \
+  --reference-run /path/to/prepared/run.json --output-dir /path/to/new-run
+```
+
+The recorded approval permits at most two sequential RTX4090/US-IL-1 Pods within USD3; the second `--case post-acquire-failure` withdraws only the remote heartbeat, observes independent STOP, then verifies deletion. Keep the same session/key/budget; use a new output directory, never reset the journal to retry.
+
+```sh
+cineforge cloud-recover --allow-live \
+  --selection config/comfy/wan21-t2v-1.3b.json \
+  --proposal config/cloud/runpod-pod-proposal.json \
+  --api-key-file "$HOME/.config/cineforge/runpod-api-key" \
+  --budget-dir /path/to/private/m3-budget
+```
+
+Recovery discovers/releases journal-owned workers without acquiring or requiring SSH; unavailable invoices remain unknown. [Controls and limitations](docs/design/providers.md#m3-provider-review) include independent worker supervision, private outputs, isolated SSH host-key TOFU, and no account-wide hard billing cap.
 
 ## CI guards
 

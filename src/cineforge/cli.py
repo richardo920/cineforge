@@ -4,11 +4,20 @@ import argparse
 from typing import Any, NoReturn
 
 from cineforge import __version__
+from cineforge.cloud_smoke import (
+    cli_inputs,
+    load_reference,
+    recover_managed,
+    recovery_inputs,
+    run_managed_smoke,
+    ssh_factory,
+)
 from cineforge.comfy_policy import WorkerVerification, load_comfy_selection
 from cineforge.comfy_run import execute_comfy
 from cineforge.contracts import ProjectPlan
 from cineforge.mock import execute_mock, load_mock_plan
 from cineforge.private_store import read_private_input
+from cineforge.workflows import canonical as canonical_json
 from cineforge.workflows import strict_object
 
 
@@ -50,6 +59,19 @@ def main() -> None:
     comfy.add_argument("--poll-interval-seconds", type=float, default=1)
     comfy.add_argument("--max-polls", type=int, default=600)
     comfy.add_argument("--max-result-bytes", type=int, default=32 * 1024 * 1024)
+    cloud = commands.add_parser("cloud-smoke", help="opt-in bounded approved paper-boat parity test")
+    recovery = commands.add_parser("cloud-recover", help="release journal-owned Pods without acquiring")
+    for command in (cloud, recovery):
+        command.add_argument("--selection", required=True, help="trusted pinned ComfyUI ledger")
+        command.add_argument("--proposal", required=True, help="trusted approved M3 scope ledger")
+        command.add_argument("--budget-dir", required=True, help="same private durable budget directory")
+        command.add_argument("--api-key-file", help="external owned0600 key; default RUNPOD_API_KEY env")
+        command.add_argument("--allow-live", action="store_true", help="explicit cloud API opt-in")
+    cloud.add_argument("--session-id", required=True, help="stable session for both sequential attempts")
+    cloud.add_argument("--ssh-private-key", required=True, help="external owned0600 SSH key")
+    cloud.add_argument("--output-dir", required=True, help="new private directory outside Git")
+    cloud.add_argument("--reference-run", required=True, help="private prepared-endpoint run.json")
+    cloud.add_argument("--case", choices=("success", "post-acquire-failure"), default="success")
     parse_failed = False
     args = None
     try:
@@ -62,6 +84,32 @@ def main() -> None:
         parser.error("invalid arguments")
     if args.command is None:
         parser.print_help()
+        return
+    if args.command in ("cloud-smoke", "cloud-recover"):
+        failed = False
+        report = None
+        try:
+            if args.command == "cloud-recover":
+                approval, spec, transport = recovery_inputs(args.selection, args.proposal,
+                    args.budget_dir, args.api_key_file, allow_live=args.allow_live)
+                report = recover_managed(spec, approval, transport, args.budget_dir,
+                                         allow_live=args.allow_live)
+            else:
+                selection, approval, spec, transport = cli_inputs(args.selection, args.proposal,
+                    args.session_id, args.ssh_private_key, args.api_key_file,
+                    allow_live=args.allow_live)
+                reference = load_reference(args.reference_run, selection)
+                report = run_managed_smoke(selection, approval, spec, transport, args.budget_dir,
+                    args.output_dir, reference, ssh_factory(spec, selection, transport,
+                    args.ssh_private_key), case=args.case, allow_live=args.allow_live)
+        except (Exception, KeyboardInterrupt):
+            failed = True
+        if failed or report is None:
+            parser.application_error("cloud command rejected or incomplete; retain private journals")
+        output_report = {name: report[name] for name in ("release_verified", "costs", "leases")}
+        if "guard_stop_verified" in report:
+            output_report["guard_stop_verified"] = report["guard_stop_verified"]
+        print(canonical_json(output_report).decode())
         return
     if args.command == "comfy-run":
         failed = False
