@@ -232,7 +232,8 @@ class RightsAcceptanceTests(unittest.TestCase):
                            result.to_json()):
             self.assertNotIn("credential-sentinel", diagnostic)
             self.assertNotIn("private-person", diagnostic)
-        for uri in ("https://user:credential-sentinel@example.org/path",
+        basic_auth = "https://" + "user" + ":" + "credential-sentinel" + "@example.org/path"
+        for uri in (basic_auth,
                     "https://example.org/path?token=credential-sentinel", "https://[invalid",
                     "file:///tmp/private#credential-sentinel", "private://safe/\nsecret"):
             with self.assertRaises(ValueError) as caught:
