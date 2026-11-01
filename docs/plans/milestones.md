@@ -56,8 +56,10 @@ The [owner-approved Runpod scope](../../config/cloud/runpod-pod-proposal.json) h
 
 Depends on M1; live character validation also depends on M2. Exit: a shot can pin a reviewed character revision and a reviewed skill source with traceable permissions.
 
+The proposed M4 completion marks take effect only after [PR #67](https://github.com/richardo920/cineforge/pull/67) passes current-head independent gates and its merge is verified. [Evidence](../evidence/m4-conditioning.json) preserves the native exit2/local postcheck correction and [owner approval](https://github.com/richardo920/cineforge/issues/60#issuecomment-6565098422), including accepted Shot 2 eye/head distortion; generated-media rights remain internal and unreviewed for publication.
+
 - [x] M4.1 Implement versioned character registry ([PR65](https://github.com/richardo920/cineforge/pull/65)). Acceptance: stable IDs, immutable revisions, missing/duplicate records, wardrobe/reference links, and revoked consent are tested.
-- [ ] M4.2 Implement conditioning adapter for the selected workflow. Acceptance: supported references resolve with checksums; unsupported model conditioning fails explicitly; human review compares identity across at least three shots.
+- [x] M4.2 Implement conditioning adapter for the selected workflow ([PR67](https://github.com/richardo920/cineforge/pull/67)). Acceptance: supported references resolve with checksums; unsupported model conditioning fails explicitly; human review compares identity across at least three shots.
 - [x] M4.3 Implement skill provenance/rights manifest and review readiness checks ([PR63](https://github.com/richardo920/cineforge/pull/63)). Acceptance: unpinned revision, unknown license, missing notices, and unreviewed content cannot become execution-ready.
 - [x] M4.4 Implement isolated skill installation/execution policies ([PR66](https://github.com/richardo920/cineforge/pull/66)). Acceptance: test fixtures cannot escape allowed paths, invoke unapproved tools, or reach unapproved network destinations; no wholesale upstream copying.
 - [x] M4.5 Implement rights ledger for code/model/skill/voice/music/assets ([PR61](https://github.com/richardo920/cineforge/pull/61)). Acceptance: export preflight blocks missing or incompatible permissions and produces an attribution record; unknown terms remain blocked pending owner review.

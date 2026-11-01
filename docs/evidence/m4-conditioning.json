@@ -1,0 +1,222 @@
+{
+  "schema_version": 1,
+  "task_id": "M4.2",
+  "completion": "Effective only after PR67 current-head independent gates and verified merge; all three clips approved for this internal prototype with the stated limitation.",
+  "pr": "https://github.com/richardo920/cineforge/pull/67",
+  "foundation_prs": [
+    65,
+    63,
+    66,
+    61
+  ],
+  "actual_generation_head": "c57388130419430c00865823858a688d07e17869", "actual_generation_head_note": "# pragma: allowlist secret - public provenance hash",
+  "local_validation_head": "8db75a44ae0f875828ab5128258876f8fab631d7", "local_validation_head_note": "# pragma: allowlist secret - public provenance hash",
+  "final_pr_change_scope": "Documentation/evidence only after local-validation head; production sources remain byte-identical to that head.",
+  "gpu": {
+    "name": "NVIDIA GeForce RTX 5090",
+    "advertised_vram_gb": 32,
+    "usable_memory_mib": 32110,
+    "nvml_total_mib": 32607,
+    "nvml_reserved_mib": 497,
+    "device_count": 1,
+    "compute_capability": [
+      12,
+      0
+    ],
+    "cuda_kernel_ok": true,
+    "torch": "2.8.0+cu128",
+    "cuda": "12.8",
+    "all_three_same_verified_worker": true
+  },
+  "attempts": [
+    {
+      "executed_head": "d10c8b01a7e00945c272c1b0aecdb958ac7f8a92", "executed_head_note": "# pragma: allowlist secret - public provenance hash",
+      "approval_receipt": "https://github.com/richardo920/cineforge/issues/60#issuecomment-6563478451",
+      "approved_limit_usd": 1,
+      "approved_acquisitions": 1,
+      "actual_acquisitions": 1,
+      "pod_id": "k6s1fqnatgq13u",
+      "original_cli_exit_code": 2,
+      "outcome": "incomplete_worker_setup",
+      "shots": 0,
+      "wall_seconds": 222.5194399356842,
+      "reference_staged": false,
+      "release_verified": true,
+      "independent_mcp_get_status": 404,
+      "historical_setup_cause": "Unknown; old worker error was not retained."
+    },
+    {
+      "executed_head": "c57388130419430c00865823858a688d07e17869", "executed_head_note": "# pragma: allowlist secret - public provenance hash",
+      "approval_receipt": "https://github.com/richardo920/cineforge/issues/60#issuecomment-6564202220",
+      "approved_limit_usd": 1,
+      "approved_acquisitions": 1,
+      "actual_acquisitions": 1,
+      "pod_id": "1isi1sq07gkfbh",
+      "original_cli_exit_code": 2,
+      "original_outcome": "incomplete",
+      "shots": 3,
+      "wall_seconds": 454.5412440299988,
+      "release_verified": true,
+      "independent_mcp_get_status": 404,
+      "correction": "M4 postcheck originally used the M3 media contract. Profile-neutral measurements plus strict M4 validation revalidated the same saved bytes offline; no GPU rerun or rewritten original outcome."
+    }
+  ],
+  "costs": {
+    "authorization": "Two separately approved USD1 maximum/one-acquisition scopes, not a single shared USD1 budget. Both scopes consumed; no further acquisition authorized.",
+    "region": "EUR-NO-1",
+    "gpu_hourly_rate_usd": 1.19,
+    "per_attempt_hourly_ceiling_usd": 1.25,
+    "per_attempt_lifetime_seconds": 1800,
+    "ephemeral_disk_gb": 80,
+    "persistent_volumes": 0,
+    "per_attempt_reserved_worst_case_usd": 0.635,
+    "per_attempt_planned_lease_estimate_usd": 0.60047945,
+    "actual_total_usd": null,
+    "invoice_status": "Unavailable, not zero. Caps/reservations/estimates and CLI wall times are not final provider billing.",
+    "hard_account_spend_cap": false
+  },
+  "model": {
+    "id": "Wan-AI/Wan2.2-TI2V-5B",
+    "distribution": "Comfy-Org/Wan-2.2",
+    "revision": "ee6f4a40737a995bf5818954cfce6d59443b0f04", "revision_note": "# pragma: allowlist secret - public provenance hash",
+    "license": "Apache-2.0",
+    "worker_verified_files": [
+      {
+        "path": "split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors",
+        "sha256": "456f901338bd9eadbded3828b819109a9b68e8a525ca5cf8d0049a69fcfeca1e", "sha256_note": "# pragma: allowlist secret - public provenance hash",
+        "size_bytes": 9999658848
+      },
+      {
+        "path": "split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+        "sha256": "c3355d30191f1f066b26d93fba017ae9809dce6c627dda5f6a66eaa651204f68", "sha256_note": "# pragma: allowlist secret - public provenance hash",
+        "size_bytes": 6735906897
+      },
+      {
+        "path": "split_files/vae/wan2.2_vae.safetensors",
+        "sha256": "e40321bd36b9709991dae2530eb4ac303dd168276980d3e9bc4b6e2b75fed156", "sha256_note": "# pragma: allowlist secret - public provenance hash",
+        "size_bytes": 1409400960
+      }
+    ]
+  },
+  "recipe": {
+    "profile_id": "m4-wan22-ti2v5b-5090-v1",
+    "comfy_revision": "6d352802d8f8b9133f664a1757d6c6d26390c335", "comfy_revision_note": "# pragma: allowlist secret - public provenance hash",
+    "image_digest": "sha256:0a360022e8de4375af99430f84e8b38951acc397252163a37ceac7204d01be35", "image_digest_note": "# pragma: allowlist secret - public provenance hash",
+    "reviewed_source": {
+      "path": "templates/video_wan2_2_5B_ti2v.json",
+      "repository": "https://github.com/Comfy-Org/workflow_templates",
+      "revision": "c067929d7e9cc0f3fd15be348fa1a1d85da15946", "revision_note": "# pragma: allowlist secret - public provenance hash",
+      "schema_version": 1,
+      "sha256": "23c93b88adecbdf5bcf4c5438117070fe757f30aca373dd6a2eb488d2c6a585a", "sha256_note": "# pragma: allowlist secret - public provenance hash"
+    },
+    "workflow_digest": "487440a440fb0a61898f79ca0dd3c86d8fecdfcb1d2d27623fabd77acd1275a7", "workflow_digest_note": "# pragma: allowlist secret - public provenance hash",
+    "reviewed_skill_pin": "comfy-wan22-ti2v5b@r1#fd58d433935d055842a53fc613bb04c50f562df8ef7de6dbf65d5182805087f0", "reviewed_skill_pin_note": "# pragma: allowlist secret - public provenance hash",
+    "configuration": "src/cineforge/conditioning_profile.py",
+    "conditioning": "One checked static RGB reference through LoadImage to Wan22ImageToVideoLatent.start_image",
+    "sampler": {
+      "steps": 20,
+      "cfg": 5,
+      "shift": 8,
+      "sampler": "uni_pc",
+      "scheduler": "simple"
+    },
+    "core_nodes_only": true,
+    "output_adaptation": "Official MIT workflow adapted to VAEDecode -> SaveWEBM, VP9 CRF32; no custom nodes."
+  },
+  "character": {
+    "revision": "robot-teal@1#b3cd99b508289b96ac78092d4168027c3182a93375fcd53f2a4208c02f2ebb1c", "revision_note": "# pragma: allowlist secret - public provenance hash",
+    "identity_kind": "fictional",
+    "reference_sha256": "1535f8d9ef5a6268de1774c9be12205708bd13813e1f3b7e1e7ef974cd9707e0", "reference_sha256_note": "# pragma: allowlist secret - public provenance hash",
+    "source": "Original procedural robot authored for the internal M4 commission.",
+    "reviewed_rights": [
+      {
+        "record": "m4-original-reference@r1",
+        "license": "LicenseRef-Cineforge-Original-Internal",
+        "reviewed_declaration_sha256": "d67999d3bf2ca27b9d9f77537522728d745f2b04edaf0f65212869350d1bf7c2", "reviewed_declaration_sha256_note": "# pragma: allowlist secret - public provenance hash",
+        "allowed_internal_actions": [
+          "reference",
+          "condition"
+        ]
+      },
+      {
+        "record": "m4-model@r1",
+        "license": "Apache-2.0",
+        "reviewed_declaration_sha256": "50e7d0d8e7eaae378e9f6f18f1ff924887c897784b5aac26980354256cb70e2f", "reviewed_declaration_sha256_note": "# pragma: allowlist secret - public provenance hash",
+        "allowed_internal_actions": [
+          "reference",
+          "execute"
+        ]
+      },
+      {
+        "record": "m4-workflow@r1",
+        "license": "MIT",
+        "reviewed_declaration_sha256": "ddcebbe62f62dba2c9e830ae8b11e7ebbb678d97a0c282a1fe608fe95424b8cf", "reviewed_declaration_sha256_note": "# pragma: allowlist secret - public provenance hash",
+        "allowed_internal_actions": [
+          "reference"
+        ]
+      }
+    ]
+  },
+  "media_contract": {
+    "media_type": "video/webm",
+    "codec": "vp9",
+    "pixel_format": "yuv420p",
+    "width": 1280,
+    "height": 704,
+    "decoded_frames": 49,
+    "fps": 24.0,
+    "duration_seconds": 2.042
+  },
+  "shots": [
+    {
+      "shot_id": "m4-identity-01",
+      "seed": 4201,
+      "sha256": "ffbdbf2cd4aa6f7856c15aa8a14e0eb76b7de1dded103848eba114b13765d6e7", "sha256_note": "# pragma: allowlist secret - public provenance hash",
+      "size_bytes": 48241,
+      "translated_graph_sha256": "487440a440fb0a61898f79ca0dd3c86d8fecdfcb1d2d27623fabd77acd1275a7", "translated_graph_sha256_note": "# pragma: allowlist secret - public provenance hash",
+      "recipe_binding_sha256": "29ff51dc642ce7418ac3f3887147d1d21c4147ec3fa469ad0e03e427371e180a", "recipe_binding_sha256_note": "# pragma: allowlist secret - public provenance hash",
+      "measured_duration_seconds": 2.042
+    },
+    {
+      "shot_id": "m4-identity-02",
+      "seed": 4202,
+      "sha256": "275e7123d09e452f629f60fbe2d6c25d3182af7d0257f2be2003ec7a40d9e52b", "sha256_note": "# pragma: allowlist secret - public provenance hash",
+      "size_bytes": 45561,
+      "translated_graph_sha256": "ba461235e530c204c433eafed1651a037f55218413ba86e10a30feb9be4f543c", "translated_graph_sha256_note": "# pragma: allowlist secret - public provenance hash",
+      "recipe_binding_sha256": "56f35718223cfc1774353ea137e9d832ee16cd577e8a2a356766a789bcf026c3", "recipe_binding_sha256_note": "# pragma: allowlist secret - public provenance hash",
+      "measured_duration_seconds": 2.042
+    },
+    {
+      "shot_id": "m4-identity-03",
+      "seed": 4203,
+      "sha256": "77861181cb33d1984a1a28c6b2032a0df86da5109a78d51dc5727629dc9e116d", "sha256_note": "# pragma: allowlist secret - public provenance hash",
+      "size_bytes": 31269,
+      "translated_graph_sha256": "f309e5d35727d63fba25292b0b307bc210d40e8576ba220399303190074ba4a3", "translated_graph_sha256_note": "# pragma: allowlist secret - public provenance hash",
+      "recipe_binding_sha256": "44bac15ba571a1ef475d22d67b20fc6185cf3dfb65f311ee4eafae7cc2f01bf5", "recipe_binding_sha256_note": "# pragma: allowlist secret - public provenance hash",
+      "measured_duration_seconds": 2.042
+    }
+  ],
+  "local_reconciliation": {
+    "original_run_sha256": "858d010377442d108b97c9ebbae7d461c2ce8c5a4e7ae68f55790cc1e2f05361", "original_run_sha256_note": "# pragma: allowlist secret - public provenance hash",
+    "receipt_sha256": "704c94c186b53a03341d92efb1b37f5b30938d5da2bcf27db8767ac84c89ce57", "receipt_sha256_note": "# pragma: allowlist secret - public provenance hash",
+    "validation": "Actual default technical_result(manifest,directory), real local ffprobe; three distinct stored clips pass 1280x704/49frames/24fps VP9 checks.",
+    "source_equality": "GPU execution sources/model/graph/scope byte-identical across c573 generation and 8db local postcheck; only local measurement/default wiring changed. Final evidence commit changes no production source.",
+    "original_records_rewritten": false,
+    "gpu_rerun": false
+  },
+  "human_review": {
+    "status": "approved_with_known_limitation",
+    "receipt": "https://github.com/richardo920/cineforge/issues/60#issuecomment-6565098422",
+    "reviewed_by": "repository-owner",
+    "scope": "All three hash-bound clips and exact reference, internal M4 prototype acceptance.",
+    "known_limitation": "Shot2 eye/head distortion was shown and explicitly flagged before the owner approved all3. This accepts the M4 prototype conditioning test; it does not assert perfect identity preservation.",
+    "publication_authorized": false,
+    "additional_spend_authorized": false
+  },
+  "limits": [
+    "One reference anchors the initial frame; this is not trained identity locking or a general continuity-quality claim.",
+    "Known Shot2 eye/head distortion is accepted for M4 and retained for the existing future continuity benchmark backlog.",
+    "Generated media remains LicenseRef-Generated-Unreviewed and internal; owner identity approval does not grant publication/distribution rights.",
+    "No raw media, reference bytes, private filesystem paths, nonces, credentials or keys are committed."
+  ]
+}
