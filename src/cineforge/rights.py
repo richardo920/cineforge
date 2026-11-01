@@ -9,9 +9,18 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import asdict, dataclass, field, replace
+from typing import Any, ClassVar, Self
 from urllib.parse import urlsplit
 
-from cineforge.contracts import Contract, ContractError, _digest, _identifier, _text, _tuple, _unique
+from cineforge.contracts import (
+    Contract,
+    ContractError,
+    _digest,
+    _identifier,
+    _text,
+    _tuple,
+    _unique,
+)
 
 _KINDS = frozenset({"code", "model", "skill", "workflow", "character_reference", "likeness",
                     "voice", "music", "asset"})
@@ -42,8 +51,19 @@ def _instance(value: object, kind: type[object], label: str) -> None:
         raise RightsError(f"invalid {label}")
 
 
+class _RightsContract(Contract):
+    __slots__ = ()
+
+    @classmethod
+    def from_json(cls, raw: str) -> Self:
+        try:
+            return super().from_json(raw)
+        except (ContractError, TypeError, UnicodeError, RecursionError):
+            raise RightsError("invalid rights JSON") from None
+
+
 @dataclass(frozen=True, slots=True)
-class SubjectRef(Contract):
+class SubjectRef(_RightsContract):
     kind: str
     subject_id: str
     revision: str
@@ -61,7 +81,7 @@ class SubjectRef(Contract):
 
 
 @dataclass(frozen=True, slots=True)
-class RightsRef(Contract):
+class RightsRef(_RightsContract):
     record_id: str
     revision: str
 
@@ -75,11 +95,13 @@ class RightsRef(Contract):
 
 
 @dataclass(frozen=True, slots=True)
-class EvidenceRef:
+class EvidenceRef(_RightsContract):
     uri: str = field(repr=False)
     sha256: str
 
     def __post_init__(self) -> None:
+        if type(self.schema_version) is not int or self.schema_version != 1:
+            raise RightsError("unsupported evidence schema version")
         _text(self.uri, "evidence URI")
         _digest(self.sha256, "evidence sha256")
         try:
@@ -93,31 +115,40 @@ class EvidenceRef:
 
 
 @dataclass(frozen=True, slots=True, order=True)
-class Use:
+class Use(_RightsContract):
     action: str
     audience: str = "internal"
     commercial: bool = False
 
     def __post_init__(self) -> None:
+        if type(self.schema_version) is not int or self.schema_version != 1:
+            raise RightsError("unsupported use schema version")
         _member(self.action, _ACTIONS, "use action")
         _member(self.audience, frozenset({"internal", "public"}), "use audience")
         _bool(self.commercial, "commercial context")
 
 
 @dataclass(frozen=True, slots=True)
-class RightsReview:
+class RightsReview(_RightsContract):
+    _objects: ClassVar[dict[str, type[Contract]]] = {"evidence": EvidenceRef}
+
     declaration_sha256: str
     reviewer: str
     evidence: EvidenceRef = field(repr=False)
 
     def __post_init__(self) -> None:
+        if type(self.schema_version) is not int or self.schema_version != 1:
+            raise RightsError("unsupported review schema version")
         _digest(self.declaration_sha256, "review declaration digest")
         _identifier(self.reviewer, "reviewer")
         _instance(self.evidence, EvidenceRef, "review evidence")
 
 
 @dataclass(frozen=True, slots=True)
-class RightsRecord:
+class RightsRecord(_RightsContract):
+    _objects: ClassVar[dict[str, type[Contract]]] = {"ref": RightsRef, "subject": SubjectRef}
+    _sequences: ClassVar[dict[str, type[Contract]]] = {"allowed_uses": Use}
+
     ref: RightsRef
     subject: SubjectRef
     source: EvidenceRef | None = field(default=None, repr=False)
@@ -133,7 +164,6 @@ class RightsRecord:
     consent_required: bool = False
     consent: EvidenceRef | None = field(default=None, repr=False)
     review: RightsReview | None = None
-    schema_version: int = 1
 
     def __post_init__(self) -> None:
         if type(self.schema_version) is not int or self.schema_version != 1:
@@ -149,14 +179,18 @@ class RightsRecord:
                 raise RightsError("source revision must be pinned")
         if not isinstance(self.license_id, str) or "\x00" in self.license_id:
             raise RightsError("invalid license declaration")
-        for value in (self.notices_required, self.attribution_required, self.consent_required):
-            _bool(value, "rights requirement")
+        if self.license_id:
+            _text(self.license_id, "license declaration")
+        for required in (self.notices_required, self.attribution_required, self.consent_required):
+            _bool(required, "rights requirement")
         _tuple(self.notices, str, "notices")
         for notice in self.notices:
             _text(notice, "notice")
         _unique(self.notices, "notices")
         if not isinstance(self.attribution, str) or "\x00" in self.attribution:
             raise RightsError("invalid attribution")
+        if self.attribution:
+            _text(self.attribution, "attribution")
         _tuple(self.allowed_uses, Use, "allowed uses")
         _unique(self.allowed_uses, "allowed uses")
         _tuple(self.restrictions, str, "restrictions")
@@ -165,6 +199,22 @@ class RightsRecord:
             _member(restriction, _RESTRICTIONS, "restriction")
         if self.review is not None:
             _instance(self.review, RightsReview, "rights review")
+
+    @classmethod
+    def from_dict(cls, data: object) -> Self:
+        if not isinstance(data, dict):
+            raise RightsError("rights record must be an object")
+        values: dict[str, Any] = dict(data)
+        for name in ("source", "terms", "consent", "review"):
+            if name in values and values[name] is not None:
+                kind = RightsReview if name == "review" else EvidenceRef
+                values[name] = kind.from_dict(values[name])
+        for name in ("notices", "restrictions"):
+            if name in values:
+                if not isinstance(values[name], list):
+                    raise RightsError("rights text collections must be arrays")
+                values[name] = tuple(values[name])
+        return super(RightsRecord, cls).from_dict(values)
 
     def declaration_digest(self) -> str:
         """Canonical content binding, excluding the review that signs this declaration."""
@@ -205,6 +255,10 @@ class PreflightResult:
     allowed: bool
     reasons: tuple[str, ...]
     attributions: tuple[Attribution, ...] = ()
+
+    def to_json(self) -> str:
+        """Deterministic metadata result; evidence/private storage URIs are omitted."""
+        return json.dumps(asdict(self), sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
 
 @dataclass(frozen=True, slots=True)
