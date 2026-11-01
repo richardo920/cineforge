@@ -6,4 +6,4 @@ GPU provisioners acquire/release workers independently from execution runners. P
 
 `contracts.py` validates immutable v1 `ProjectPlan` and self-contained `RunManifest` records with strict dict and canonical JSON codecs. `tests/fixtures/production-v1.json` is synthetic metadata; URI/license/revision declarations do not verify storage, rights or reproducibility.
 
-Execution and storage remain later [milestone](../plans/milestones.md) tasks.
+`providers.py` executes metadata-only fake jobs independently of the protocol-only `provisioning.py`; storage remains a later [milestone](../plans/milestones.md) task.
