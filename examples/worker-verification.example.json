@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "operator_verified": false,
+  "worker_id": "REPLACE_WITH_VERIFIED_WORKER_ID",
+  "server_revision": "COPY_APPROVED_RUNNER_REVISION",
+  "image_digest": "sha256:REPLACE_WITH_ACTUAL_IMAGE_DIGEST",
+  "python_version": "REPLACE_WITH_ACTUAL_VERSION",
+  "torch_version": "REPLACE_WITH_ACTUAL_VERSION",
+  "cuda_version": "REPLACE_WITH_ACTUAL_VERSION",
+  "gpu": {
+    "name": "REPLACE_WITH_VERIFIED_GPU_NAME",
+    "backend": "cuda",
+    "memory_mib": 0
+  },
+  "model_files": [],
+  "custom_nodes_disabled": false
+}

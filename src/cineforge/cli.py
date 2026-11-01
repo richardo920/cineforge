@@ -1,13 +1,18 @@
-"""Offline package entry point."""
+"""Offline defaults and an explicitly opted-in private ComfyUI entry point."""
 
 import argparse
 
 from cineforge import __version__
+from cineforge.comfy_policy import WorkerVerification, load_comfy_selection
+from cineforge.comfy_run import execute_comfy
+from cineforge.contracts import ProjectPlan
 from cineforge.mock import execute_mock, load_mock_plan
+from cineforge.private_store import read_private_input
+from cineforge.workflows import strict_object
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Cineforge offline filmmaking metadata")
+    parser = argparse.ArgumentParser(description="Cineforge production metadata and execution")
     parser.add_argument("--version", action="version", version=f"cineforge {__version__}")
     commands = parser.add_subparsers(dest="command")
     validate = commands.add_parser("validate-plan", help="validate a synthetic JSON plan")
@@ -17,9 +22,42 @@ def main() -> None:
     mock.add_argument("--run-id", help="override the deterministic run identifier")
     mock.add_argument("--output-dir", help="dedicated directory for local metadata/checkpoints")
     mock.add_argument("--resume", action="store_true", help="resume a stored run in --output-dir")
+    comfy = commands.add_parser("comfy-run", help="one approved shot through private ComfyUI")
+    comfy.add_argument("plan", help="single-shot domain ProjectPlan JSON")
+    comfy.add_argument("--selection", required=True, help="separately trusted reviewed ledger")
+    comfy.add_argument("--worker-verification", required=True, help="operator-verified worker JSON")
+    comfy.add_argument("--output-dir", required=True, help="private empty directory outside Git")
+    comfy.add_argument("--endpoint", default="http://127.0.0.1:8188", help="loopback tunnel origin")
+    comfy.add_argument("--allow-live", action="store_true", help="explicitly permit ComfyUI HTTP")
+    comfy.add_argument("--timeout-seconds", type=float, default=600)
+    comfy.add_argument("--request-timeout-seconds", type=float, default=10)
+    comfy.add_argument("--poll-interval-seconds", type=float, default=1)
+    comfy.add_argument("--max-polls", type=int, default=600)
+    comfy.add_argument("--max-result-bytes", type=int, default=32 * 1024 * 1024)
     args = parser.parse_args()
     if args.command is None:
         parser.print_help()
+        return
+    if args.command == "comfy-run":
+        failed = False
+        output = ""
+        try:
+            comfy_plan = ProjectPlan.from_json(read_private_input(args.plan).decode("utf-8"))
+            selection = load_comfy_selection(args.selection)
+            worker = WorkerVerification.from_dict(strict_object(
+                read_private_input(args.worker_verification)))
+            output = execute_comfy(
+                comfy_plan, selection, worker, args.output_dir, allow_live=args.allow_live,
+                endpoint=args.endpoint, timeout_seconds=args.timeout_seconds,
+                request_timeout_seconds=args.request_timeout_seconds,
+                poll_interval_seconds=args.poll_interval_seconds, max_polls=args.max_polls,
+                max_result_bytes=args.max_result_bytes,
+            ).to_json()
+        except (Exception, KeyboardInterrupt):
+            failed = True
+        if failed:
+            parser.error("ComfyUI command rejected or incomplete; inspect private run.json if present")
+        print(output)
         return
     try:
         plan = load_mock_plan(args.plan)

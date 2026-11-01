@@ -2,7 +2,7 @@
 
 Private foundation for a modular AI filmmaking platform: brief → screenplay → storyboard → shots → edit → sound → review → delivery.
 
-**Status:** strict versioned production metadata, declared device/model selection, and a deterministic offline mock runner with local checkpoints and resume. No media generation, paid API calls, or GPU provisioning.
+**Status:** strict production metadata, deterministic offline mock runs, and an explicitly opted-in ComfyUI single-shot command with private output storage. Measured live-shot validation remains M2.4; GPU provisioning is not implemented.
 
 ## Quick start
 
@@ -27,6 +27,21 @@ Both commands reject malformed UTF-8/JSON, unknown fields/references, invalid mo
 Persistence requires a local POSIX filesystem with `flock`, no-follow file opens, atomic rename, and `fsync`; another writer fails immediately. Symlink ancestors/files, hardlinks, unrelated files, changed inputs, and corrupt/missing completed artifacts are rejected. Locks coordinate cooperating processes on one host; network filesystems and hostile directory writers are unsupported.
 
 Failed attempts remain in the manifest; resume retries only unfinished/failed shots. Interrupted attempts replay the deterministic fake provider with the same identity; this recovery guarantee applies only to synthetic mock jobs. Artifact bytes precede the atomic success checkpoint; interrupted temporary files and valid unreferenced payloads can remain after a crash.
+
+## Approved ComfyUI shot
+
+Choose a trusted reviewed selection separately from the creative `ProjectPlan`; its approval hash binds declarations and does not authenticate the owner. Complete [the worker record](examples/worker-verification.example.json) from verified image/runtime/GPU, runner revision, and actual model-file hashes; examples deliberately refuse execution.
+
+```sh
+cineforge comfy-run /private/path/shot-plan.json \
+  --selection config/comfy/wan21-t2v-1.3b.json \
+  --worker-verification /private/path/worker-verification.json \
+  --output-dir /private/path/new-run --allow-live
+```
+
+The default endpoint is a separately established `http://127.0.0.1:8188` tunnel; no cloud rental, SSH, weight download, or node installation occurs. The command checks core-node schemas/model filenames, runs exactly one matching shot, and stores `run.json` plus checksum-named bytes in a new private POSIX directory outside Git.
+
+`--timeout-seconds`, `--request-timeout-seconds`, `--max-polls`, and `--max-result-bytes` bound client work; a failure allows one separately bounded owned-job cancellation attempt. Acknowledgements do not prove GPU work stopped: inspect the retained job ID/state before any new submission, manage the Pod separately, and never treat these bounds as cloud billing enforcement; live resume is unsupported.
 
 ## CI guards
 
