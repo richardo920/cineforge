@@ -36,7 +36,8 @@ def _path(value: str) -> None:
     _text(value, "source path")
     path = PurePosixPath(value)
     if (path.is_absolute() or path.as_posix() != value or ".." in path.parts
-            or any(char in value for char in "\\%?#:") or value == "."):
+            or any(char in value for char in "\\%?#:") or value == "."
+            or any(ord(char) < 32 or ord(char) == 127 for char in value)):
         raise CatalogError("invalid relative source path")
 
 
@@ -79,7 +80,8 @@ class SourcePin(_Record):
         if (parsed.scheme != "https" or parsed.netloc not in {"github.com", "huggingface.co"}
                 or parsed.query or parsed.fragment or parsed.username or parsed.password
                 or len(parsed.path.strip("/").split("/")) != 2
-                or parsed.path.endswith("/")):
+                or parsed.path.endswith("/")
+                or any(ord(char) < 33 or ord(char) > 126 for char in self.repository)):
             raise CatalogError("source repository must be a public canonical HTTPS repository")
         _path(parsed.path.removeprefix("/"))
         _commit(self.revision)
