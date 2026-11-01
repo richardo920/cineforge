@@ -119,9 +119,9 @@ class Cloud(FakeCloud):
 
 class BudgetTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="cineforge-budget-", dir="/private/tmp")
+        self.temp = tempfile.TemporaryDirectory(prefix="cineforge-budget-")
         self.addCleanup(self.temp.cleanup)
-        self.path = Path(self.temp.name) / "journal"
+        self.path = Path(self.temp.name).resolve() / "journal"
         self.clock = Clock()
         self.cloud = Cloud(self.clock)
 
@@ -219,14 +219,14 @@ class BudgetTests(unittest.TestCase):
                     dict(dataCenters=[]), dict(secure=False), dict(maxCount=dict(secure=True))]
         for index, variant in enumerate(variants):
             with self.subTest(variant=variant):
-                self.path = Path(self.temp.name) / str(index)
+                self.path = Path(self.temp.name).resolve() / str(index)
                 original = copy.deepcopy(self.cloud.catalog)
                 self.cloud.catalog.update(variant)
                 with self.session() as session:
                     with self.assertRaises(ProvisioningError):
                         self.acquire(self.provider(session))
                 self.cloud.catalog = original
-        self.path = Path(self.temp.name) / "stale"
+        self.path = Path(self.temp.name).resolve() / "stale"
         self.cloud.quote_delay = 31
         with self.session() as session:
             with self.assertRaises(ProvisioningError):
@@ -368,7 +368,7 @@ class BudgetTests(unittest.TestCase):
     def test_deadline_idle_frozen_wall_and_clock_rollback_trigger_owned_cleanup(self):
         for kind in ("deadline", "idle", "frozen", "rollback"):
             with self.subTest(kind=kind):
-                self.path = Path(self.temp.name) / kind
+                self.path = Path(self.temp.name).resolve() / kind
                 with self.session() as session:
                     provider = self.provider(session)
                     self.acquire(provider, kind)
@@ -491,7 +491,7 @@ class BudgetTests(unittest.TestCase):
     def test_concurrent_probe_arming_and_cleanup_finish_without_lock_inversion(self):
         for operation in ("enforce_limits", "recover_owned"):
             with self.subTest(operation=operation):
-                self.path = Path(self.temp.name) / operation
+                self.path = Path(self.temp.name).resolve() / operation
                 probe_entered = threading.Event()
                 cleanup_claimed = threading.Event()
                 resume_probe = threading.Event()
@@ -644,9 +644,9 @@ class BudgetTests(unittest.TestCase):
 
 class JournalTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="cineforge-journal-", dir="/private/tmp")
+        self.temp = tempfile.TemporaryDirectory(prefix="cineforge-journal-")
         self.addCleanup(self.temp.cleanup)
-        self.path = Path(self.temp.name) / "state"
+        self.path = Path(self.temp.name).resolve() / "state"
 
     def test_lock_atomic_resume_private_permissions_and_duplicate_writer(self):
         with CloudJournal(self.path) as journal:
@@ -661,7 +661,7 @@ class JournalTests(unittest.TestCase):
         self.assertEqual((self.path / "budget.json").read_bytes(), b'{"sequence":2}')
 
     def test_symlink_hardlink_git_paths_and_interrupted_initialization_are_rejected(self):
-        outside = Path(self.temp.name) / "outside"
+        outside = Path(self.temp.name).resolve() / "outside"
         outside.mkdir(mode=0o700)
         self.path.symlink_to(outside)
         with self.assertRaises(CloudJournalError):

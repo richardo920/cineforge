@@ -117,8 +117,8 @@ class GuardTests(unittest.TestCase):
         self.assertFalse(result["resource_deleted"])
 
     def test_private_heartbeat_scope_links_duplicate_json_and_permissions(self):
-        with tempfile.TemporaryDirectory(prefix="cineforge-heartbeat-", dir="/private/tmp") as tmp:
-            path = Path(tmp) / "heartbeat"
+        with tempfile.TemporaryDirectory(prefix="cineforge-heartbeat-") as tmp:
+            path = Path(tmp).resolve() / "heartbeat"
             data = dict(schema_version=1, pod_id=plan().pod_id, lease_token=plan().lease_token,
                         heartbeat_unix=100)
             path.write_text(json.dumps(data))
@@ -128,7 +128,7 @@ class GuardTests(unittest.TestCase):
             with self.assertRaises(WorkerGuardError):
                 read_heartbeat(path, plan())
             path.chmod(0o600)
-            linked = Path(tmp) / "linked"
+            linked = Path(tmp).resolve() / "linked"
             linked.symlink_to(path)
             with self.assertRaises(WorkerGuardError):
                 read_heartbeat(linked, plan())
