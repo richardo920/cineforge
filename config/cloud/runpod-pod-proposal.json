@@ -1,0 +1,205 @@
+{
+  "schema_version": 1,
+  "task_id": "M3.1",
+  "state": "awaiting_owner_approval",
+  "purpose": "Research and a bounded M3 validation proposal; not executable provisioning authorization.",
+  "recommendation": {
+    "provider": "runpod",
+    "product": "pod",
+    "cloud": "SECURE",
+    "reason": "Owner chose Runpod Pods; M2 measured this exact GPU/model/workflow. Reuse the existing account and preserve separate provisioning/execution contracts.",
+    "future_backend": "Serverless remains unscheduled; this proposal authorizes no endpoint."
+  },
+  "approval": {
+    "provider_preference": "Existing owner choice: Runpod GPU, then Pod. Starting M3 does not reset the M2 USD3 cap.",
+    "existing_model_workflow_receipt": "https://github.com/richardo920/cineforge/issues/40#issuecomment-6553169092",
+    "m3_live_spend": {
+      "status": "pending",
+      "proposed_aggregate_limit_usd": 3,
+      "receipt": null
+    },
+    "live_ready": false
+  },
+  "proposed_validation": {
+    "model_workflow_selection": "../comfy/wan21-t2v-1.3b.json",
+    "selection_scope": "Unchanged Wan2.1 T2V1.3B, pinned core-node graph and three verified model files; new M3 worker downloads remain within the proposed M3 opt-in scope.",
+    "gpu_id": "NVIDIA GeForce RTX 4090",
+    "gpu_count": 1,
+    "nominal_vram_gib": 24,
+    "region": "US-IL-1",
+    "region_fallback": false,
+    "image": "runpod/pytorch@sha256:0a360022e8de4375af99430f84e8b38951acc397252163a37ceac7204d01be35",
+    "image_note": "# pragma: allowlist secret - public provenance hash",
+    "min_host_cuda": "12.8",
+    "actual_worker_verification_required": true,
+    "max_concurrent_pods": 1,
+    "max_create_attempts": 2,
+    "worker_lifetime_limit_seconds": 1800,
+    "startup_and_downloads_count_toward_lifetime": true,
+    "compute_price_ceiling_usd_per_hour": 1.0,
+    "container_disk_gb": 80,
+    "persistent_volume_gb": 0,
+    "network_volume_ids": [],
+    "ports": [
+      "22/tcp"
+    ],
+    "runner_network": "ComfyUI127.0.0.1 via private SSH tunnel; no public ComfyUI/Jupyter port.",
+    "cases": [
+      "One same-shot success with normalized artifact/manifest checks.",
+      "One injected post-acquire failure followed by verified owned-worker cleanup; no extra generation required for the failure case."
+    ],
+    "cleanup": "Download synthetic outputs privately, then terminate only M3 test Pods created by this run. Never terminate the stopped M2 learning Pod or unrelated resources.",
+    "preconditions": [
+      "Owner M3 provider/budget receipt recorded.",
+      "M3.2/M3.3 current-head safety gates pass.",
+      "External programmatic credentials supplied without extracting MCP OAuth.",
+      "Re-read SKU/region capacity, rate and image/runtime compatibility immediately before create.",
+      "Independent worker shutdown guard and owned-resource recovery are configured; unknown create outcomes cannot blind retry."
+    ]
+  },
+  "price_snapshot": {
+    "source": "Coordinator Runpod MCP get-gpu-type, SECURE/POD/count1/minCudaVersion12.8; observed 2026-11-01 approximately07:00UTC.",
+    "selected_compute_usd_per_hour": 0.89,
+    "selected_gpu_availability": "HIGH",
+    "selected_region_availability": "LOW",
+    "available_host_cuda": [
+      "13.2"
+    ],
+    "stock_unit_count": "Not supplied; maxCount is per-Pod limit, not stock units.",
+    "container_disk_usd_per_gb_month": 0.1,
+    "disk_estimate_divisor_hours": 730,
+    "estimated_disk_usd_per_hour": 0.0109589,
+    "two_30_minute_workers_estimated_compute_plus_disk_usd": 0.900959,
+    "at_compute_price_ceiling_estimated_compute_plus_disk_usd": 1.010959,
+    "estimate_limits": "Illustrative pre-tax, one-hour aggregate worker life, no persistent volumes. Startup, idle and cleanup time count. Not an invoice or an account-wide hard cap; re-quote before launch.",
+    "unapproved_alternate_gpu": {
+      "gpu_id": "NVIDIA GeForce RTX 5090",
+      "nominal_vram_gib": 32,
+      "secure_compute_usd_per_hour": 1.19,
+      "availability": "MEDIUM",
+      "listed_data_centers": [
+        "EU-RO-1",
+        "EUR-IS-1",
+        "EUR-NO-1"
+      ],
+      "status": "Research only; not admitted by the measured4090 model/hardware selection."
+    }
+  },
+  "comparison": [
+    {
+      "provider": "runpod",
+      "mode": "Secure Pod",
+      "compute_quote": "RTX4090 USD0.89/hour from authenticated catalog snapshot.",
+      "regions": "Proposed US-IL-1; region-local stock must be re-read.",
+      "storage": "Container disk resets on stop. Pod volume survives stop but not termination. Network volume outlives Pods and bills independently; no persistent storage proposed now.",
+      "terms_and_retention": "Terms assign content security/backups to customer and grant operation plus aggregated/anonymized improvement rights. Personal-information retention depends on purposes/legal duties; lifecycle deletion is not a zero-retention or forensic-erasure guarantee.",
+      "fit": "Chosen: exact M2 measured SKU/workflow and existing owner account; private synthetic validation only.",
+      "sources": [
+        "runpod-terms",
+        "runpod-privacy",
+        "runpod-storage",
+        "runpod-billing",
+        "runpod-management"
+      ]
+    },
+    {
+      "provider": "lambda",
+      "mode": "On-demand VM",
+      "compute_quote": "Single NVIDIA A10/24GB USD1.29/hour on public pricing page, plus applicable taxes; not a4090 performance or compatibility equivalent.",
+      "regions": "Overview lists US, Europe, Middle East and Asia locations; GPU availability varies by region and authenticated capacity was not queried.",
+      "storage": "Root volume included by instance type; persistent filesystem attaches at create in same region/workspace and continues billing after instance deletion. No filesystem quote asserted.",
+      "terms_and_retention": "Customer owns security/backup obligations. Terms permit deleting customer data after termination but also retaining copies under retention practices; no immediate-erasure guarantee.",
+      "fit": "Alternative reviewed, not selected: different unmeasured GPU and new account/provider integration.",
+      "sources": [
+        "lambda-pricing",
+        "lambda-overview",
+        "lambda-filesystems",
+        "lambda-terms"
+      ]
+    },
+    {
+      "provider": "modal",
+      "mode": "Functions/Sandboxes",
+      "compute_quote": "L4 GPU USD0.000222/second (=USD0.7992/hour), plus separate CPU/memory/egress; not a4090 all-in price or compatibility equivalent.",
+      "regions": "US/EU/AP broad or narrow selection; region multipliers1.15x broad/1.75x narrow. Default function inputs route through Virginia before execution; container region alone is not a complete residency claim.",
+      "storage": "Volumes USD0.09/GiB/month with1TiB included per current pricing; persistent until deleted. New SDK/image/volume lifecycle differs from selected Pod.",
+      "terms_and_retention": "Customer-data license limited to service delivery; retention is product-specific: Function inputs/outputs up to7days, Starter app/container logs1day, volume/image files until deleted, snapshots have separate retention.",
+      "fit": "Future elastic-workload candidate; switching would change the current Pod workflow and require fresh hardware/provider approval.",
+      "sources": [
+        "modal-pricing",
+        "modal-regions",
+        "modal-retention",
+        "modal-terms"
+      ]
+    }
+  ],
+  "data_policy": {
+    "validation_inputs": "Original synthetic paper-boat prompt only; no private characters, likeness, voices, customer files or secrets in workflows.",
+    "artifacts": "Keep primary outputs/journals privately on laptop with checksums before releasing ephemeral workers; no media/model weights in Git or registry.",
+    "persistent_storage": "Deferred per owner; later consider only frequently reused setup/models. No volume creation or private/public image publication in M3.1.",
+    "retention_limit": "Provider terms/account records may outlive a worker. No universal deletion SLA, legal/privacy certification or confidential-production approval is inferred."
+  },
+  "credential_boundary": {
+    "current_agent_control_plane": "Hosted Runpod MCP OAuth; research does not consume CLI/API credentials.",
+    "programmatic_worker_adapter": "Externally supplied RUNPOD_API_KEY or an explicitly configured supported credential provider; no key requested in chat or committed. MCP OAuth is not automatically a library credential.",
+    "worker": "SSH private key remains on laptop; an existing Pod-scoped shutdown credential, if present, stays only inside that worker.",
+    "redaction": "No tokens, request authorization headers, credential-bearing URLs or raw API errors in manifests/logs."
+  },
+  "sources": [
+    {
+      "id": "runpod-terms",
+      "url": "https://www.runpod.io/legal/terms-of-service",
+      "version": "Last updated2026-03-24"
+    },
+    {
+      "id": "runpod-privacy",
+      "url": "https://www.runpod.io/legal/privacy-policy"
+    },
+    {
+      "id": "runpod-storage",
+      "url": "https://docs.runpod.io/pods/storage/types"
+    },
+    {
+      "id": "runpod-billing",
+      "url": "https://docs.runpod.io/accounts-billing/billing"
+    },
+    {
+      "id": "runpod-management",
+      "url": "https://docs.runpod.io/pods/manage-pods"
+    },
+    {
+      "id": "lambda-pricing",
+      "url": "https://lambda.ai/pricing"
+    },
+    {
+      "id": "lambda-overview",
+      "url": "https://docs.lambda.ai/public-cloud/on-demand/"
+    },
+    {
+      "id": "lambda-filesystems",
+      "url": "https://docs.lambda.ai/public-cloud/filesystems/"
+    },
+    {
+      "id": "lambda-terms",
+      "url": "https://lambda.ai/legal/terms-of-service"
+    },
+    {
+      "id": "modal-pricing",
+      "url": "https://modal.com/pricing"
+    },
+    {
+      "id": "modal-regions",
+      "url": "https://modal.com/docs/guide/region-selection"
+    },
+    {
+      "id": "modal-retention",
+      "url": "https://modal.com/docs/guide/security"
+    },
+    {
+      "id": "modal-terms",
+      "url": "https://modal.com/legal/terms"
+    }
+  ],
+  "completion": "M3.1 remains incomplete until owner provider/spend approval, independent current-head review/testing, required CI and coordinator-verified merge. No resources provisioned by this research.",
+  "checked_on": "2026-11-01"
+}

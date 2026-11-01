@@ -35,3 +35,7 @@ Idempotency lasts only for one provider instance; an uncertain submission reserv
 Selection hashes bind declarations, not owner identity; worker records are attestations, not remote inspection. Client bounds and best-effort job cancellation do not enforce cloud rental costs or guarantee worker shutdown.
 
 Pod and Serverless will be selectable execution adapters sharing domain/model/workflow/artifact contracts. M2 implements private ComfyUI access to a manually prepared Pod; Serverless job APIs and cloud lifecycle automation remain future work.
+
+## M3 provider review
+
+[The dated Runpod Pod proposal](../../config/cloud/runpod-pod-proposal.json) compares Lambda and Modal, records terms/data-handling limits, and proposes a separate USD3 aggregate M3 validation cap. Owner approval is pending; this research record permits no provisioning, persistent storage, registry publication, new GPU SKU or credential extraction.
