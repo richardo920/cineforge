@@ -29,3 +29,9 @@ API reference: [ComfyUI server.py at 6d352802](https://github.com/comfyanonymous
 Cancellation validates the action acknowledgement and reconciles fresh history after queue disappearance; racing completion takes precedence. The API's boolean does not distinguish dequeue from interrupt, so even acknowledged queued deletion without terminal history remains uncertain; only confirmed interruption history becomes `CANCELLED`.
 
 Idempotency lasts only for one provider instance; an uncertain submission reserves its key and cannot replay, and a job missing from both queue/history stays uncertain. Client deadline/poll exhaustion does not prove GPU work stopped: callers must explicitly cancel; completed downloads are cached, while restart recovery remains unsupported.
+
+`load_comfy_selection` validates a separately trusted ledger/graph/license; `WorkerVerification` checks operator-attested image/runtime/GPU and exact model-file hashes. `execute_comfy` / `comfy-run` require explicit live opt-in, one matching shot and loopback transport, verify the installed core-node schemas, and persist a private atomic journal/payload outside Git; failures retain known job state and never resubmit automatically.
+
+Selection hashes bind declarations, not owner identity; worker records are attestations, not remote inspection. Client bounds and best-effort job cancellation do not enforce cloud rental costs or guarantee worker shutdown.
+
+Pod and Serverless will be selectable execution adapters sharing domain/model/workflow/artifact contracts. M2 implements private ComfyUI access to a manually prepared Pod; Serverless job APIs and cloud lifecycle automation remain future work.
