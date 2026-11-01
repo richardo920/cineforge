@@ -16,3 +16,5 @@ assert all(result.ready for result in results)
 ```
 
 Pins bind immutable source bytes, permissions and compatibility; changing declarations requires fresh source and rights reviews. Current revocation is checked on each resolution; review assertions are trusted operator metadata, not authenticated upstream endorsements or legal certification.
+
+`SkillRuntime` installs only the requested reviewed instruction file into a private immutable slot; source/receipt bytes and current rights are checked again when opening a session and before each call. Its broker supports bounded `read_file`/exclusive `write_file` operations on exact paths allowed by both the entry and operator; network, shell and arbitrary code always deny. This is a managed tool boundary, not an OS sandbox or a restriction on host tools used outside the broker.
