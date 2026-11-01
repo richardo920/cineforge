@@ -17,8 +17,8 @@ from cineforge.comfy_run import execute_comfy
 from cineforge.contracts import ProjectPlan
 from cineforge.mock import execute_mock, load_mock_plan
 from cineforge.private_store import read_private_input
-from cineforge.workflows import strict_object
 from cineforge.workflows import canonical as canonical_json
+from cineforge.workflows import strict_object
 
 
 class _ArgumentParser(argparse.ArgumentParser):

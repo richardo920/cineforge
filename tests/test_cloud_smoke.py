@@ -73,7 +73,7 @@ class Worker:
     def prepare(self):
         self.prepared = True
         if self.mode in ("setup_timeout", "download_timeout"):
-            raise TimeoutError("https://user:fixture-sensitive-value@untrusted.invalid")
+            raise TimeoutError("https://user:fixture-sensitive-value@untrusted.invalid")  # pragma: allowlist secret - synthetic diagnostic fixture
         if self.mode == "interrupt":
             raise KeyboardInterrupt("fixture-sensitive-value")
         record = worker_record(self.selected)
@@ -89,6 +89,11 @@ class Worker:
     def check(self):
         if self.mode == "heartbeat_lost" and self.prepared:
             raise ValueError("fixture-sensitive-value")
+        if self.enforce():
+            raise ValueError("fixture budget expired")
+
+    def set_enforcer(self, enforce):
+        self.enforce = enforce
 
 
 class ManagedSmokeTests(unittest.TestCase):
@@ -252,6 +257,7 @@ class ManagedSmokeTests(unittest.TestCase):
             self.assertEqual(probe_media(Path("fixture.webm"))["decoded_frames"], 33)
             self.assertIn("-count_frames", run.call_args.args[0])
             probe["streams"][0]["nb_read_frames"] = "0"
+            run.return_value = canonical(probe)
             with self.assertRaises(CloudSmokeError):
                 probe_media(Path("fixture.webm"))
 

@@ -179,6 +179,7 @@ class SSHWorker:
         self._tunnel: subprocess.Popen[bytes] | None = None
         self._endpoint = ""
         self._claimed: PrivateRunDirectory | None = None
+        self._enforce: Callable[[], tuple[str, ...]] | None = None
         self._source = read_private_input(Path(worker_bootstrap.__file__), max_bytes=128*1024)
 
     def __enter__(self) -> SSHWorker:
@@ -290,6 +291,13 @@ class SSHWorker:
                 or self.plan is not None and self.budget.remaining_seconds(self._key) <= 0
                 or self._tunnel is not None and self._tunnel.poll() is not None):
             raise WorkerError("worker supervision or lease deadline failed")
+        if self._enforce is not None and self._enforce():
+            raise WorkerError("worker lease or idle budget expired")
+
+    def set_enforcer(self, enforce: Callable[[], tuple[str, ...]]) -> None:
+        if self._enforce is not None or not callable(enforce):
+            raise WorkerError("worker budget enforcer already configured")
+        self._enforce = enforce
 
     def prepare(self) -> WorkerVerification:
         self.check()

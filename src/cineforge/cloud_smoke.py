@@ -140,12 +140,15 @@ def load_reference(path: str | Path, selection: ApprovedComfySelection, *,
     worker = WorkerVerification.from_dict(record["worker_verification"])
     worker.require_matches(selection)
     expected = selection.workflow.translate(selection.request(approved_plan(selection).shots[0]))
-    if (record.get("outcome") != "succeeded" or record["plan"] != manifest.plan.to_dict()
+    recovered = (record.get("outcome") == "operator_recovered"
+                 and record.get("mode") == "manual_get_only_operator_reconciliation")
+    if (not (record.get("outcome") == "succeeded" or recovered)
+            or record["plan"] != manifest.plan.to_dict()
             or not _history_graph_matches(expected, record["translated_workflow"])):
         raise CloudSmokeError("prepared reference differs from approved execution")
     normalized = normalize(manifest, selection, path.parent, inspect_media=inspect_media)
     normalized["worker_image_digest"] = worker.record["image_digest"]
-    provenance = "operator_recovered_existing_job" if record.get("mode") is not None \
+    provenance = "operator_recovered_existing_job" if recovered \
         else "normal_prepared_endpoint"
     return ParityReference(canonical(normalized).decode(), hashlib.sha256(payload).hexdigest(),
                            provenance)
@@ -160,6 +163,7 @@ class ManagedWorker(Protocol):
     def endpoint(self) -> str: ...
     def execution_transport(self) -> ComfyTransport: ...
     def check(self) -> None: ...
+    def set_enforcer(self, enforce: Callable[[], tuple[str, ...]]) -> None: ...
 
 
 WorkerFactory = Callable[[CloudBudgetSession, Path], ManagedWorker]
@@ -213,6 +217,7 @@ def run_managed_smoke(selection: ApprovedComfySelection, approval: BudgetApprova
                     worker = worker_factory(budget, output_dir / "ssh")
                     with worker:
                         provider = _provider(spec, transport, budget, worker.probe)
+                        worker.set_enforcer(lambda: budget.enforce_limits(provider))
                         device = provider.acquire(selection.model, max_cost_usd=.51)
                         report.update(outcome="acquired", worker_id=device.device_id)
                         store.checkpoint(canonical(report))

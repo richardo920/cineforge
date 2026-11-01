@@ -23,9 +23,9 @@ from pathlib import Path
 from threading import Event, Thread
 from typing import Any
 
-REVISION = "6d352802d8f8b9133f664a1757d6c6d26390c335"
+REVISION = "6d352802d8f8b9133f664a1757d6c6d26390c335"  # pragma: allowlist secret - public source revision
 GPU = "NVIDIA GeForce RTX 4090"
-MODEL_REVISION = "123acf1cc74bccbb9bfff8ac1ee72edc08c2341d"
+MODEL_REVISION = "123acf1cc74bccbb9bfff8ac1ee72edc08c2341d"  # pragma: allowlist secret - public model revision
 
 
 class BootstrapError(ValueError):
@@ -378,7 +378,8 @@ def main() -> int:
         if len(encode(request)) > 256 * 1024:
             raise BootstrapError("worker request too large")
         timeout = request.get("timeout_seconds")
-        if type(timeout) not in (int, float) or not math.isfinite(timeout) or not 0 < timeout <= 1740:
+        if (not isinstance(timeout, (int, float)) or isinstance(timeout, bool)
+                or not math.isfinite(timeout) or not 0 < timeout <= 1740):
             raise BootstrapError("invalid worker deadline")
 
         def expire(_signum: int, _frame: Any) -> None:
