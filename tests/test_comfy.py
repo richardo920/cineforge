@@ -70,14 +70,13 @@ class ServerFixture:
         if path == "/prompt":
             self.graph = copy.deepcopy(body["prompt"])
             value = {"prompt_id": IDENTITY, "number": 0, "node_errors": {}}
-        elif path == "/queue" and method == "POST":
-            if self.mode == "queued" and body == {"delete": [IDENTITY]}:
+        elif path == f"/api/jobs/{IDENTITY}/cancel":
+            acted = self.mode in ("queued", "running")
+            if self.mode == "queued":
                 self.mode = "deleted"
-            return b""
-        elif path == "/interrupt":
-            if self.mode == "running" and body == {"prompt_id": IDENTITY}:
+            elif self.mode == "running":
                 self.mode = "cancelled"
-            return b""
+            value = {"cancelled": acted}
         elif path == "/queue":
             value = {"queue_running": [[0, IDENTITY]] if self.mode == "running" else [],
                      "queue_pending": [[0, IDENTITY]] if self.mode == "queued" else []}
@@ -133,7 +132,9 @@ class ComfyProviderTests(unittest.TestCase):
         self.server = ServerFixture()
         self.template = workflow()
         self.request = request(self.template)
-        self.provider = ComfyExecutionProvider(self.server, self.template)
+        self.provider = ComfyExecutionProvider(
+            self.server, self.template, verified_server_revision=SUPPORTED_SERVER_REVISION,
+        )
 
     def submit(self):
         return self.provider.submit(self.request, "synthetic-key")
@@ -204,23 +205,30 @@ class ComfyProviderTests(unittest.TestCase):
 
     def test_queued_cancel_never_uses_interrupt(self):
         run = self.submit()
-        self.assertEqual(self.provider.cancel(run.job_id).status, RunStatus.CANCELLED)
+        # Upstream only acknowledges an action, not whether it dequeued or interrupted.
+        with self.assertRaises(JobStateUncertainError):
+            self.provider.cancel(run.job_id)
+        self.assertEqual(self.submit().status, RunStatus.QUEUED)
         self.assertFalse(any(c[1] == "/interrupt" for c in self.server.calls))
-        self.assertIn(("POST", "/queue", {"delete": [IDENTITY]}),
+        self.assertFalse(any(c[:2] == ("POST", "/queue") for c in self.server.calls))
+        self.assertIn(("POST", f"/api/jobs/{IDENTITY}/cancel", None),
                       [c[:3] for c in self.server.calls])
 
     def test_running_cancel_requires_verified_targeted_api(self):
-        run = self.submit()
+        unverified = ComfyExecutionProvider(self.server, self.template)
+        run = unverified.submit(self.request, "key")
         self.server.mode = "running"
-        with self.assertRaisesRegex(ProviderError, "verified server"):
-            self.provider.cancel(run.job_id)
+        with self.assertRaisesRegex(ProviderError, "verified atomic"):
+            unverified.cancel(run.job_id)
+        self.assertFalse(any(c[0] == "POST" and c[1] != "/prompt" for c in self.server.calls))
         self.assertFalse(any(c[1] == "/interrupt" for c in self.server.calls))
         trusted = ComfyExecutionProvider(self.server, self.template,
                                         verified_server_revision=SUPPORTED_SERVER_REVISION)
         trusted.submit(self.request, "trusted-key")
         self.assertEqual(trusted.cancel(run.job_id).status, RunStatus.CANCELLED)
-        interrupts = [c for c in self.server.calls if c[1] == "/interrupt"]
-        self.assertEqual([c[2] for c in interrupts], [{"prompt_id": IDENTITY}])
+        cancels = [c for c in self.server.calls if c[1].endswith("/cancel")]
+        self.assertEqual([c[1] for c in cancels], [f"/api/jobs/{IDENTITY}/cancel"])
+        self.assertFalse(any(c[1] == "/interrupt" for c in self.server.calls))
         with self.assertRaises(ProviderError):
             ComfyExecutionProvider(self.server, self.template, verified_server_revision="old")
 
@@ -260,13 +268,16 @@ class ComfyProviderTests(unittest.TestCase):
     def test_deadline_poll_limit_and_cancellation_budget(self):
         now = [0.0]
         provider = ComfyExecutionProvider(self.server, self.template, job_timeout_seconds=1,
-                                         max_polls=1, clock=lambda: now[0])
+                                         max_polls=1, clock=lambda: now[0],
+                                         verified_server_revision=SUPPORTED_SERVER_REVISION)
         run = provider.submit(self.request, "key")
         provider.status(run.job_id)
         with self.assertRaises(JobDeadlineError):
             provider.status(run.job_id)
         now[0] = 2
-        self.assertEqual(provider.cancel(run.job_id).status, RunStatus.CANCELLED)
+        with self.assertRaises(JobStateUncertainError):
+            provider.cancel(run.job_id)
+        self.assertTrue(any(c[1].endswith("/cancel") for c in self.server.calls))
         another = ComfyExecutionProvider(self.server, self.template, clock=lambda: now[0])
         self.server.mode = "queued"
         run = another.submit(self.request, "another")
@@ -298,6 +309,93 @@ class ComfyProviderTests(unittest.TestCase):
             with self.assertRaises(SubmissionUncertainError):
                 provider.submit(self.request, "key")
             self.assertEqual(len(server.calls), 1)
+
+    def test_cancel_reconciles_completion_after_last_history_before_queue(self):
+        for terminal, expected in (("success", RunStatus.SUCCEEDED), ("error", RunStatus.FAILED)):
+            class CompletingFixture(ServerFixture):
+                def __init__(self):
+                    super().__init__()
+                    self.mode = "running"
+                    self.histories = 0
+
+                def request(server, method, path, body=None, **kwargs):
+                    if path.endswith("/cancel"):
+                        server.calls.append((method, path, body,
+                                             kwargs["timeout_seconds"], kwargs["max_bytes"]))
+                        return b'{"cancelled": true}'
+                    if path.startswith("/history/"):
+                        server.histories += 1
+                        if server.histories == 2:
+                            raw = super().request(method, path, body, **kwargs)
+                            server.mode = terminal
+                            return raw
+                    return super().request(method, path, body, **kwargs)
+
+            with self.subTest(terminal=terminal):
+                server = CompletingFixture()
+                provider = ComfyExecutionProvider(
+                    server, self.template, verified_server_revision=SUPPORTED_SERVER_REVISION,
+                )
+                run = provider.submit(self.request, "key")
+                self.assertEqual(provider.cancel(run.job_id).status, expected)
+                self.assertEqual(provider.status(run.job_id).status, expected)
+                if terminal == "success":
+                    self.assertTrue(provider.result(run.job_id).payload)
+
+    def test_cancel_lost_state_remains_uncertain_and_does_not_cache_terminal(self):
+        run = self.submit()
+        self.server.mode = "lost"
+        with self.assertRaises(JobStateUncertainError):
+            self.provider.cancel(run.job_id)
+        self.assertFalse(any(c[1].endswith("/cancel") for c in self.server.calls))
+        self.assertEqual(self.submit().status, RunStatus.QUEUED)
+        self.server.mode = "success"
+        self.assertEqual(self.provider.status(run.job_id).status, RunStatus.SUCCEEDED)
+
+    def test_cancel_acknowledgement_is_not_running_terminal_confirmation(self):
+        class DispatchOnlyFixture(ServerFixture):
+            def request(server, method, path, body=None, **kwargs):
+                if path.endswith("/cancel"):
+                    server.calls.append((method, path, body,
+                                         kwargs["timeout_seconds"], kwargs["max_bytes"]))
+                    return b'{"cancelled": true}'
+                return super().request(method, path, body, **kwargs)
+
+        server = DispatchOnlyFixture()
+        server.mode = "running"
+        provider = ComfyExecutionProvider(
+            server, self.template, verified_server_revision=SUPPORTED_SERVER_REVISION,
+        )
+        run = provider.submit(self.request, "key")
+        self.assertEqual(provider.cancel(run.job_id).status, RunStatus.RUNNING)
+        self.assertEqual(provider.status(run.job_id).status, RunStatus.RUNNING)
+        server.mode = "success"
+        self.assertEqual(provider.status(run.job_id).status, RunStatus.SUCCEEDED)
+
+    def test_cancel_invalid_or_unavailable_ack_has_no_legacy_fallback(self):
+        for raw in (b'{"cancelled":1}', b'{"cancelled":"true"}', b'{}',
+                    b'{"cancelled":true,"unknown":1}', None):
+            class BadAckFixture(ServerFixture):
+                def request(server, method, path, body=None, **kwargs):
+                    if path.endswith("/cancel"):
+                        server.calls.append((method, path, body,
+                                             kwargs["timeout_seconds"], kwargs["max_bytes"]))
+                        if raw is None:
+                            raise TransportError("ComfyUI HTTP request rejected")
+                        return raw
+                    return super().request(method, path, body, **kwargs)
+
+            with self.subTest(raw=raw):
+                server = BadAckFixture()
+                provider = ComfyExecutionProvider(
+                    server, self.template, verified_server_revision=SUPPORTED_SERVER_REVISION,
+                )
+                run = provider.submit(self.request, "key")
+                with self.assertRaises(ProviderError):
+                    provider.cancel(run.job_id)
+                self.assertEqual(provider.submit(self.request, "key").status, RunStatus.QUEUED)
+                self.assertFalse(any(c[1] == "/interrupt" or c[:2] == ("POST", "/queue")
+                                     for c in server.calls))
 
 
 class HTTPTransportTests(unittest.TestCase):

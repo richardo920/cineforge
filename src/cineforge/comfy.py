@@ -1,7 +1,7 @@
 """ComfyUI execution protocol; no provisioning, installation or local artifact writes.
 
     API source: ComfyUI server.py at 6d352802d8f8b9133f664a1757d6c6d26390c335.
-    Requires that revision's prompt_id-targeted /interrupt semantics; no global interrupt.
+    Cancellation uses that revision's atomic /api/jobs/{id}/cancel route only.
 """
 
 from __future__ import annotations
@@ -83,7 +83,7 @@ class ComfyExecutionProvider:
         self._max_polls = max_polls
         self._max_result_bytes = max_result_bytes
         self._clock = clock
-        self._targeted_interrupt = verified_server_revision is not None
+        self._atomic_cancel = verified_server_revision is not None
         self._jobs: dict[str, _Job] = {}
         self._keys: dict[str, tuple[bytes, str | None]] = {}
         self._lock = RLock()
@@ -239,17 +239,34 @@ class ComfyExecutionProvider:
             deadline = self._clock() + self._request_timeout
             if self._history(job, deadline):
                 return job.run
-            self._call("POST", "/queue", {"delete": [job_id]}, deadline=deadline)
+            running, pending = self._queue(deadline)
+            if job_id not in running | pending:
+                if self._history(job, deadline):
+                    return job.run
+                raise JobStateUncertainError("job absent before cancellation; no action confirmed")
+            if not self._atomic_cancel:
+                raise ProviderError("cancellation requires a verified atomic job-cancel API")
+            acknowledgement = strict_object(self._call(
+                "POST", f"/api/jobs/{job_id}/cancel", deadline=deadline,
+            ))
+            if (set(acknowledgement) != {"cancelled"}
+                    or type(acknowledgement["cancelled"]) is not bool):
+                raise ProviderError("invalid ComfyUI cancellation acknowledgement")
+            if self._history(job, deadline):
+                return job.run
             running, pending = self._queue(deadline)
             if job_id in running:
-                if not self._targeted_interrupt:
-                    raise ProviderError("running cancellation requires a verified server revision")
-                # Older servers can ignore this body and globally interrupt. Never probe them.
-                self._call("POST", "/interrupt", {"prompt_id": job_id}, deadline=deadline)
-            if not self._history(job, deadline):
-                running, pending = self._queue(deadline)
-                if job_id not in running | pending:
-                    job.run = replace(job.run, status=RunStatus.CANCELLED, finished_at=self._now())
+                job.run = replace(job.run, status=RunStatus.RUNNING,
+                                  started_at=job.run.started_at or self._now())
+            elif job_id not in pending:
+                # Completion publishes history under the queue mutex. Reconcile after
+                # disappearance, not just before the queue read, before caching a terminal.
+                if self._history(job, deadline):
+                    return job.run
+                # This API's boolean cannot distinguish dequeue from a dispatched
+                # running interrupt. Even an earlier pending snapshot cannot prove
+                # which action occurred; absence alone never establishes a terminal.
+                raise JobStateUncertainError("cancellation outcome is not confirmed")
             return job.run
 
     def result(self, job_id: str) -> ExecutionResult:

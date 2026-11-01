@@ -24,6 +24,8 @@ Results contain synthetic JSON bytes with full shot/model provenance, actual SHA
 
 `ComfyHTTPTransport()` performs no network I/O until called with explicit `allow_live=True`; its default endpoint is `http://127.0.0.1:8188`, with no DNS/proxies/redirects or embedded credentials. Use an externally configured loopback tunnel for remote workers; model/hardware approval and live execution remain separate gates.
 
-API reference: [ComfyUI server.py at 6d352802](https://github.com/comfyanonymous/ComfyUI/blob/6d352802d8f8b9133f664a1757d6c6d26390c335/server.py). Running cancellation requires an explicit `verified_server_revision` equal to that full SHA, attesting the deployed source supports prompt-targeted interrupt; otherwise only queued deletion is available, never a global interrupt.
+API reference: [ComfyUI server.py at 6d352802](https://github.com/comfyanonymous/ComfyUI/blob/6d352802d8f8b9133f664a1757d6c6d26390c335/server.py). Cancellation requires an explicit `verified_server_revision` equal to that full SHA and uses only `/api/jobs/{id}/cancel`, whose queue helper atomically scopes interruption; `/interrupt` and raw queue deletion are never used.
+
+Cancellation validates the action acknowledgement and reconciles fresh history after queue disappearance; racing completion takes precedence. The API's boolean does not distinguish dequeue from interrupt, so even acknowledged queued deletion without terminal history remains uncertain; only confirmed interruption history becomes `CANCELLED`.
 
 Idempotency lasts only for one provider instance; an uncertain submission reserves its key and cannot replay, and a job missing from both queue/history stays uncertain. Client deadline/poll exhaustion does not prove GPU work stopped: callers must explicitly cancel; completed downloads are cached, while restart recovery remains unsupported.
