@@ -20,8 +20,7 @@
       "owner_reply": "i approve",
       "receipt": "https://github.com/richardo920/cineforge/issues/48#issuecomment-6554788309",
       "recorded_at": "2026-11-01T07:08:56.618255+00:00",
-      "proposal_revision": "f88b29c804e139e91e7f2bb59892708e1906ee70",
-      "proposal_revision_note": "# pragma: allowlist secret - public provenance hash",
+      "proposal_revision": "f88b29c804e139e91e7f2bb59892708e1906ee70", "proposal_revision_note": "# pragma: allowlist secret - public provenance hash",
       "approved_subject": {
         "provider": "runpod",
         "product": "pod",
@@ -46,10 +45,10 @@
         "startup_and_downloads_count_toward_lifetime": true,
         "model_workflow_subject_sha256": "1aaa7e024932fe008bf0c13304ce80be66991d03a2b7d94aa4bd0f37987b15d0",
         "synthetic_data_only": true,
-        "cleanup_scope": "Terminate only M3 validation-created Pods after private output retrieval; preserve stopped M2 Pod and unrelated resources."
+        "cleanup_scope": "Terminate only M3 validation-created Pods after private output retrieval; preserve stopped M2 Pod and unrelated resources.",
+        "model_workflow_subject_sha256_note": "# pragma: allowlist secret - public provenance hash"
       },
-      "approved_subject_sha256": "b7a88670e60335c8a63930c49bf69b7c46c6b73a6d4b5135b126906fe837c0cb",
-      "approved_subject_sha256_note": "# pragma: allowlist secret - public provenance hash",
+      "approved_subject_sha256": "9646e99a04b51064b08b75b56151370ef1a9df7def0f543bdb8faa70dbfc7349", "approved_subject_sha256_note": "# pragma: allowlist secret - public provenance hash",
       "canonicalization": "UTF-8 JSON; sorted keys; separators comma/colon; ensure_ascii=false; allow_nan=false; no trailing newline",
       "authentication_boundary": "The digest binds the recorded scope, not owner identity. Coordinator independently verifies the linked receipt; this file alone is not a credential or executable permission."
     },
