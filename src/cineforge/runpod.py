@@ -457,16 +457,30 @@ class RunpodPodProvisioner:
             raise ProvisioningError("measured worker is invalid or incompatible", lease.snapshot)
         return observation
 
+    def _ready_rate(self, lease: _Lease, pod: dict[str, Any] | None) -> float:
+        # Missing placement/version metadata can occur during startup and must not
+        # prevent safe cleanup. Admission, including restored leases, is stricter.
+        if (pod is None or pod.get("status") != "RUNNING"
+                or not isinstance(pod.get("runtime"), dict)
+                or pod.get("dataCenterId") != self.spec.data_center_id):
+            raise ProvisioningError("owned worker placement or readiness is not verified",
+                                    lease.snapshot)
+        cuda = pod.get("cudaVersion")
+        if (not isinstance(cuda, str) or not re.fullmatch(r"[0-9]{1,2}\.[0-9]{1,2}", cuda)
+                or tuple(map(int, cuda.split("."))) < tuple(map(
+                    int, self.spec.min_cuda_version.split(".")))):
+            raise ProvisioningError("owned worker CUDA floor is not verified", lease.snapshot)
+        rate = pod.get("cost")
+        if not _money(rate) or rate > self.spec.max_hourly_usd:
+            raise ProvisioningError("worker hourly rate exceeds operator ceiling", lease.snapshot)
+        return float(rate)
+
     def inspect(self, device_id: str) -> GPUDevice:
         with self._lock:
             lease = self._known(device_id)
             deadline = self._clock() + self._request
             pod = self._get(lease, deadline)
-            if pod is None or pod["status"] != "RUNNING" or pod.get("runtime") is None:
-                raise ProvisioningError("owned worker is not ready for measurement", lease.snapshot)
-            rate = pod.get("cost")
-            if not _money(rate) or rate > self.spec.max_hourly_usd:
-                raise ProvisioningError("worker hourly rate exceeds operator ceiling", lease.snapshot)
+            rate = self._ready_rate(lease, pod)
             observation = self._measurement(lease, max(0, deadline - self._clock()))
             if observation is None or self._clock() >= deadline:
                 raise ProvisioningError("worker measurement did not complete", lease.snapshot)
@@ -555,11 +569,7 @@ class RunpodPodProvisioner:
                     if actual["status"] in ("EXITED", "ERROR", "TERMINATED"):
                         raise ValueError
                     if actual["status"] == "RUNNING" and actual.get("runtime") is not None:
-                        cuda = actual.get("cudaVersion")
-                        if (not isinstance(cuda, str) or not re.fullmatch(r"\d+\.\d+", cuda)
-                                or tuple(map(int, cuda.split("."))) < tuple(map(
-                                    int, self.spec.min_cuda_version.split(".")))):
-                            raise ValueError
+                        self._ready_rate(lease, actual)
                         observation = self._measurement(lease, min(
                             self._request, max(0, deadline - self._clock())))
                         if observation is not None:

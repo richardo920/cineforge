@@ -256,6 +256,57 @@ class RunpodLifecycleTests(unittest.TestCase):
             self.assertFalse(self.cloud.pods)
         self.assertFalse(self.probes)
 
+    def test_running_worker_without_exact_placement_cannot_be_acquired(self):
+        self.cloud.get_change = lambda pod: {**pod, "dataCenterId": None}
+        p = self.provider()
+        with self.assertRaises(ProvisioningError) as cm:
+            self.acquire(p)
+        self.assertEqual(cm.exception.snapshot.state, "released")
+        self.assertFalse(self.cloud.pods)
+        self.assertFalse(self.probes)
+        self.assertNotIn("ready", [snapshot.state for _, snapshot in self.events])
+
+    def test_nullable_starting_metadata_can_progress_to_exact_ready_placement(self):
+        count = 0
+
+        def starting_then_ready(pod):
+            nonlocal count
+            count += 1
+            if count == 1:
+                return {**pod, "status": "STARTING", "runtime": None,
+                        "dataCenterId": None, "cudaVersion": None}
+            return pod
+
+        self.cloud.get_change = starting_then_ready
+        p = self.provider()
+        self.assertEqual(self.acquire(p).device_id, "pod_1")
+        self.assertEqual(p.snapshots[0].state, "ready")
+        self.assertEqual(len(self.probes), 1)
+
+    def test_restored_created_inspection_enforces_all_ready_admission_before_probe(self):
+        for field, value in [("dataCenterId", None), ("cudaVersion", None),
+                             ("cudaVersion", "12.7"), ("cudaVersion", "not-a-version"),
+                             ("runtime", None), ("runtime", "malformed")]:
+            with self.subTest(field=field, value=value):
+                self.cloud = FakeCloud()
+                p = self.provider()
+                self.acquire(p)
+                restored = self.provider()
+                restored.restore_owned(p.intent("first"), replace(p.snapshots[0], state="created"))
+                self.cloud.get_change = lambda pod: {**pod, field: value}
+                self.probes.clear()
+                self.events.clear()
+                with self.assertRaises(ProvisioningError):
+                    restored.inspect("pod_1")
+                self.assertEqual(restored.snapshots[0].state, "created")
+                self.assertFalse(self.probes)
+                self.assertFalse(self.events)
+                # Incomplete ready metadata still permits deletion of the verified
+                # owned ephemeral lease; it is not mistaken for a foreign worker.
+                restored.release("pod_1")
+                self.assertEqual(restored.snapshots[0].state, "released")
+                self.assertFalse(self.cloud.pods)
+
     def test_policy_and_precreate_persistence_failures_never_submit(self):
         def fail(*_args):
             raise RuntimeError("Bearer fixture-sensitive-value")
