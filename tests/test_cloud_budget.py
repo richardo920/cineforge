@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import tempfile
+import threading
 import traceback
 import unittest
 from dataclasses import FrozenInstanceError, replace
@@ -18,8 +19,10 @@ from cineforge.cloud_journal import CloudJournal, CloudJournalError
 from cineforge.comfy_policy import load_comfy_selection
 from cineforge.devices import Backend, GPUDevice, Precision
 from cineforge.runpod import (
+    AcquisitionIntent,
     AcquisitionUncertainError,
     CleanupUncertainError,
+    LeaseSnapshot,
     ProvisioningError,
     RunpodPodProvisioner,
     WorkerObservation,
@@ -446,6 +449,125 @@ class BudgetTests(unittest.TestCase):
             with self.assertRaises(ProvisioningError):
                 self.acquire(provider, "second")
             self.assertEqual(len(self.cloud.calls), calls)
+
+    def test_slow_durable_commit_invalidates_quote_before_post_but_keeps_reservation(self):
+        with self.session() as session:
+            original = session._journal.checkpoint
+            delayed = False
+            def slow_reservation(payload):
+                nonlocal delayed
+                original(payload)
+                records = json.loads(payload)["records"]
+                if not delayed and any(r["authorized"] for r in records.values()):
+                    delayed = True
+                    self.clock.sleep(31)
+            with patch.object(session._journal, "checkpoint", side_effect=slow_reservation):
+                provider = self.provider(session, startup_timeout_seconds=120)
+                with self.assertRaises(ProvisioningError):
+                    self.acquire(provider)
+            self.assertTrue(delayed)
+            self.assertFalse(any(c[0] == "POST" for c in self.cloud.calls))
+            self.assertEqual(session.costs()["attempts"], 1)
+            self.assertEqual(session.costs()["reserved_worst_case_usd"], .51)
+            self.assertEqual(session.snapshots[0].state, "not_created")
+            committed = json.loads((self.path / "budget.json").read_bytes())
+            self.assertTrue(committed["records"]["first"]["authorized"])
+
+    def test_slow_commit_must_preserve_cleanup_cutoff_even_when_quote_is_still_fresh(self):
+        with self.session() as session:
+            intent = AcquisitionIntent("short", spec(), "0"*32, "fixture-short", model(),
+                                       1, 61, .5, 1)
+            session.event_sink(intent, LeaseSnapshot("short", "reserved"))
+            original = session._journal.checkpoint
+            def slow_reservation(payload):
+                original(payload)
+                self.clock.sleep(2)
+            with patch.object(session._journal, "checkpoint", side_effect=slow_reservation):
+                with self.assertRaisesRegex(CloudBudgetError, "admission expired"):
+                    session.before_create(intent)
+            self.assertEqual(session.costs()["attempts"], 1)
+            self.assertFalse(any(c[0] == "POST" for c in self.cloud.calls))
+
+    def test_concurrent_probe_arming_and_cleanup_finish_without_lock_inversion(self):
+        for operation in ("enforce_limits", "recover_owned"):
+            with self.subTest(operation=operation):
+                self.path = Path(self.temp.name) / operation
+                probe_entered = threading.Event()
+                cleanup_claimed = threading.Event()
+                resume_probe = threading.Event()
+                release_claim = threading.Event()
+                errors, acquired, cleaned, refused_arming = [], [], [], []
+                with self.session() as session:
+                    def probe(snapshot, timeout):
+                        probe_entered.set()
+                        if not resume_probe.wait(3):
+                            raise AssertionError("probe was not resumed")
+                        try:
+                            session.arm_guard(snapshot.key, GuardReceipt(
+                                session.guard_plan(snapshot.key), worker_guard_source_sha256(),
+                                123, self.clock.time(), True, True))
+                        except CloudBudgetError:
+                            refused_arming.append(snapshot.key)
+                            raise
+                        raise AssertionError("cleanup decision must deny new worker admission")
+                    provider = self.provider(session, probe=probe, startup_timeout_seconds=300)
+                    original_release = session._release
+                    def paused_release(*args):
+                        cleanup_claimed.set()
+                        if not release_claim.wait(3):
+                            raise AssertionError("cleanup was not resumed")
+                        return original_release(*args)
+                    def acquire():
+                        try:
+                            self.acquire(provider)
+                        except ProvisioningError:
+                            acquired.append("denied")
+                        except BaseException as error:
+                            errors.append(error)
+                    def cleanup():
+                        try:
+                            cleaned.append(getattr(session, operation)(provider))
+                        except BaseException as error:
+                            errors.append(error)
+                    acquirer = threading.Thread(target=acquire, daemon=True)
+                    cleaner = threading.Thread(target=cleanup, daemon=True)
+                    with patch.object(session, "_release", side_effect=paused_release):
+                        acquirer.start()
+                        self.assertTrue(probe_entered.wait(3))
+                        self.clock.sleep(121)
+                        cleaner.start()
+                        try:
+                            self.assertTrue(cleanup_claimed.wait(3))
+                            # Keep even a future lock regression bounded: query on a daemon.
+                            duplicate_results = []
+                            def duplicate_cleanup():
+                                heartbeat_refused = False
+                                try:
+                                    session.heartbeat("first")
+                                except CloudBudgetError:
+                                    heartbeat_refused = True
+                                duplicate_results.append((session.enforce_limits(provider),
+                                    session.recover_owned(provider), session.snapshots[0].state,
+                                    heartbeat_refused))
+                            duplicate = threading.Thread(target=duplicate_cleanup, daemon=True)
+                            duplicate.start()
+                            duplicate.join(3)
+                            self.assertFalse(duplicate.is_alive(), "budget lock held across cleanup")
+                            self.assertEqual(duplicate_results, [((), (), "cleanup_pending", True)])
+                        finally:
+                            release_claim.set()
+                            resume_probe.set()
+                        acquirer.join(3)
+                        cleaner.join(3)
+                    self.assertFalse(acquirer.is_alive(), "acquire/guard callback deadlocked")
+                    self.assertFalse(cleaner.is_alive(), "cleanup/provisioner call deadlocked")
+                    self.assertEqual(errors, [])
+                    self.assertEqual(acquired, ["denied"])
+                    self.assertEqual(refused_arming, ["first"])
+                    self.assertEqual(cleaned, [("first",)])
+                    self.assertEqual(session.snapshots[0].state, "released")
+                    self.assertFalse(self.cloud.pods)
+        self.assertEqual(sum(c[0] == "DELETE" for c in self.cloud.calls), 2)
 
     def test_cancellation_after_reservation_never_posts_but_keeps_attempt_and_reserve(self):
         with self.session() as session:

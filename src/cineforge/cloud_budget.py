@@ -6,7 +6,7 @@ import hashlib
 import math
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import RLock
 from types import TracebackType
@@ -215,6 +215,7 @@ class CloudBudgetSession:
         self._effective = 0.0
         self._last_wall = 0.0
         self._entered = False
+        self._cleanup_inflight: set[str] = set()
 
     def __enter__(self) -> CloudBudgetSession:
         self._journal.__enter__()
@@ -424,6 +425,12 @@ class CloudBudgetSession:
                           * intent.lease_seconds / 3600, quote=fresh, reserved_at=now,
                           deadline=now + intent.lease_seconds, last_activity=now)
             self._save()  # Paid attempt consumed before POST; crash cannot refund it.
+            # Atomic persistence can itself take long enough to invalidate admission.
+            # Keep the durable reservation/attempt even when no POST may now follow.
+            now = self._now()
+            if (self._poisoned or now - fresh["observed_unix"] > self.quote_max_age_seconds
+                    or now >= record["deadline"] - 60):
+                raise CloudBudgetError("durable admission expired before cloud creation")
 
     def guard_plan(self, key: str) -> WorkerGuardPlan:
         with self._lock:
@@ -468,9 +475,41 @@ class CloudBudgetSession:
             record["last_activity"] = self._now()
             self._save()
 
+    def _claim_cleanup(self, record: dict[str, Any]) -> tuple[AcquisitionIntent,
+                                                           LeaseSnapshot] | None:
+        """Budget lock held: persist the decision, deny READY, deduplicate local supervisors."""
+        intent = AcquisitionIntent.from_dict(record["intent"])
+        snapshot = LeaseSnapshot.from_dict(record["snapshot"])
+        if (snapshot.resource_id is None or snapshot.state in _TERMINAL
+                or intent.key in self._cleanup_inflight):
+            return None
+        snapshot = replace(snapshot, state="cleanup_pending")
+        record["snapshot"] = snapshot.to_dict()
+        self._cleanup_inflight.add(intent.key)
+        try:
+            self._save()
+        except CloudBudgetError:
+            # Persistence failure must not prevent cleanup of an already known ID.
+            # The poisoned session still blocks all further spending/work admission.
+            pass
+        return intent, snapshot
+
+    def _release(self, provisioner: RunpodPodProvisioner, intent: AcquisitionIntent,
+                 snapshot: LeaseSnapshot) -> None:
+        """Never hold the budget lock across provider locks, callbacks, or lifecycle I/O."""
+        try:
+            if snapshot.resource_id is None:
+                raise CloudBudgetError("cannot release an unknown worker")
+            if not any(v.key == intent.key for v in provisioner.snapshots):
+                provisioner.restore_owned(intent, snapshot)
+            provisioner.release(snapshot.resource_id)
+        finally:
+            with self._lock:
+                self._cleanup_inflight.discard(intent.key)
+
     def enforce_limits(self, provisioner: RunpodPodProvisioner) -> tuple[str, ...]:
         """Call frequently during setup/download/inference; heartbeat never extends deadline."""
-        stopped = []
+        claims = []
         with self._lock:
             try:
                 now = self._now()
@@ -481,35 +520,34 @@ class CloudBudgetSession:
                 if (snapshot.resource_id and snapshot.state not in _TERMINAL
                         and record["authorized"] and (self._poisoned or now >= record["deadline"] - 60
                         or now - record["last_activity"] >= self.idle_seconds)):
-                    self._release(provisioner, record)
-                    stopped.append(snapshot.key)
+                    claim = self._claim_cleanup(record)
+                    if claim is not None:
+                        claims.append(claim)
+        stopped = []
+        for intent, snapshot in claims:
+            self._release(provisioner, intent, snapshot)
+            stopped.append(intent.key)
         return tuple(stopped)
-
-    def _release(self, provisioner: RunpodPodProvisioner, record: dict[str, Any]) -> None:
-        intent = AcquisitionIntent.from_dict(record["intent"])
-        snapshot = LeaseSnapshot.from_dict(record["snapshot"])
-        if snapshot.resource_id is None:
-            raise CloudBudgetError("cannot release an unknown worker")
-        if not any(v.key == intent.key for v in provisioner.snapshots):
-            provisioner.restore_owned(intent, snapshot)
-        provisioner.release(snapshot.resource_id)
 
     def recover_owned(self, provisioner: RunpodPodProvisioner, *, max_pages: int = 10) -> tuple[str, ...]:
         """GET-only discovery followed by verified owned deletion; never recreate/retry POST."""
         if type(max_pages) is not int or not 1 <= max_pages <= 20:
             raise CloudBudgetError("invalid recovery pagination bound")
-        recovered = []
+        claims = []
         with self._lock:
             for record in self._data["records"].values():
                 snapshot = LeaseSnapshot.from_dict(record["snapshot"])
-                if snapshot.state in _TERMINAL:
+                if snapshot.state in _TERMINAL or snapshot.key in self._cleanup_inflight:
                     continue
                 if snapshot.resource_id is None:
                     self._discover(record, max_pages)
-                    snapshot = LeaseSnapshot.from_dict(record["snapshot"])
-                if snapshot.resource_id is not None:
-                    self._release(provisioner, record)
-                    recovered.append(snapshot.key)
+                claim = self._claim_cleanup(record)
+                if claim is not None:
+                    claims.append(claim)
+        recovered = []
+        for intent, snapshot in claims:
+            self._release(provisioner, intent, snapshot)
+            recovered.append(intent.key)
         return tuple(recovered)
 
     def _discover(self, record: dict[str, Any], max_pages: int) -> None:
