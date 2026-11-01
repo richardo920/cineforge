@@ -2,4 +2,8 @@
 
 `Auteur (planner) → production manifest → scheduler → model adapter → execution runner → artifact store → editorial/audio review`.
 
-GPU provisioners acquire/release workers independently from runners such as ComfyUI. Persist shot revisions, job state, workflow/model versions, costs, and artifact hashes; retries resume individual jobs with idempotency keys. All components beyond the CLI scaffold are proposed; see [design](overview.md) and [milestones](../plans/milestones.md).
+GPU provisioners acquire/release workers independently from execution runners. Persist shot revisions, jobs, model/workflow versions, costs and artifact hashes; retries use idempotency keys.
+
+`contracts.py` validates immutable v1 `ProjectPlan` and self-contained `RunManifest` records with strict dict and canonical JSON codecs. `tests/fixtures/production-v1.json` is synthetic metadata; URI/license/revision declarations do not verify storage, rights or reproducibility.
+
+Execution and storage remain later [milestone](../plans/milestones.md) tasks.
