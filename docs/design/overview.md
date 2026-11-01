@@ -4,7 +4,7 @@
 
 A modular AI filmmaking platform: brief → screenplay → storyboard → shots → picture edit → sound → review → delivery. Keep creative intent and production metadata portable across models, GPU providers, and editing tools; require human approval of final picture, voice likeness, music, and mix.
 
-The private Python package implements strict immutable production contracts, declared model/device selection, and a deterministic metadata-only mock CLI with local checkpoints/resume and a synthetic JSON example. Live generation, ComfyUI transport, provisioning, audio analysis, mixing, and a web UI are future adapters, not implemented capabilities.
+The private Python package implements strict immutable production contracts, declared model/device selection, a deterministic metadata-only mock CLI with local checkpoints/resume, and a library-only ComfyUI adapter verified with offline fixtures. Approved live generation, provisioning, audio analysis, mixing, and a web UI remain future work.
 
 ## File structure
 
@@ -31,7 +31,7 @@ cineforge/
 └── tests/                     # Offline unit and CLI tests
 ```
 
-Current modules: `contracts.py`, `devices.py`, `providers.py`, `mock.py`, and `storage.py`; character, audio, and skills registries remain planned. `examples/synthetic-plan.json` declares synthetic models and devices explicitly; neither hardware discovery nor model downloads occur.
+Current modules include `contracts.py`, `devices.py`, `providers.py`, `mock.py`, `storage.py`, `comfy.py`, `comfy_transport.py`, and `workflows.py`; character, audio, and skills registries remain planned. `examples/synthetic-plan.json` declares synthetic models and devices explicitly; neither hardware discovery nor model downloads occur.
 
 ## Architecture and data flow
 
