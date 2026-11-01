@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "plan": {
+    "schema_version": 1,
+    "project": {
+      "schema_version": 1,
+      "project_id": "synthetic-demo",
+      "revision": 1,
+      "title": "Synthetic metadata demo"
+    },
+    "scenes": [
+      {
+        "schema_version": 1,
+        "scene_id": "scene-1",
+        "project_id": "synthetic-demo",
+        "revision": 1
+      }
+    ],
+    "shots": [
+      {
+        "schema_version": 1,
+        "shot_id": "shot-1",
+        "scene_id": "scene-1",
+        "revision": 1,
+        "prompt": "Synthetic geometric cube on a plain background",
+        "seed": 42,
+        "duration_seconds": 2,
+        "model_id": "synthetic-model",
+        "model_revision": "fixture-v1",
+        "workflow_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+        "character_revision": null
+      },
+      {
+        "schema_version": 1,
+        "shot_id": "shot-2",
+        "scene_id": "scene-1",
+        "revision": 1,
+        "prompt": "Synthetic geometric cube on a plain background",
+        "seed": 43,
+        "duration_seconds": 2,
+        "model_id": "synthetic-model",
+        "model_revision": "fixture-v1",
+        "workflow_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+        "character_revision": null
+      }
+    ]
+  },
+  "models": [
+    {
+      "model_id": "synthetic-model",
+      "revision": "fixture-v1",
+      "task": "synthetic-metadata",
+      "allowed_backends": [
+        "cpu"
+      ],
+      "minimum_memory_mib": 1,
+      "license": "LicenseRef-SyntheticFixture",
+      "required_precision": "fp32",
+      "commercial_use": null
+    }
+  ],
+  "devices": [
+    {
+      "device_id": "synthetic-cpu",
+      "backend": "cpu",
+      "memory_mib": 1,
+      "supported_precisions": [
+        "fp32"
+      ]
+    }
+  ]
+}

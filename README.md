@@ -2,7 +2,7 @@
 
 Private foundation for a modular AI filmmaking platform: brief → screenplay → storyboard → shots → edit → sound → review → delivery.
 
-**Status:** project scaffold only; no media generation, paid API calls, or GPU provisioning. Architecture and implementation milestones are proposed in the planning PR; implementation starts after owner review and merge.
+**Status:** strict versioned production metadata, declared device/model selection, and a deterministic offline mock runner. No media generation, paid API calls, or GPU provisioning.
 
 ## Quick start
 
@@ -11,10 +11,16 @@ python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e .
 cineforge --version
+cineforge validate-plan examples/synthetic-plan.json
+cineforge mock-run examples/synthetic-plan.json --run-id demo-run
 python -m unittest discover -s tests -v
 ```
 
-Python 3.11+. Runtime has no third-party dependencies. `.env.example` lists future adapter settings; the scaffold does not load `.env`.
+Python 3.11+. Runtime has no third-party dependencies. `.env.example` lists future adapter settings; the package does not load `.env`.
+
+The example wraps a `ProjectPlan` in `{schema_version: 1, plan, models, devices}` with explicit synthetic declarations; see its fields for the strict input schema. `validate-plan` checks the entire wrapper and emits its canonical domain `ProjectPlan`; `mock-run` consumes the wrapper and emits a canonical `RunManifest` only after all shots succeed.
+
+Both commands reject malformed UTF-8/JSON, unknown fields/references, invalid model metadata, and incompatible devices before submission. Mock artifacts are ephemeral metadata (`memory://`); output files and resume are not implemented. Identical inputs produce identical output; `--run-id` overrides the default input digest.
 
 ## CI guards
 
@@ -24,7 +30,7 @@ Dependency review also queries advisory services in CI (network required; failur
 
 ## Layout
 
-- `src/cineforge/`: package and CLI scaffold.
+- `src/cineforge/`: contracts, device declarations, fake execution provider, and CLI.
 - `tests/`: offline smoke tests; `.github/workflows/ci.yml`: CI.
 - `AGENTS.md`: contributor rules and agent review expectations.
 - [Design overview](docs/design/overview.md): vision, file structure, and subsystem contracts.

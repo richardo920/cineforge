@@ -4,7 +4,7 @@
 
 A modular AI filmmaking platform: brief → screenplay → storyboard → shots → picture edit → sound → review → delivery. Keep creative intent and production metadata portable across models, GPU providers, and editing tools; require human approval of final picture, voice likeness, music, and mix.
 
-The initial repository contains only a private Python package/CLI scaffold and CI. Domain contracts, a mock execution path, and examples are proposed for implementation after plan approval. Live generation, ComfyUI transport, provisioning, audio analysis, mixing, and a web UI are future adapters, not implemented capabilities.
+The private Python package implements strict immutable production contracts, declared model/device selection, and a deterministic metadata-only mock CLI with a synthetic JSON example. Live generation, ComfyUI transport, provisioning, audio analysis, mixing, and a web UI are future adapters, not implemented capabilities.
 
 ## File structure
 
@@ -27,11 +27,11 @@ cineforge/
 │   ├── plans/milestones.md    # Tasks, dependencies, acceptance criteria
 │   └── development/
 │       └── agent-workflow.md  # Parallel agents and PR quality gates
-├── src/cineforge/             # Current: package and CLI scaffold
-└── tests/                     # Current: offline CLI smoke tests
+├── src/cineforge/             # Contracts, devices, fake provider, mock CLI
+└── tests/                     # Offline unit and CLI tests
 ```
 
-Proposed modules after plan approval: `models.py`, `providers.py`, `characters.py`, `audio.py`, and `skills.py`; synthetic fixtures/examples accompany those tasks.
+Current modules: `contracts.py`, `devices.py`, `providers.py`, and `mock.py`; character, audio, and skills registries remain planned. `examples/synthetic-plan.json` declares synthetic models and devices explicitly; neither hardware discovery nor model downloads occur.
 
 ## Architecture and data flow
 
@@ -39,7 +39,7 @@ The future orchestration layer, Auteur, translates a brief into versioned scenes
 
 Keep orchestration independent from execution. GPU providers provision compute; runners such as ComfyUI execute workflows; model adapters translate creative requests into runner inputs. Hosted APIs can implement the execution protocol without owning a GPU provisioner.
 
-A production manifest will record project/scene/shot IDs, revision, prompt, seed where supported, model revision, workflow digest, character revision, provider/job ID, timestamps, cost, and artifact checksums. Immutable run records support retries, comparison, and lineage; seeds are evidence, not a guarantee of identical outputs across hardware.
+The version-one production manifest records project/scene/shot IDs, revision, prompt, seed where supported, model revision, workflow digest, character revision, provider/job ID, timestamps, cost, and artifact checksums. Immutable run records support retries, comparison, and lineage; seeds are evidence, not a guarantee of identical outputs across hardware.
 
 ## GPU-provider and model abstraction
 
@@ -47,7 +47,9 @@ A production manifest will record project/scene/shot IDs, revision, prompt, seed
 
 Initial backend vocabulary: CUDA, ROCm, Metal, CPU. Future provisioners cover local devices and cloud workers; a provisioner manages acquire/release and cost limits, while an execution provider manages submit/status/cancel/result. Model registries must carry license and commercial-use restrictions before live execution is enabled.
 
-Production adapters need timeouts, bounded retries, idempotency keys, cancellation, per-job budgets, and guaranteed cleanup in failure paths. The proposed initial mock provider will implement synchronous rendering for contract validation; it neither provisions GPUs nor generates media.
+Production adapters need timeouts, bounded retries, idempotency keys, cancellation, per-job budgets, and guaranteed cleanup in failure paths. The fake provider implements submit/status/cancel/result with metadata-only JSON payloads and synthetic logical timestamps. `mock-run` preflights every request and device before submission, bounds polling, and emits a canonical manifest; it neither provisions GPUs nor generates media.
+
+`MockPlan.from_json` / `load_mock_plan` parse the strict `{schema_version, plan, models, devices}` wrapper; `to_json` covers all declarations. `MockPlan.preflight()` resolves every `ExecutionRequest`; `mock_run_id` and `mock_idempotency_key` supply stable identities. `execute_mock` returns a `MockRun` containing the manifest and ephemeral `ExecutionResult` payloads; persistence/resume remain separate work.
 
 ## Character registry
 
@@ -101,6 +103,6 @@ CI fixtures must be synthetic, small, deterministic, and rights-cleared; use fak
 
 ## Agent delivery and review
 
-Implementation waits for owner review and merge of this design and `docs/plans/milestones.md`. Each task ships through an implementation agent, an independent review agent, and an independent testing agent before coordinator/merge-agent merge once all required checks and both independent approvals pass for the current head; see `docs/development/agent-workflow.md` for evidence and enforcement requirements.
+The design and milestone plan are owner-approved and merged. Each task ships through an implementation agent, an independent review agent, and an independent testing agent before coordinator/merge-agent merge once all required checks and both independent approvals pass for the current head; see `docs/development/agent-workflow.md` for evidence and enforcement requirements.
 
 Agents own ongoing repository maintenance and routine merges under the approved plan; the owner provides product direction and may optionally inspect code, with no routine coding or code-review obligation.
