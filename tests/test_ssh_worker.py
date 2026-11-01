@@ -102,6 +102,25 @@ class SSHTests(unittest.TestCase):
         self.assertNotIn("RUNPOD_API_KEY", ssh_environment())
         self.assertNotIn("SSH_AUTH_SOCK", ssh_environment())
 
+    def test_multicast_v4_v6_and_mapped_addresses_reject_before_ssh(self):
+        addresses = ["224.0.0.1", "239.255.255.250", "ff02::1", "ff0e::1",
+                     "::ffff:224.0.0.1", "::ffff:239.255.255.250"]
+        for address in addresses:
+            with self.subTest(address=address), patch("cineforge.ssh_worker.run_process") as run:
+                self.transport.pod["ssh"]["direct"]["host"] = address
+                worker = self.worker(allow_live=True)
+                with self.assertRaises(WorkerError):
+                    worker._connection(LeaseSnapshot("first", "created", "pod_1"), 5)
+                self.assertEqual(worker._host, "")
+                run.assert_not_called()
+
+    def test_public_unicast_v4_v6_and_mapped_addresses_remain_supported(self):
+        for address in ["8.8.8.8", "2606:4700:4700::1111", "::ffff:8.8.8.8"]:
+            with self.subTest(address=address):
+                self.transport.pod["ssh"]["direct"]["host"] = address
+                self.assertTrue(self.worker(allow_live=True)._connection(
+                    LeaseSnapshot("first", "created", "pod_1"), 5))
+
     def test_guard_receipt_source_own_id_pid_verified_before_observation(self):
         worker = self.worker(allow_live=True)
         worker.set_enforcer(lambda: ())

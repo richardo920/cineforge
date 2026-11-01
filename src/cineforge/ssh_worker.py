@@ -211,7 +211,10 @@ class SSHWorker:
         if direct is None:
             return False
         address = ipaddress.ip_address(direct["host"])
-        if (not address.is_global or direct["username"] != "root"
+        unicast = address.ipv4_mapped if isinstance(address, ipaddress.IPv6Address) \
+            and address.ipv4_mapped is not None else address
+        if (not address.is_global or address.is_multicast
+                or not unicast.is_global or unicast.is_multicast or direct["username"] != "root"
                 or type(direct["port"]) is not int or not 1 <= direct["port"] <= 65535):
             raise WorkerError("invalid direct SSH endpoint")
         self._host, self._port = str(address), direct["port"]
