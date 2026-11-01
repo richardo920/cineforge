@@ -22,7 +22,8 @@ from cineforge.contracts import (
     _tuple,
     _unique,
 )
-from cineforge.devices import Backend, GPUDevice
+from cineforge.devices import Backend, GPUDevice, Precision
+from cineforge.rights import Attribution, EvidenceRef, RightsLedger, RightsRef, SubjectRef, Use
 
 _COMMIT = re.compile(r"[0-9a-f]{40}\Z")
 _CATEGORIES = {"story", "camera", "audio", "editing", "model_card", "workflow", "recipe"}
@@ -127,7 +128,8 @@ class Compatibility(_Record):
     workflow_digest: str | None = None
     backend: Backend | None = None
     minimum_memory_mib: int = 0
-    _enums: ClassVar[dict[str, type[Enum]]] = {"backend": Backend}
+    required_precision: Precision | None = None
+    _enums: ClassVar[dict[str, type[Enum]]] = {"backend": Backend, "required_precision": Precision}
 
     def __post_init__(self) -> None:
         Contract.__post_init__(self)
@@ -141,13 +143,19 @@ class Compatibility(_Record):
             _digest(self.workflow_digest, "workflow digest")
         if self.backend is not None and not isinstance(self.backend, Backend):
             raise CatalogError("invalid compatibility backend")
-        if self.model_id is None and (self.backend is not None or self.minimum_memory_mib):
+        if self.required_precision is not None and not isinstance(self.required_precision, Precision):
+            raise CatalogError("invalid compatibility precision")
+        if self.model_id is None and (self.backend is not None or self.minimum_memory_mib
+                                      or self.required_precision is not None):
             raise CatalogError("model-neutral guidance cannot declare a hardware profile")
+        if self.backend is None and (self.minimum_memory_mib or self.required_precision is not None):
+            raise CatalogError("hardware requirements need an explicit backend")
 
     @classmethod
     def from_dict(cls, data: object) -> Self:
-        if isinstance(data, dict) and data.get("backend") is None:
-            data = {key: value for key, value in data.items() if key != "backend"}
+        if isinstance(data, dict):
+            data = {key: value for key, value in data.items()
+                    if key not in cls._enums or value is not None}
         return super(Compatibility, cls).from_dict(data)
 
     def reasons(self, shot: Shot, device: GPUDevice | None) -> tuple[str, ...]:
@@ -160,7 +168,9 @@ class Compatibility(_Record):
                 if device is None:
                     reasons.append("missing_device_profile")
                 elif (device.backend != self.backend
-                      or device.memory_mib < self.minimum_memory_mib):
+                      or device.memory_mib < self.minimum_memory_mib
+                      or (self.required_precision is not None
+                          and self.required_precision not in device.supported_precisions)):
                     reasons.append("incompatible_hardware")
         return tuple(reasons)
 
@@ -196,6 +206,7 @@ class SourceReview(_Record):
         _identifier(self.reviewer, "source reviewer")
         _text(self.evidence_uri, "review evidence")
         _digest(self.evidence_sha256, "review evidence digest")
+        EvidenceRef(self.evidence_uri, self.evidence_sha256)
 
 
 @dataclass(frozen=True, slots=True)
@@ -243,3 +254,148 @@ def _digest_record(record: Contract, *, exclude: tuple[str, ...] = ()) -> str:
     raw = json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
                      allow_nan=False)
     return hashlib.sha256(raw.encode()).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class CatalogEntry(_Record):
+    entry_id: str
+    revision: str
+    category: str
+    summary: str
+    source: SourcePin
+    entrypoint: str
+    permissions: Permissions
+    compatibility: Compatibility
+    rights: RightsRef
+    mode: str = "reference_only"
+    supplemental_sources: tuple[SourcePin, ...] = ()
+    profiles: tuple[ProfileEvidence, ...] = ()
+    limitations: tuple[str, ...] = ()
+    review: SourceReview | None = None
+    _strings: ClassVar[tuple[str, ...]] = ("limitations",)
+    _objects: ClassVar[dict[str, type[Contract]]] = {
+        "source": SourcePin, "permissions": Permissions, "compatibility": Compatibility,
+        "rights": RightsRef, "review": SourceReview,
+    }
+    _sequences: ClassVar[dict[str, type[Contract]]] = {
+        "supplemental_sources": SourcePin, "profiles": ProfileEvidence,
+    }
+
+    def __post_init__(self) -> None:
+        Contract.__post_init__(self)
+        SkillPin(self.entry_id, self.revision, "0" * 64)
+        if self.category not in _CATEGORIES:
+            raise CatalogError("invalid catalog category")
+        if self.mode not in {"reference_only", "isolated_skill"}:
+            raise CatalogError("invalid catalog mode")
+        _text(self.summary, "catalog summary")
+        for value, kind in ((self.source, SourcePin), (self.permissions, Permissions),
+                            (self.compatibility, Compatibility), (self.rights, RightsRef)):
+            if type(value) is not kind:
+                raise CatalogError("invalid catalog declaration")
+        if self.entrypoint != self.source.path:
+            raise CatalogError("entrypoint must be the pinned source file")
+        _tuple(self.supplemental_sources, SourcePin, "supplemental sources")
+        _tuple(self.profiles, ProfileEvidence, "profiles")
+        _tuple(self.limitations, str, "limitations")
+        _unique(self.supplemental_sources, "supplemental sources")
+        for limitation in self.limitations:
+            _text(limitation, "catalog limitation")
+        if self.review is not None and type(self.review) is not SourceReview:
+            raise CatalogError("invalid source review")
+
+    @property
+    def digest(self) -> str:
+        """Review binds all source, permission, compatibility and rights-reference metadata."""
+        return _digest_record(self, exclude=("review",))
+
+    @property
+    def pin(self) -> SkillPin:
+        return SkillPin(self.entry_id, self.revision, self.digest)
+
+    @property
+    def subject(self) -> SubjectRef:
+        kind = "workflow" if self.category in {"workflow", "recipe"} else "skill"
+        if self.category == "model_card":
+            kind = "model"
+        return SubjectRef(kind, self.entry_id, self.revision, self.digest)
+
+
+@dataclass(frozen=True, slots=True)
+class ReferenceReadiness:
+    """Reference-selection gate only; isolation, tools, GPU and release have later gates."""
+
+    pin: SkillPin
+    ready: bool
+    reasons: tuple[str, ...]
+    attributions: tuple[Attribution, ...] = ()
+
+    @property
+    def execution_authorized(self) -> bool:
+        return False
+
+
+class SkillCatalog:
+    """Immutable entry history; callers must supply exact pins, never resolve 'latest'."""
+
+    def __init__(self, entries: tuple[CatalogEntry, ...] = ()) -> None:
+        _tuple(entries, CatalogEntry, "catalog entries")
+        self._entries: dict[tuple[str, str], CatalogEntry] = {}
+        for entry in entries:
+            self.register(entry)
+
+    def register(self, entry: CatalogEntry) -> None:
+        if type(entry) is not CatalogEntry:
+            raise CatalogError("invalid catalog entry")
+        key = (entry.entry_id, entry.revision)
+        if key in self._entries:
+            raise CatalogError("duplicate immutable catalog revision")
+        self._entries[key] = entry
+
+    @property
+    def pins(self) -> tuple[SkillPin, ...]:
+        """Enumerate every explicit revision, with no automatic upgrade selection."""
+        return tuple(self._entries[key].pin for key in sorted(self._entries))
+
+    def lookup(self, pin: SkillPin) -> CatalogEntry:
+        if type(pin) is not SkillPin:
+            raise CatalogError("invalid skill pin")
+        entry = self._entries.get((pin.entry_id, pin.revision))
+        if entry is None:
+            raise CatalogError("missing catalog revision")
+        if entry.digest != pin.sha256:
+            raise CatalogError("catalog content differs from pinned declaration")
+        return entry
+
+    def reference_readiness(self, pin: SkillPin, *, shot: Shot, ledger: RightsLedger,
+                            device: GPUDevice | None = None,
+                            use: Use = Use("reference")) -> ReferenceReadiness:
+        if type(shot) is not Shot or type(ledger) is not RightsLedger or type(use) is not Use:
+            raise CatalogError("invalid reference context")
+        if device is not None and type(device) is not GPUDevice:
+            raise CatalogError("invalid device context")
+        entry = self.lookup(pin)
+        reasons = set(entry.compatibility.reasons(shot, device))
+        if entry.review is None:
+            reasons.add("unreviewed_source")
+        elif entry.review.declaration_sha256 != entry.digest:
+            reasons.add("stale_source_review")
+        if use.action != "reference":
+            reasons.add("reference_use_required")
+        if entry.mode == "reference_only" and entry.permissions != Permissions():
+            reasons.add("reference_permissions_must_be_empty")
+        rights = ledger.preflight_use(entry.subject, entry.rights, use)
+        reasons.update(rights.reasons)
+        ordered = tuple(sorted(reasons))
+        return ReferenceReadiness(pin, not ordered, ordered,
+                                  rights.attributions if not ordered else ())
+
+    def resolve_shot(self, binding: ShotSkills, *, shot: Shot, ledger: RightsLedger,
+                     device: GPUDevice | None = None,
+                     use: Use = Use("reference")) -> tuple[ReferenceReadiness, ...]:
+        if type(binding) is not ShotSkills:
+            raise CatalogError("invalid shot skill binding")
+        if bind_shot(shot, binding.skills) != binding:
+            raise CatalogError("shot differs from reviewed skill binding")
+        return tuple(self.reference_readiness(pin, shot=shot, ledger=ledger, device=device, use=use)
+                     for pin in binding.skills)
