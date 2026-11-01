@@ -160,7 +160,7 @@ class SSHTests(unittest.TestCase):
         self.assertLess(time.monotonic()-started, 3)
         with self.assertRaises(WorkerError):
             run_process([sys.executable, "-c", "print('x'*100000)"], timeout=2, max_output=100)
-        with patch.dict(os.environ, {"RUNPOD_API_KEY": "fixture-sensitive-value"}):
+        with patch.dict(os.environ, {"RUNPOD_API_KEY": "fixture-sensitive-value"}):  # pragma: allowlist secret - synthetic environment fixture
             output = run_process([sys.executable, "-c",
                 "import os;print(os.environ.get('RUNPOD_API_KEY','absent'))"], timeout=2)
             self.assertEqual(output, b"absent\n")

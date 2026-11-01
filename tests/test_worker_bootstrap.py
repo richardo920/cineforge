@@ -80,7 +80,7 @@ class BootstrapTests(unittest.TestCase):
             self.assertFalse(list(self.root.rglob("*.partial")))
 
     def test_unapproved_model_url_path_and_redirect_are_rejected_before_network(self):
-        for asset in [dict(self.asset, url="https://user:fixture@evil.invalid"),
+        for asset in [dict(self.asset, url="https://user:fixture@evil.invalid"),  # pragma: allowlist secret - synthetic URL fixture
                       dict(self.asset, path="split_files/vae/../../escape.safetensors"),
                       dict(self.asset, revision="main")]:
             with patch("cineforge.worker_bootstrap.urllib.request.build_opener") as opener:
@@ -89,7 +89,7 @@ class BootstrapTests(unittest.TestCase):
                 opener.assert_not_called()
         redirect = _DownloadRedirect()
         for url in ["http://huggingface.co/file", "https://evil.invalid/file",
-                    "https://user:fixture@huggingface.co/file"]:
+                    "https://user:fixture@huggingface.co/file"]:  # pragma: allowlist secret - synthetic redirect fixture
             with self.assertRaises(BootstrapError):
                 redirect.redirect_request(None, None, 302, "", {}, url)
 
