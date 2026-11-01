@@ -102,9 +102,11 @@ class SSHTests(unittest.TestCase):
         self.assertNotIn("RUNPOD_API_KEY", ssh_environment())
         self.assertNotIn("SSH_AUTH_SOCK", ssh_environment())
 
-    def test_multicast_v4_v6_and_mapped_addresses_reject_before_ssh(self):
+    def test_multicast_and_scoped_v4_v6_addresses_reject_before_ssh(self):
         addresses = ["224.0.0.1", "239.255.255.250", "ff02::1", "ff0e::1",
-                     "::ffff:224.0.0.1", "::ffff:239.255.255.250"]
+                     "::ffff:224.0.0.1", "::ffff:239.255.255.250",
+                     "2606:4700:4700::1111%en0", "2606:4700:4700::1111%x;id",
+                     "::ffff:8.8.8.8%en0"]
         for address in addresses:
             with self.subTest(address=address), patch("cineforge.ssh_worker.run_process") as run:
                 self.transport.pod["ssh"]["direct"]["host"] = address
