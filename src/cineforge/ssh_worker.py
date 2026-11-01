@@ -77,13 +77,17 @@ def ssh_environment() -> dict[str, str]:
 
 
 def run_process(command: list[str], *, timeout: float, payload: bytes = b"",
-                check: Callable[[], None] = lambda: None, max_output: int = 65536) -> bytes:
+                check: Callable[[], None] = lambda: None, max_output: int = 65536,
+                decode_setup_failure: bool = False) -> bytes:
     """No shell; bounded request/response, killed process group on timeout/interruption."""
     failed = False
     answer = None
     try:
         answer = worker_bootstrap.bounded_process(command, timeout=timeout, payload=payload,
-            max_output=max_output, check=check, environment=ssh_environment())
+            max_output=max_output, check=check, environment=ssh_environment(),
+            decode_setup_failure=decode_setup_failure)
+    except worker_bootstrap.SetupFailure:
+        raise
     except (Exception, KeyboardInterrupt):
         failed = True
     if failed or answer is None:
@@ -126,6 +130,7 @@ class SSHWorker:
         from cineforge.conditioning import ConditioningSelection
         self._profile = selection.worker_profile if type(selection) is ConditioningSelection else None
         self.runtime_evidence: dict[str, Any] | None = None
+        self.setup_failure: dict[str, Any] | None = None
         self._reference_staged = False
 
     def __enter__(self) -> SSHWorker:
@@ -187,9 +192,19 @@ class SSHWorker:
         if self._profile is not None:
             request["profile"] = self._profile
         command = self._command() + [self._host, "python3 -c " + shlex.quote(self._source.decode())]
-        raw = run_process(command, timeout=timeout, payload=canonical(request),
-                          check=self.check if supervise else lambda: None)
-        return strict_object(raw)
+        diagnostic_setup = self._profile is not None and request.get("operation") == "setup"
+        try:
+            raw = run_process(command, timeout=timeout, payload=canonical(request),
+                check=self.check if supervise else lambda: None,
+                **({"decode_setup_failure": True} if diagnostic_setup else {}))
+        except worker_bootstrap.SetupFailure as error:
+            if diagnostic_setup and self.setup_failure is None:
+                self.setup_failure = worker_bootstrap.checked_setup_failure(error.diagnostic)
+            raise WorkerError("worker setup failed") from None
+        reply = strict_object(raw)
+        if diagnostic_setup and set(reply) != {"verification", "runtime"}:
+            raise WorkerError("worker setup response rejected")
+        return reply
 
     def probe(self, snapshot: LeaseSnapshot, timeout: float) -> WorkerObservation | None:
         if self.plan is not None:

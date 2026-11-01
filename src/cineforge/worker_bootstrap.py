@@ -21,6 +21,7 @@ import struct
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 import zlib
 from pathlib import Path
@@ -49,6 +50,70 @@ M4_FILES = {
 class BootstrapError(ValueError):
     """Static worker diagnostic, without subprocess, URL or environment content."""
 
+    def __init__(self, message: str, *, reason: str = "unknown") -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
+SETUP_REASONS = {
+    "admission": {"setup_rejected", "unknown", "timeout"},
+    "source": {"setup_rejected", "process_failed", "timeout", "unknown"},
+    "environment": {"process_failed", "timeout", "unknown"},
+    "dependencies": {"process_failed", "timeout", "unknown"},
+    "runtime": {"setup_rejected", "process_failed", "timeout", "unknown"},
+    "metadata": {"setup_rejected", "process_failed", "unknown", "timeout"},
+    "weights": {"http_error", "network_error", "timeout", "integrity_failed",
+                "setup_rejected", "unknown"},
+    "verification": {"setup_rejected", "unknown", "timeout"},
+    "server_start": {"server_exited", "unknown", "timeout"},
+    "server_health": {"server_exited", "unknown", "timeout"},
+}
+SETUP_ASSETS = {"diffusion_model", "text_encoder", "vae"}
+
+
+def checked_setup_failure(value: Any) -> dict[str, Any] | None:
+    """Closed descriptive data only; never retains remote strings or arbitrary fields."""
+    if not isinstance(value, dict):
+        return None
+    base = {"schema", "stage", "asset", "reason"}
+    if (set(value) != base | ({"http_status"} if value.get("reason") == "http_error" else set())
+            or value.get("schema") != "m4-setup-failure-v1"
+            or type(value.get("stage")) is not str or value["stage"] not in SETUP_REASONS
+            or type(value.get("reason")) is not str
+            or value["reason"] not in SETUP_REASONS[value["stage"]]
+            or type(value.get("asset")) is not str
+            or (value["asset"] not in SETUP_ASSETS if value["stage"] == "weights"
+                else value["asset"] != "none")
+            or value["reason"] == "http_error" and (
+                type(value.get("http_status")) is not int or not 400 <= value["http_status"] <= 599)):
+        return None
+    return dict(value)
+
+
+class SetupFailure(BootstrapError):
+    """An allowlisted M4 setup description, never the underlying exception text."""
+
+    def __init__(self, diagnostic: dict[str, Any]) -> None:
+        checked = checked_setup_failure(diagnostic)
+        if checked is None:
+            raise BootstrapError("invalid setup diagnostic")
+        super().__init__("M4 worker setup failed")
+        self.diagnostic = checked
+
+
+def setup_failure_envelope(raw: bytes) -> dict[str, Any] | None:
+    """Accept exactly one small canonical failure frame, including its final newline."""
+    if not isinstance(raw, bytes) or not 0 < len(raw) <= 512:
+        return None
+    try:
+        value = _json(raw)
+        if (set(value) != {"status", "setup_failure"}
+                or value["status"] != "worker_operation_failed"
+                or encode(value) + b"\n" != raw):
+            return None
+        return checked_setup_failure(value["setup_failure"])
+    except (ValueError, TypeError, RecursionError):
+        return None
 
 
 def validate_reference_png(payload: bytes) -> None:
@@ -107,10 +172,12 @@ def clean_environment() -> dict[str, str]:
 
 def bounded_process(command: list[str], *, timeout: float, cwd: Path | None = None,
                     payload: bytes | None = None, max_output: int = 65536,
-                    check: Any = None, environment: dict[str, str] | None = None) -> bytes:
+                    check: Any = None, environment: dict[str, str] | None = None,
+                    decode_setup_failure: bool = False) -> bytes:
     """Bound wall time and buffered bytes; kill this process group on every failure."""
     if (type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0
             or type(max_output) is not int or not 1 <= max_output <= 1024*1024
+            or type(decode_setup_failure) is not bool
             or payload is not None and (not isinstance(payload, bytes) or len(payload) > 256*1024)):
         raise BootstrapError("invalid worker process bounds")
     process: subprocess.Popen[bytes] | None = None
@@ -136,7 +203,7 @@ def bounded_process(command: list[str], *, timeout: float, cwd: Path | None = No
             process.stdin.close()
         while selector.get_map() or process.poll() is None:
             if time.monotonic() >= deadline:
-                raise BootstrapError("worker process bounds exceeded")
+                raise BootstrapError("worker process bounds exceeded", reason="timeout")
             if check is not None:
                 check()
             for key, event in selector.select(min(.05, max(0, deadline-time.monotonic()))):
@@ -162,7 +229,11 @@ def bounded_process(command: list[str], *, timeout: float, cwd: Path | None = No
                         selector.unregister(key.fileobj)
                         process.stdin.close()
         if process.returncode != 0:
-            raise BootstrapError("worker process did not complete")
+            if decode_setup_failure and process.returncode == 2:
+                diagnostic = setup_failure_envelope(bytes(output))
+                if diagnostic is not None:
+                    raise SetupFailure(diagnostic)
+            raise BootstrapError("worker process did not complete", reason="process_failed")
         if check is not None:
             check()
         return bytes(output)
@@ -526,7 +597,7 @@ class _DownloadRedirect(urllib.request.HTTPRedirectHandler):
         if (url.scheme != "https" or url.username or url.password
                 or not (host == "huggingface.co" or host.endswith(".huggingface.co")
                         or host.endswith(".hf.co") or host.endswith(".xethub.hf.co"))):
-            raise BootstrapError("unapproved model redirect")
+            raise BootstrapError("unapproved model redirect", reason="setup_rejected")
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
@@ -544,7 +615,7 @@ def download(root: Path, asset: dict[str, Any], deadline: float, *,
             or not 0 < asset["size_bytes"] <= (10_000_000_000 if profile is not None else 8 * 1024 ** 3)
             or profile is not None and M4_FILES.get(path) != (asset["size_bytes"], asset["sha256"])
             or re.fullmatch(r"[0-9a-f]{64}", asset["sha256"]) is None):
-        raise BootstrapError("unapproved worker model asset")
+        raise BootstrapError("unapproved worker model asset", reason="setup_rejected")
     _, folder, filename = path.split("/")
     target = root / "ComfyUI/models" / folder / filename
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -556,19 +627,19 @@ def download(root: Path, asset: dict[str, Any], deadline: float, *,
                 as reply, partial.open("xb") as stream:
             while True:
                 if time.monotonic() >= deadline:
-                    raise BootstrapError("model download deadline exceeded")
+                    raise BootstrapError("model download deadline exceeded", reason="timeout")
                 block = reply.read1(1024 * 1024)
                 if not block:
                     break
                 size += len(block)
                 if size > asset["size_bytes"]:
-                    raise BootstrapError("model download size exceeded")
+                    raise BootstrapError("model download size exceeded", reason="integrity_failed")
                 digest.update(block)
                 stream.write(block)
             stream.flush()
             os.fsync(stream.fileno())
         if size != asset["size_bytes"] or digest.hexdigest() != asset["sha256"]:
-            raise BootstrapError("model download differs from approved bytes")
+            raise BootstrapError("model download differs from approved bytes", reason="integrity_failed")
         partial.replace(target)
     finally:
         partial.unlink(missing_ok=True)
@@ -576,6 +647,35 @@ def download(root: Path, asset: dict[str, Any], deadline: float, *,
 
 
 def setup(request: dict[str, Any], deadline: float) -> dict[str, Any]:
+    profile = checked_profile(request.get("profile"))
+    progress = {"stage": "admission", "asset": "none"} if profile is not None else None
+    try:
+        return _setup(request, deadline, progress)
+    except (Exception, KeyboardInterrupt) as error:
+        if progress is None:
+            raise
+        reason = "unknown"
+        status: dict[str, Any] = {}
+        if isinstance(error, urllib.error.HTTPError) and type(error.code) is int and 400 <= error.code <= 599:
+            reason, status = "http_error", {"http_status": error.code}
+        elif isinstance(error, TimeoutError):
+            reason = "timeout"
+        elif isinstance(error, urllib.error.URLError):
+            reason = "timeout" if isinstance(error.reason, TimeoutError) else "network_error"
+        elif isinstance(error, BootstrapError):
+            reason = error.reason
+        if reason not in SETUP_REASONS[progress["stage"]]:
+            reason, status = "unknown", {}
+        raise SetupFailure({"schema": "m4-setup-failure-v1", **progress,
+                            "reason": reason, **status}) from None
+
+
+def _setup(request: dict[str, Any], deadline: float,
+           progress: dict[str, str] | None) -> dict[str, Any]:
+    def stage(name: str, asset: str = "none") -> None:
+        if progress is not None:
+            progress.update(stage=name, asset=asset)
+
     plan, selection = request["plan"], request["selection"]
     profile = checked_profile(request.get("profile"))
     revision = M4_REVISION if profile is not None else MODEL_REVISION
@@ -585,37 +685,43 @@ def setup(request: dict[str, Any], deadline: float) -> dict[str, Any]:
             or selection["model"]["revision"] != revision
             or request["image_digest"] != request["image_digest"].strip()
             or re.fullmatch(r"sha256:[0-9a-f]{64}", request["image_digest"]) is None):
-        raise BootstrapError("worker setup differs from reviewed source")
+        raise BootstrapError("worker setup differs from reviewed source", reason="setup_rejected")
+    stage("runtime")
     limit = min(30, max(.01, deadline-time.monotonic()))
     runtime = (runtime_probe(limit, profile=profile, resource_root=root) if profile is not None
                else runtime_probe(limit))
     if runtime["gpu_memory_mib"] < selection["model"]["minimum_memory_mib"]:
-        raise BootstrapError("worker memory below model requirement")
+        raise BootstrapError("worker memory below model requirement", reason="setup_rejected")
     comfy, venv = root / "ComfyUI", root / "venv"
 
     def run(command: list[str], limit: float = 180, cwd: Path | None = None) -> bytes:
         return bounded_process(command, timeout=min(limit, max(.01, deadline-time.monotonic())),
                                cwd=cwd)
+    stage("source")
     run(["git", "init", str(comfy)])
     run(["git", "-C", str(comfy), "remote", "add", "origin",
          "https://github.com/Comfy-Org/ComfyUI.git"])
     run(["git", "-C", str(comfy), "fetch", "--depth", "1", "origin", REVISION])
     run(["git", "-C", str(comfy), "checkout", "--detach", "FETCH_HEAD"])
     if run(["git", "-C", str(comfy), "rev-parse", "HEAD"]).decode().strip() != REVISION:
-        raise BootstrapError("worker source revision differs")
+        raise BootstrapError("worker source revision differs", reason="setup_rejected")
+    stage("environment")
     run([sys.executable, "-m", "venv", "--system-site-packages", str(venv)], 60)
     python = str(venv / "bin/python")
     constraints = root / "constraints.txt"
     private_write(root, constraints.name, ("torch==" + runtime["torch_version"]
         + "\ntorchvision==" + runtime["torchvision_version"] + "\n").encode())
+    stage("dependencies")
     run([python, "-m", "pip", "--isolated", "install", "--index-url", "https://pypi.org/simple",
          "--disable-pip-version-check", "--no-input", "--progress-bar", "off", "--quiet",
          "--constraint", str(constraints), "-r", str(comfy / "requirements.txt")], 500)
+    stage("runtime")
     limit = min(30, max(.01, deadline-time.monotonic()))
     installed = (runtime_probe(limit, python, profile=profile, resource_root=root) if profile is not None
                  else runtime_probe(limit, python))
     if any(installed[name] != runtime[name] for name in ("torch_version", "cuda_version")):
-        raise BootstrapError("worker GPU stack changed")
+        raise BootstrapError("worker GPU stack changed", reason="setup_rejected")
+    stage("metadata")
     freeze = run([python, "-m", "pip", "--isolated", "freeze", "--all"], 30)
     private_write(root, "environment.json", encode({"source_revision": REVISION,
         "requirements_sha256": hashlib.sha256((comfy / "requirements.txt").read_bytes()).hexdigest(),
@@ -626,9 +732,14 @@ def setup(request: dict[str, Any], deadline: float) -> dict[str, Any]:
         if (shutil.disk_usage(root).free < 30*1024**3
                 or len(selection["model"]["files"]) != 3
                 or {a["path"] for a in selection["model"]["files"]} != set(M4_FILES)):
-            raise BootstrapError("M4 disk or weight manifest incompatible")
-    files = [download(root, asset, deadline, profile=profile) if profile is not None
-             else download(root, asset, deadline) for asset in selection["model"]["files"]]
+            raise BootstrapError("M4 disk or weight manifest incompatible", reason="setup_rejected")
+    files = []
+    roles = {"diffusion_models": "diffusion_model", "text_encoders": "text_encoder", "vae": "vae"}
+    for asset in selection["model"]["files"]:
+        stage("weights", roles.get(asset["path"].split("/")[1], "none"))
+        files.append(download(root, asset, deadline, profile=profile) if profile is not None
+                     else download(root, asset, deadline))
+    stage("verification")
     verification = {"schema_version": 1, "operator_verified": True, "worker_id": plan["pod_id"],
         "server_revision": REVISION, "image_digest": request["image_digest"],
         **{name: runtime[name] for name in ("python_version", "torch_version", "cuda_version")},
@@ -636,15 +747,17 @@ def setup(request: dict[str, Any], deadline: float) -> dict[str, Any]:
                 "memory_mib": runtime["gpu_memory_mib"]},
         "model_files": files, "custom_nodes_disabled": True}
     private_write(root, "worker-verification.json", encode(verification))
+    stage("server_start")
     process = subprocess.Popen([python, "main.py", "--listen", "127.0.0.1", "--port", "8188",
         "--disable-all-custom-nodes", "--disable-api-nodes", "--disable-auto-launch"], cwd=comfy,
         env=clean_environment(), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL, start_new_session=True)
     private_write(root, "server-pid.json", encode({"pid": process.pid}))
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    stage("server_health")
     while time.monotonic() < deadline:
         if process.poll() is not None:
-            raise BootstrapError("worker server exited")
+            raise BootstrapError("worker server exited", reason="server_exited")
         try:
             with opener.open("http://127.0.0.1:8188/system_stats", timeout=2) as reply:
                 if reply.status == 200:
@@ -653,7 +766,7 @@ def setup(request: dict[str, Any], deadline: float) -> dict[str, Any]:
         except OSError:
             pass
         time.sleep(1)
-    raise BootstrapError("worker server startup deadline exceeded")
+    raise BootstrapError("worker server startup deadline exceeded", reason="timeout")
 
 
 
@@ -714,6 +827,7 @@ def main() -> int:
     os.umask(0o077)
     failed = False
     answer = None
+    diagnostic = None
     try:
         request = _json(sys.stdin.buffer.read(256 * 1024 + 1))
         if len(encode(request)) > 256 * 1024:
@@ -724,16 +838,21 @@ def main() -> int:
             raise BootstrapError("invalid worker deadline")
 
         def expire(_signum: int, _frame: Any) -> None:
-            raise BootstrapError("worker absolute operation deadline exceeded")
+            raise BootstrapError("worker absolute operation deadline exceeded", reason="timeout")
         signal.signal(signal.SIGALRM, expire)
         signal.setitimer(signal.ITIMER_REAL, timeout)
         answer = dispatch(request)
-    except (Exception, KeyboardInterrupt):
+    except (Exception, KeyboardInterrupt) as error:
         failed = True
+        if type(error) is SetupFailure:
+            diagnostic = checked_setup_failure(error.diagnostic)
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
     if failed or answer is None:
-        print('{"status":"worker_operation_failed"}')
+        if diagnostic is None:
+            print('{"status":"worker_operation_failed"}')
+        else:
+            print(encode({"status": "worker_operation_failed", "setup_failure": diagnostic}).decode())
         return 2
     print(encode(answer).decode())
     return 0

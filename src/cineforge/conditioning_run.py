@@ -24,6 +24,7 @@ from cineforge.contracts import RunManifest
 from cineforge.private_store import PrivateRunDirectory, read_private_input
 from cineforge.runpod import AcquisitionIntent, LeaseSnapshot, RunpodPodProvisioner, RunpodPodSpec
 from cineforge.runpod_transport import CloudTransport
+from cineforge.worker_bootstrap import checked_setup_failure
 from cineforge.workflows import canonical, strict_object
 
 
@@ -141,6 +142,7 @@ def run_conditioned(selection: ConditioningSelection, spec: RunpodPodSpec,
             with CloudBudgetSession(budget_dir, approval, transport,
                                     guard_deployment_configured=True) as budget:
                 provider = None
+                worker = None
                 manifests: list[tuple[RunManifest, Path]] = []
                 try:
                     if budget.intents:
@@ -152,12 +154,14 @@ def run_conditioned(selection: ConditioningSelection, spec: RunpodPodSpec,
                         device = provider.acquire(selection.model, max_cost_usd=.64)
                         key = provider.snapshots[-1].key
                         report.update(outcome="acquired", worker_id=device.device_id)
+                        report["stage"] = "worker_setup"
                         store.checkpoint(canonical(report))
                         verification = worker.prepare()
                         if verification.record["worker_id"] != device.device_id:
                             raise ConditioningError("prepared worker differs from the owned acquisition")
                         selection.gate.preflight()
                         worker.check()
+                        report["stage"] = "reference_staging"
                         report["staged_reference"] = worker.stage_reference()
                         if report["staged_reference"] != selection.gate.reference.worker_metadata:
                             raise ConditioningError("worker staged different reference bytes")
@@ -167,6 +171,7 @@ def run_conditioned(selection: ConditioningSelection, spec: RunpodPodSpec,
                                                           worker.runtime_evidence)
                         # Reserve cleanup/retrieval time; do not begin another shot after cutoff.
                         previous_seconds = 300.0
+                        report["stage"] = "generation"
                         for shot in selection.gate.requests:
                             worker.check()
                             trace = selection.gate.trace(shot)  # Fresh ledger/catalog/bytes per shot.
@@ -191,6 +196,15 @@ def run_conditioned(selection: ConditioningSelection, spec: RunpodPodSpec,
                 except (Exception, KeyboardInterrupt):
                     failed = True
                     report["outcome"] = "incomplete"
+                    diagnostic = checked_setup_failure(getattr(worker, "setup_failure", None))
+                    if diagnostic is not None and "setup_failure" not in report:
+                        report["setup_failure"] = diagnostic
+                    # Persist the primary failure before cleanup. A checkpoint error
+                    # must still enter finally and attempt deletion of the owned Pod.
+                    try:
+                        store.checkpoint(canonical(report))
+                    except (Exception, KeyboardInterrupt):
+                        pass
                 finally:
                     if provider is not None:
                         for snapshot in provider.snapshots:
