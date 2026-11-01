@@ -38,4 +38,4 @@ Pod and Serverless will be selectable execution adapters sharing domain/model/wo
 
 ## M3 provider review
 
-[The dated Runpod Pod proposal](../../config/cloud/runpod-pod-proposal.json) compares Lambda and Modal, records terms/data-handling limits, and proposes a separate USD3 aggregate M3 validation cap. Owner approval is pending; this research record permits no provisioning, persistent storage, registry publication, new GPU SKU or credential extraction.
+[The owner-approved Runpod Pod scope](../../config/cloud/runpod-pod-proposal.json) compares Lambda and Modal and records a separate USD3 aggregate M3 validation cap with its [approval receipt](https://github.com/richardo920/cineforge/issues/48#issuecomment-6554788309). Live readiness remains false until M3.2/M3.3 safety gates, external credentials, explicit opt-in and fresh worker preflight pass; persistent storage, image publication and other GPU SKUs remain outside this scope.

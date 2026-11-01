@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
   "task_id": "M3.1",
-  "state": "awaiting_owner_approval",
-  "purpose": "Research and a bounded M3 validation proposal; not executable provisioning authorization.",
+  "state": "owner_scope_approved",
+  "purpose": "Owner-approved bounded M3 validation scope and provider research; execution still requires separate safety gates, credentials and live opt-in.",
   "recommendation": {
     "provider": "runpod",
     "product": "pod",
@@ -14,15 +14,56 @@
     "provider_preference": "Existing owner choice: Runpod GPU, then Pod. Starting M3 does not reset the M2 USD3 cap.",
     "existing_model_workflow_receipt": "https://github.com/richardo920/cineforge/issues/40#issuecomment-6553169092",
     "m3_live_spend": {
-      "status": "pending",
-      "proposed_aggregate_limit_usd": 3,
-      "receipt": null
+      "status": "approved",
+      "aggregate_limit_usd": 3,
+      "approved_by": "Repository owner; decision recorded by coordinator /root session769aecd6",
+      "owner_reply": "i approve",
+      "receipt": "https://github.com/richardo920/cineforge/issues/48#issuecomment-6554788309",
+      "recorded_at": "2026-11-01T07:08:56.618255+00:00",
+      "proposal_revision": "f88b29c804e139e91e7f2bb59892708e1906ee70",
+      "proposal_revision_note": "# pragma: allowlist secret - public provenance hash",
+      "approved_subject": {
+        "provider": "runpod",
+        "product": "pod",
+        "cloud": "SECURE",
+        "gpu_id": "NVIDIA GeForce RTX 4090",
+        "gpu_count": 1,
+        "region": "US-IL-1",
+        "region_fallback": false,
+        "aggregate_limit_usd": 3,
+        "max_concurrent_pods": 1,
+        "max_create_attempts": 2,
+        "worker_lifetime_limit_seconds": 1800,
+        "compute_price_ceiling_usd_per_hour": 1,
+        "container_disk_gb": 80,
+        "persistent_volume_gb": 0,
+        "network_volume_ids": [],
+        "image": "runpod/pytorch@sha256:0a360022e8de4375af99430f84e8b38951acc397252163a37ceac7204d01be35",
+        "min_host_cuda": "12.8",
+        "ports": [
+          "22/tcp"
+        ],
+        "startup_and_downloads_count_toward_lifetime": true,
+        "model_workflow_subject_sha256": "1aaa7e024932fe008bf0c13304ce80be66991d03a2b7d94aa4bd0f37987b15d0",
+        "synthetic_data_only": true,
+        "cleanup_scope": "Terminate only M3 validation-created Pods after private output retrieval; preserve stopped M2 Pod and unrelated resources."
+      },
+      "approved_subject_sha256": "b7a88670e60335c8a63930c49bf69b7c46c6b73a6d4b5135b126906fe837c0cb",
+      "approved_subject_sha256_note": "# pragma: allowlist secret - public provenance hash",
+      "canonicalization": "UTF-8 JSON; sorted keys; separators comma/colon; ensure_ascii=false; allow_nan=false; no trailing newline",
+      "authentication_boundary": "The digest binds the recorded scope, not owner identity. Coordinator independently verifies the linked receipt; this file alone is not a credential or executable permission."
     },
-    "live_ready": false
+    "live_ready": false,
+    "remaining_execution_gates": [
+      "M3.2/M3.3 exact-head safety gates pass.",
+      "Explicit live opt-in and external credentials.",
+      "Fresh capacity/rate/runtime preflight.",
+      "Owned-resource independent deadline guard and recovery configured."
+    ]
   },
   "proposed_validation": {
     "model_workflow_selection": "../comfy/wan21-t2v-1.3b.json",
-    "selection_scope": "Unchanged Wan2.1 T2V1.3B, pinned core-node graph and three verified model files; new M3 worker downloads remain within the proposed M3 opt-in scope.",
+    "selection_scope": "Unchanged Wan2.1 T2V1.3B, pinned core-node graph and three verified model files; M3 worker downloads are included in the separately approved USD3 aggregate M3 scope.",
     "gpu_id": "NVIDIA GeForce RTX 4090",
     "gpu_count": 1,
     "nominal_vram_gib": 24,
@@ -200,6 +241,6 @@
       "url": "https://modal.com/legal/terms"
     }
   ],
-  "completion": "M3.1 remains incomplete until owner provider/spend approval, independent current-head review/testing, required CI and coordinator-verified merge. No resources provisioned by this research.",
+  "completion": "Owner provider/spend approval is recorded; M3.1 completion still requires independent current-head review/testing, required CI and coordinator-verified merge. No resources provisioned by this research.",
   "checked_on": "2026-11-01"
 }
