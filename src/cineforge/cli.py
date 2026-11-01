@@ -1,6 +1,7 @@
 """Offline defaults and an explicitly opted-in private ComfyUI entry point."""
 
 import argparse
+from typing import Any, NoReturn
 
 from cineforge import __version__
 from cineforge.comfy_policy import WorkerVerification, load_comfy_selection
@@ -11,8 +12,23 @@ from cineforge.private_store import read_private_input
 from cineforge.workflows import strict_object
 
 
+class _ArgumentParser(argparse.ArgumentParser):
+    """Never include arbitrary supplied tokens in parser diagnostics."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        kwargs["exit_on_error"] = False
+        super().__init__(*args, **kwargs)
+
+    def error(self, message: str) -> NoReturn:
+        super().error("invalid command arguments; use --help for syntax")
+
+    def application_error(self, message: str) -> NoReturn:
+        """Preserve existing offline domain errors; live callers pass fixed safe text."""
+        super().error(message)
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Cineforge production metadata and execution")
+    parser = _ArgumentParser(prog="cineforge", description="Cineforge production metadata and execution")
     parser.add_argument("--version", action="version", version=f"cineforge {__version__}")
     commands = parser.add_subparsers(dest="command")
     validate = commands.add_parser("validate-plan", help="validate a synthetic JSON plan")
@@ -34,7 +50,16 @@ def main() -> None:
     comfy.add_argument("--poll-interval-seconds", type=float, default=1)
     comfy.add_argument("--max-polls", type=int, default=600)
     comfy.add_argument("--max-result-bytes", type=int, default=32 * 1024 * 1024)
-    args = parser.parse_args()
+    parse_failed = False
+    args = None
+    try:
+        args = parser.parse_args()
+    except argparse.ArgumentError:
+        parse_failed = True
+    # Conversion errors may retain the supplied value. Exit only after leaving
+    # their handler, so those exceptions never become a displayed error context.
+    if parse_failed or args is None:
+        parser.error("invalid arguments")
     if args.command is None:
         parser.print_help()
         return
@@ -56,7 +81,8 @@ def main() -> None:
         except (Exception, KeyboardInterrupt):
             failed = True
         if failed:
-            parser.error("ComfyUI command rejected or incomplete; inspect private run.json if present")
+            parser.application_error(
+                "ComfyUI command rejected or incomplete; inspect private run.json if present")
         print(output)
         return
     try:
@@ -65,7 +91,7 @@ def main() -> None:
                   execute_mock(plan, run_id=args.run_id, output_dir=args.output_dir,
                                resume=args.resume).manifest.to_json())
     except (OSError, ValueError, RecursionError) as exc:
-        parser.error(str(exc))
+        parser.application_error(str(exc))
     print(output)
 
 

@@ -542,6 +542,31 @@ class PrivateStoreTests(unittest.TestCase):
 
 
 class ComfyCLITests(unittest.TestCase):
+    def test_all_parse_error_paths_omit_arbitrary_argument_values(self):
+        credential = "https://synthetic-user:synthetic-private-token@example.invalid"  # pragma: allowlist secret - synthetic rejection fixture
+        base = ["comfy-run", "missing-plan", "--selection", "missing-selection",
+                "--worker-verification", "missing-worker", "--output-dir", "missing-output"]
+        cases = [base + [flag, credential] for flag in (
+            "--timeout-seconds", "--request-timeout-seconds", "--poll-interval-seconds",
+            "--max-polls", "--max-result-bytes")]
+        cases += [base + ["--unrecognized=" + credential], base + [credential],
+                  ["comfy-run", credential, "--selection"],
+                  ["comfy-run", credential, "--worker-verification", "missing-worker",
+                   "--output-dir", "missing-output"],
+                  [credential], ["--unknown-root", credential] + base,
+                  base + ["--unexpected", "arbitrary-sensitive-value"]]
+        for arguments in cases:
+            with self.subTest(arguments=arguments):
+                result = subprocess.run([sys.executable, "-m", "cineforge"] + arguments,
+                                        capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 2)
+                self.assertEqual(result.stdout, "")
+                for raw in (credential, "synthetic-private-token", "synthetic-user",
+                            "arbitrary-sensitive-value"):
+                    self.assertNotIn(raw, result.stderr)
+                self.assertIn("invalid command arguments", result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+
     def test_cli_default_is_offline_nonzero_and_does_not_leak_credentials(self):
         with tempfile.TemporaryDirectory(prefix="cineforge-m23-cli-") as tmp:
             root = Path(tmp).resolve()
