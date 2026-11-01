@@ -22,11 +22,13 @@ M0 completion marks take effect only after [PR #15](https://github.com/richardo9
 
 Depends on M0. Exit: a synthetic shot plan completes through a mock provider with reproducible metadata and no media generation.
 
-- [ ] M1.1 Define versioned project, scene, shot, artifact, and run-manifest schemas. Acceptance: round-trip fixture, missing IDs, incompatible schema versions, invalid numeric values, and unknown references are tested.
-- [ ] M1.2 Define GPU/model compatibility and deterministic device selection. Acceptance: CUDA/ROCm/Metal/CPU fixtures; incompatible backend, insufficient memory, and no-device cases fail explicitly.
-- [ ] M1.3 Define execution-provider and separate provisioner protocols; implement a fake execution provider. Acceptance: submit/status/cancel/result transitions and duplicate idempotency keys are tested without external calls.
-- [ ] M1.4 Add CLI plan validation and mock-run commands with synthetic examples. Acceptance: valid plan produces metadata-only output and provenance; invalid plans return nonzero without partial success claims.
-- [ ] M1.5 Implement local artifact manifests and resumable job records. Acceptance: checksums, atomic writes, interrupted runs, failed jobs, and retry-without-regenerating-completed-shots are tested.
+M1 completion marks take effect only after M1.5 passes current-head CI and independent review/testing, the coordinator verifies its merge, and a synthetic plan → mock → stored manifest → fresh-process resume demonstration passes. M1 remains metadata-only; live execution is M2+.
+
+- [x] M1.1 Define versioned project, scene, shot, artifact, and run-manifest schemas. Acceptance: round-trip fixture, missing IDs, incompatible schema versions, invalid numeric values, and unknown references are tested.
+- [x] M1.2 Define GPU/model compatibility and deterministic device selection. Acceptance: CUDA/ROCm/Metal/CPU fixtures; incompatible backend, insufficient memory, and no-device cases fail explicitly.
+- [x] M1.3 Define execution-provider and separate provisioner protocols; implement a fake execution provider. Acceptance: submit/status/cancel/result transitions and duplicate idempotency keys are tested without external calls.
+- [x] M1.4 Add CLI plan validation and mock-run commands with synthetic examples. Acceptance: valid plan produces metadata-only output and provenance; invalid plans return nonzero without partial success claims.
+- [x] M1.5 Implement local artifact manifests and resumable job records. Acceptance: checksums, atomic writes, interrupted runs, failed jobs, and retry-without-regenerating-completed-shots are tested.
 
 ## M2 — First real shot through local ComfyUI
 

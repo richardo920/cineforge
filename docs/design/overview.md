@@ -4,7 +4,7 @@
 
 A modular AI filmmaking platform: brief → screenplay → storyboard → shots → picture edit → sound → review → delivery. Keep creative intent and production metadata portable across models, GPU providers, and editing tools; require human approval of final picture, voice likeness, music, and mix.
 
-The private Python package implements strict immutable production contracts, declared model/device selection, and a deterministic metadata-only mock CLI with a synthetic JSON example. Live generation, ComfyUI transport, provisioning, audio analysis, mixing, and a web UI are future adapters, not implemented capabilities.
+The private Python package implements strict immutable production contracts, declared model/device selection, and a deterministic metadata-only mock CLI with local checkpoints/resume and a synthetic JSON example. Live generation, ComfyUI transport, provisioning, audio analysis, mixing, and a web UI are future adapters, not implemented capabilities.
 
 ## File structure
 
@@ -31,7 +31,7 @@ cineforge/
 └── tests/                     # Offline unit and CLI tests
 ```
 
-Current modules: `contracts.py`, `devices.py`, `providers.py`, and `mock.py`; character, audio, and skills registries remain planned. `examples/synthetic-plan.json` declares synthetic models and devices explicitly; neither hardware discovery nor model downloads occur.
+Current modules: `contracts.py`, `devices.py`, `providers.py`, `mock.py`, and `storage.py`; character, audio, and skills registries remain planned. `examples/synthetic-plan.json` declares synthetic models and devices explicitly; neither hardware discovery nor model downloads occur.
 
 ## Architecture and data flow
 
@@ -49,7 +49,9 @@ Initial backend vocabulary: CUDA, ROCm, Metal, CPU. Future provisioners cover lo
 
 Production adapters need timeouts, bounded retries, idempotency keys, cancellation, per-job budgets, and guaranteed cleanup in failure paths. The fake provider implements submit/status/cancel/result with metadata-only JSON payloads and synthetic logical timestamps. `mock-run` preflights every request and device before submission, bounds polling, and emits a canonical manifest; it neither provisions GPUs nor generates media.
 
-`MockPlan.from_json` / `load_mock_plan` parse the strict `{schema_version, plan, models, devices}` wrapper; `to_json` covers all declarations. `MockPlan.preflight()` resolves every `ExecutionRequest`; `mock_run_id` and `mock_idempotency_key` supply stable identities. `execute_mock` returns a `MockRun` containing the manifest and ephemeral `ExecutionResult` payloads; persistence/resume remain separate work.
+`MockPlan.from_json` / `load_mock_plan` parse the strict `{schema_version, plan, models, devices}` wrapper; `to_json` covers all declarations. `MockPlan.preflight()` resolves every `ExecutionRequest`; `mock_run_id` and `mock_idempotency_key` supply stable identities. `execute_mock` returns a `MockRun` containing the manifest and `ExecutionResult` payloads. Optional `output_dir` / `resume` use `LocalRunStore`: a version-one checkpoint binds full execution declarations to a validated manifest/attempt history, and immutable metadata payloads carry verified checksums/sizes. Completed shots are verified before any resumed submission; failed jobs retry with new attempts and interrupted fake jobs replay deterministically.
+
+Storage holds a nonblocking POSIX `flock` for the run and uses same-directory temporary writes, `fsync`, and atomic replacement; payload persistence precedes success checkpointing. Symlinks/hardlinks, unsafe artifact paths, changed inputs, and corrupt/missing completed bytes fail closed. This is single-host local-filesystem mock recovery; live execution recovery, hostile writers, and distributed locking remain outside M1.
 
 ## Character registry
 
