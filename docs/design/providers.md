@@ -18,7 +18,7 @@ All fixtures are synthetic. Revision/license/commercial-use fields are declarati
 
 `FakeExecutionProvider` submits queued jobs; each status poll advances queued → running → succeeded (`fail=True`: failed). Terminal jobs stay terminal, duplicate keys return the existing snapshot, conflicting requests fail, and only succeeded jobs return results.
 
-Results contain synthetic JSON bytes with full shot/model provenance, actual SHA256/size, zero cost and fixed synthetic timestamps; `memory://` URIs do not write storage. IDs/bytes repeat for the same request/key across instances, but jobs are held only in memory; callers persist payloads separately. `provisioning.Provisioner` defines acquire/inspect/release only, with no implementation.
+Results contain synthetic JSON bytes with full shot/model provenance, actual SHA256/size, zero cost and fixed synthetic timestamps; `memory://` URIs do not write storage. IDs/bytes repeat for the same request/key across instances, but jobs are held only in memory; callers persist payloads separately. `provisioning.Provisioner` defines the provider-neutral acquire/inspect/release contract.
 
 `ComfyExecutionProvider(transport, workflow)` implements the same protocol with bounded requests, polling, selected-output download and actual checksums; it neither provisions compute nor persists bytes. `WorkflowTemplate` pins a canonical API graph/model, reviewed node-class allowlist, prompt/seed bindings, fixed duration and one output selection; each request must match its digest/model/duration.
 
@@ -39,3 +39,7 @@ Pod and Serverless will be selectable execution adapters sharing domain/model/wo
 ## M3 provider review
 
 [The owner-approved Runpod Pod scope](../../config/cloud/runpod-pod-proposal.json) compares Lambda and Modal and records a separate USD3 aggregate M3 validation cap with its [approval receipt](https://github.com/richardo920/cineforge/issues/48#issuecomment-6554788309). Live readiness remains false until M3.2/M3.3 safety gates, external credentials, explicit opt-in and fresh worker preflight pass; persistent storage, image publication and other GPU SKUs remain outside this scope.
+
+`RunpodPodProvisioner(spec, transport, probe=..., before_create=..., event_sink=...)` reserves an `AcquisitionIntent` before POST, records each `LeaseSnapshot`, and returns a `GPUDevice` only after a separately supplied runtime probe; Runpod's `gpu.memory` is host RAM. Release verifies its own ephemeral worker's identity/configuration, deletes it, and confirms GET404; uncertain creation blocks replay, and unconfirmed cleanup retains the owned ID.
+
+The required policy hook supplies fresh quote/approval/budget checks; the event sink persists private intent/state for M3.3 supervision. `RunpodHTTPTransport(api_key, allow_live=True)` only supplies bounded fixed-origin RESTv2 HTTPS: it does not authenticate owner approval, enforce a rental deadline, provision storage, install models, or execute workflows; a price race can still allocate before read-back rejects it. `restore_owned(intent, snapshot)` accepts trusted operator journal records only and never discovers ownership by name alone.
