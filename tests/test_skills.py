@@ -1,5 +1,7 @@
 """Offline source provenance, review and immutable shot binding acceptance."""
 
+import json
+import traceback
 import unittest
 from dataclasses import replace
 from unittest.mock import patch
@@ -12,6 +14,7 @@ from cineforge.skills import (
     CatalogError,
     Compatibility,
     Permissions,
+    ProfileEvidence,
     ShotSkills,
     SkillCatalog,
     SkillPin,
@@ -96,6 +99,57 @@ class SourceTests(unittest.TestCase):
             bind_shot(shot(), binding.skills * 2)
         with self.assertRaises(CatalogError):
             SkillPin("camera", "latest", "c" * 64)
+
+
+class PrivacyTests(unittest.TestCase):
+    marker = "private://test-sensitive-marker"
+
+    def assert_private_error(self, action) -> None:
+        try:
+            action()
+        except CatalogError as error:
+            self.assertNotIn(self.marker, str(error))
+            self.assertNotIn(self.marker, "".join(traceback.format_exception(error)))
+        else:
+            self.fail("invalid catalog metadata was accepted")
+
+    def test_every_record_rejects_sensitive_schema_versions_without_echo(self) -> None:
+        entry = reviewed_entry()
+        records = (entry.source, Permissions(), Compatibility(),
+                   ProfileEvidence("local_observation", entry.source, "synthetic"),
+                   entry.review, entry.pin, bind_shot(shot(), (entry.pin,)), entry)
+        for record in records:
+            for value in (self.marker, {"value": self.marker}, [self.marker], True, None, 2):
+                with self.subTest(kind=type(record).__name__, schema_type=type(value).__name__):
+                    self.assert_private_error(lambda: replace(record, schema_version=value))
+                    data = record.to_dict()
+                    data["schema_version"] = value
+                    self.assert_private_error(lambda: type(record).from_dict(data))
+                    self.assert_private_error(lambda: type(record).from_json(json.dumps(data)))
+
+    def test_nested_record_and_parser_errors_hide_input_and_chained_errors(self) -> None:
+        entry = reviewed_entry()
+        for name in ("source", "permissions", "compatibility", "rights", "review"):
+            data = entry.to_dict()
+            data[name]["schema_version"] = self.marker
+            with self.subTest(nested=name):
+                self.assert_private_error(lambda: CatalogEntry.from_dict(data))
+                self.assert_private_error(lambda: CatalogEntry.from_json(json.dumps(data)))
+        data = bind_shot(shot(), (entry.pin,)).to_dict()
+        data["skills"][0]["schema_version"] = self.marker
+        self.assert_private_error(lambda: ShotSkills.from_json(json.dumps(data)))
+        for raw in ('{"' + self.marker + '":1,"' + self.marker + '":2}',
+                    '{"schema_version":"' + self.marker + '"',
+                    '{"schema_version":NaN,"source":"' + self.marker + '"}'):
+            self.assert_private_error(lambda: SourcePin.from_json(raw))
+
+    def test_direct_field_validation_does_not_leak_parser_or_unicode_context(self) -> None:
+        source = reviewed_entry().source
+        malformed_host = "https://github.com" + "\uff0f" + self.marker + "/repo"
+        self.assert_private_error(lambda: replace(source, repository=malformed_host))
+        self.assert_private_error(lambda: replace(source, path=self.marker + "\ud800"))
+        review = reviewed_entry().review
+        self.assert_private_error(lambda: replace(review, evidence_uri=self.marker + "\ud800"))
 
 
 class ReadinessTests(unittest.TestCase):

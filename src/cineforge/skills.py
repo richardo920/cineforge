@@ -7,8 +7,9 @@ import json
 import re
 from dataclasses import dataclass
 from enum import Enum
+from functools import wraps
 from pathlib import PurePosixPath
-from typing import Any, ClassVar, Self
+from typing import Any, Callable, ClassVar, Self
 from urllib.parse import urlsplit
 
 from cineforge.contracts import (
@@ -33,6 +34,17 @@ class CatalogError(ContractError):
     """Invalid or unresolved catalog metadata; input content is not echoed."""
 
 
+def _safe_validation(validate: Callable[[Any], None]) -> Callable[[Any], None]:
+    """Keep constructor failures, including chained parser errors, metadata-free."""
+    @wraps(validate)
+    def guarded(record: Any) -> None:
+        try:
+            validate(record)
+        except (ValueError, TypeError, RecursionError, OverflowError):
+            raise CatalogError("invalid catalog declaration") from None
+    return guarded
+
+
 def _path(value: str) -> None:
     _text(value, "source path")
     path = PurePosixPath(value)
@@ -50,21 +62,35 @@ def _commit(value: str) -> None:
 class _Record(Contract):
     _strings: ClassVar[tuple[str, ...]] = ()
 
+    def __post_init__(self) -> None:
+        if type(self.schema_version) is not int or self.schema_version != 1:
+            raise CatalogError("unsupported catalog schema version")
+
     @classmethod
     def from_dict(cls, data: object) -> Self:
-        if not isinstance(data, dict):
-            raise CatalogError("catalog record must be an object")
-        values = dict(data)
-        for name in cls._strings:
-            if name in values:
-                if not isinstance(values[name], list):
-                    raise CatalogError("catalog sequence must be an array")
-                values[name] = tuple(values[name])
-        # Optional nested records have None defaults; Contract's codec is strict.
-        for name in cls._objects:
-            if name in values and values[name] is None:
-                values.pop(name)
-        return super().from_dict(values)
+        try:
+            if not isinstance(data, dict):
+                raise CatalogError("catalog record must be an object")
+            values = dict(data)
+            for name in cls._strings:
+                if name in values:
+                    if not isinstance(values[name], list):
+                        raise CatalogError("catalog sequence must be an array")
+                    values[name] = tuple(values[name])
+            # Optional nested records have None defaults; Contract's codec is strict.
+            for name in cls._objects:
+                if name in values and values[name] is None:
+                    values.pop(name)
+            return super().from_dict(values)
+        except (ValueError, TypeError, RecursionError, OverflowError):
+            raise CatalogError("invalid catalog record") from None
+
+    @classmethod
+    def from_json(cls, raw: str) -> Self:
+        try:
+            return super().from_json(raw)
+        except (ValueError, TypeError, RecursionError, OverflowError):
+            raise CatalogError("invalid catalog JSON") from None
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,8 +100,9 @@ class SourcePin(_Record):
     path: str
     sha256: str
 
+    @_safe_validation
     def __post_init__(self) -> None:
-        Contract.__post_init__(self)
+        _Record.__post_init__(self)
         _text(self.repository, "repository")
         parsed = urlsplit(self.repository)
         if (parsed.scheme != "https" or parsed.netloc not in {"github.com", "huggingface.co"}
@@ -104,8 +131,9 @@ class Permissions(_Record):
     network_hosts: tuple[str, ...] = ()
     _strings: ClassVar[tuple[str, ...]] = ("tools", "read_paths", "write_paths", "network_hosts")
 
+    @_safe_validation
     def __post_init__(self) -> None:
-        Contract.__post_init__(self)
+        _Record.__post_init__(self)
         for name in self._strings:
             values = getattr(self, name)
             _tuple(values, str, name)
@@ -131,8 +159,9 @@ class Compatibility(_Record):
     required_precision: Precision | None = None
     _enums: ClassVar[dict[str, type[Enum]]] = {"backend": Backend, "required_precision": Precision}
 
+    @_safe_validation
     def __post_init__(self) -> None:
-        Contract.__post_init__(self)
+        _Record.__post_init__(self)
         _integer(self.minimum_memory_mib, "minimum memory")
         values = (self.model_id, self.model_revision, self.workflow_digest)
         if any(value is not None for value in values):
@@ -184,8 +213,9 @@ class ProfileEvidence(_Record):
     summary: str
     _objects: ClassVar[dict[str, type[Contract]]] = {"source": SourcePin}
 
+    @_safe_validation
     def __post_init__(self) -> None:
-        Contract.__post_init__(self)
+        _Record.__post_init__(self)
         if self.origin not in {"upstream_recommendation", "local_observation"}:
             raise CatalogError("invalid profile provenance")
         if type(self.source) is not SourcePin:
@@ -200,8 +230,9 @@ class SourceReview(_Record):
     evidence_uri: str
     evidence_sha256: str
 
+    @_safe_validation
     def __post_init__(self) -> None:
-        Contract.__post_init__(self)
+        _Record.__post_init__(self)
         _digest(self.declaration_sha256, "review subject")
         _identifier(self.reviewer, "source reviewer")
         _text(self.evidence_uri, "review evidence")
@@ -215,8 +246,9 @@ class SkillPin(_Record):
     revision: str
     sha256: str
 
+    @_safe_validation
     def __post_init__(self) -> None:
-        Contract.__post_init__(self)
+        _Record.__post_init__(self)
         _identifier(self.entry_id, "catalog id")
         _identifier(self.revision, "catalog revision")
         if self.revision.lower() in {"main", "master", "latest", "head", "unknown"}:
@@ -232,8 +264,9 @@ class ShotSkills(_Record):
     skills: tuple[SkillPin, ...]
     _sequences: ClassVar[dict[str, type[Contract]]] = {"skills": SkillPin}
 
+    @_safe_validation
     def __post_init__(self) -> None:
-        Contract.__post_init__(self)
+        _Record.__post_init__(self)
         _digest(self.shot_sha256, "shot digest")
         _tuple(self.skills, SkillPin, "skill pins")
         _unique(tuple(pin.entry_id for pin in self.skills), "shot skill id")
@@ -281,8 +314,9 @@ class CatalogEntry(_Record):
         "supplemental_sources": SourcePin, "profiles": ProfileEvidence,
     }
 
+    @_safe_validation
     def __post_init__(self) -> None:
-        Contract.__post_init__(self)
+        _Record.__post_init__(self)
         SkillPin(self.entry_id, self.revision, "0" * 64)
         if self.category not in _CATEGORIES:
             raise CatalogError("invalid catalog category")
