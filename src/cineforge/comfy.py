@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import time
 import uuid
 from collections.abc import Callable
@@ -31,6 +32,29 @@ from cineforge.workflows import WorkflowTemplate, canonical, strict_object
 
 TERMINAL = (RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELLED)
 SUPPORTED_SERVER_REVISION = "6d352802d8f8b9133f664a1757d6c6d26390c335"  # pragma: allowlist secret
+
+
+def _history_graph_matches(submitted: object, observed: object) -> bool:
+    """Pinned ComfyUI validation casts numeric FLOAT inputs before storing history.
+
+    Accept only exact numeric equality, never bool/int equality or approximate values.
+    Approval/template digests continue to bind the original, unmodified graph bytes.
+    """
+    if (isinstance(submitted, (int, float)) and not isinstance(submitted, bool)
+            and isinstance(observed, (int, float)) and not isinstance(observed, bool)):
+        return ((not isinstance(submitted, float) or math.isfinite(submitted))
+                and (not isinstance(observed, float) or math.isfinite(observed))
+                and submitted == observed)
+    if type(submitted) is not type(observed):
+        return False
+    if isinstance(submitted, dict) and isinstance(observed, dict):
+        return (submitted.keys() == observed.keys()
+                and all(_history_graph_matches(value, observed[key])
+                        for key, value in submitted.items()))
+    if isinstance(submitted, list) and isinstance(observed, list):
+        return (len(submitted) == len(observed)
+                and all(_history_graph_matches(a, b) for a, b in zip(submitted, observed)))
+    return submitted == observed
 
 
 class SubmissionUncertainError(ProviderError):
@@ -171,7 +195,7 @@ class ComfyExecutionProvider:
             raise ProviderError("malformed ComfyUI history")
         prompt, status = item.get("prompt"), item.get("status")
         if (not isinstance(prompt, list) or len(prompt) < 3 or prompt[1] != identity
-                or canonical(prompt[2]) != canonical(job.graph) or not isinstance(status, dict)
+                or not _history_graph_matches(job.graph, prompt[2]) or not isinstance(status, dict)
                 or type(status.get("completed")) is not bool
                 or status.get("status_str") not in ("success", "error")):
             raise ProviderError("ComfyUI history differs from the submitted job")

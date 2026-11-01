@@ -2,7 +2,7 @@
 
 Private foundation for a modular AI filmmaking platform: brief → screenplay → storyboard → shots → edit → sound → review → delivery.
 
-**Status:** strict production metadata, deterministic offline mock runs, and an explicitly opted-in ComfyUI single-shot command with private output storage. Measured live-shot validation remains M2.4; GPU provisioning is not implemented.
+**Status:** strict production metadata, offline mock runs, and an explicitly opted-in private ComfyUI single-shot command. [One approved RTX 4090 shot](docs/evidence/m2-live-shot.json) was generated and recovered manually after a history-number mismatch, now fixed; automated GPU provisioning remains M3.
 
 ## Quick start
 
