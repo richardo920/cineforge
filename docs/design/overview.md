@@ -91,7 +91,7 @@ CI runs offline and contract tiers in separate interpreters. An absent contract 
 | Tier | Suite / policy |
 | --- | --- |
 | Offline | `tests/`: synthetic unit/CLI fixtures; no runtime network, credentials, GPU, or paid calls |
-| Contract | `tests_contract/`: fake-provider/schema/failure fixtures; same offline rules; currently absent |
+| Contract | `tests_contract/`: fake-provider lifecycle/idempotency/failure conformance; same offline rules |
 | Integration | `tests_integration/`: opt-in real adapters outside default discovery; currently unavailable |
 | Media quality | `tests_media/`: opt-in approved media and technical measurements plus separate human review; currently unavailable |
 
