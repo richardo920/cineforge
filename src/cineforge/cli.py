@@ -72,6 +72,20 @@ def main() -> None:
     cloud.add_argument("--output-dir", required=True, help="new private directory outside Git")
     cloud.add_argument("--reference-run", required=True, help="private prepared-endpoint run.json")
     cloud.add_argument("--case", choices=("success", "post-acquire-failure"), default="success")
+    m4_check = commands.add_parser("conditioning-preflight", help="offline private I2V proposal")
+    m4_run = commands.add_parser("conditioning-run", help="opt-in approved three-shot I2V test")
+    m4_recover = commands.add_parser("conditioning-recover", help="release only M4 journal-owned Pods")
+    for command in (m4_check, m4_run):
+        command.add_argument("--context", required=True, help="private registry/rights/catalog bindings")
+        command.add_argument("--reference", required=True, help="private approved static PNG")
+        command.add_argument("--output-dir", required=True, help="new private directory outside Git")
+    for command in (m4_run, m4_recover):
+        command.add_argument("--approval", required=True, help="separate exact M4 subject/receipt")
+        command.add_argument("--budget-dir", required=True, help="new M4 scoped journal; retain for recovery")
+        command.add_argument("--api-key-file", help="external programmatic credential")
+        command.add_argument("--allow-live", action="store_true", help="explicit cloud/worker opt-in")
+    m4_run.add_argument("--session-id", required=True)
+    m4_run.add_argument("--ssh-private-key", required=True, help="external owned0600 SSH key")
     parse_failed = False
     args = None
     try:
@@ -84,6 +98,18 @@ def main() -> None:
         parser.error("invalid arguments")
     if args.command is None:
         parser.print_help()
+        return
+    if args.command.startswith("conditioning-"):
+        from cineforge.conditioning_cli import command as conditioning_command
+        m4_failed = False
+        m4_report = None
+        try:
+            m4_report = conditioning_command(args)
+        except (Exception, KeyboardInterrupt):
+            m4_failed = True
+        if m4_failed or m4_report is None:
+            parser.application_error("conditioning command rejected or incomplete; retain private journals")
+        print(canonical_json(m4_report).decode())
         return
     if args.command in ("cloud-smoke", "cloud-recover"):
         failed = False

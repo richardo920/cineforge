@@ -93,7 +93,8 @@ class ComfyExecutionProvider:
                  request_timeout_seconds: float = 10, job_timeout_seconds: float = 60,
                  max_polls: int = 120, max_result_bytes: int = 32 * 1024 * 1024,
                  clock: Callable[[], float] = time.monotonic,
-                 verified_server_revision: str | None = None) -> None:
+                 verified_server_revision: str | None = None,
+                 verified_worker_id: str | None = None) -> None:
         if (not isinstance(workflow, WorkflowTemplate) or type(max_polls) is not int
                 or not 1 <= max_polls <= 10000 or type(max_result_bytes) is not int
                 or not 1 <= max_result_bytes <= 256 * 1024 * 1024):
@@ -108,6 +109,7 @@ class ComfyExecutionProvider:
         self._max_result_bytes = max_result_bytes
         self._clock = clock
         self._atomic_cancel = verified_server_revision is not None
+        self._verified_worker_id = verified_worker_id
         self._jobs: dict[str, _Job] = {}
         self._keys: dict[str, tuple[bytes, str | None]] = {}
         self._lock = RLock()
@@ -135,6 +137,7 @@ class ComfyExecutionProvider:
 
     def submit(self, request: ExecutionRequest, idempotency_key: str) -> ShotRun:
         graph = self._workflow.translate(request)
+        self._workflow.require_submission(request, self._verified_worker_id)
         _text(idempotency_key, "idempotency_key")
         snapshot = canonical(request.to_dict())
         with self._lock:

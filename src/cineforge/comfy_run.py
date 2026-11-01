@@ -80,7 +80,8 @@ def _verify_nodes(transport: ComfyTransport, selection: ApprovedComfySelection,
                 target = schemas[graph[value[0]]["class_type"]]
                 if value[1] >= len(target["output"]):
                     raise ComfyRunError("worker node output slot is missing")
-            if field in ("unet_name", "clip_name", "vae_name"):
+            if field in ("unet_name", "clip_name", "vae_name") or (
+                    node["class_type"] == "LoadImage" and field == "image"):
                 spec = (required | optional)[field]
                 if (not isinstance(spec, list) or not spec or not isinstance(spec[0], list)
                         or value not in spec[0]):
@@ -116,6 +117,9 @@ def execute_comfy(
                 or not isinstance(worker, WorkerVerification)):
             raise ComfyRunError("explicit opt-in and one approved shot are required")
         worker.require_matches(selection)
+        from cineforge.conditioning import ConditioningSelection
+        if type(selection) is ConditioningSelection:
+            selection.require_execution_worker(worker)
         request = selection.request(plan.shots[0])
         timeout_seconds = positive_seconds(timeout_seconds)
         request_timeout_seconds = positive_seconds(request_timeout_seconds)
@@ -131,6 +135,7 @@ def execute_comfy(
             job_timeout_seconds=timeout_seconds, max_polls=max_polls,
             max_result_bytes=max_result_bytes, clock=clock,
             verified_server_revision=worker.record["server_revision"],
+            verified_worker_id=worker.record["worker_id"],
         )
     except (Exception, KeyboardInterrupt):
         failed = True

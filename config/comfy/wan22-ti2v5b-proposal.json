@@ -1,0 +1,119 @@
+{
+  "schema_version": 1,
+  "profile_id": "m4-wan22-ti2v5b-5090-v1",
+  "model": {
+    "model_id": "Wan-AI/Wan2.2-TI2V-5B",
+    "revision": "ee6f4a40737a995bf5818954cfce6d59443b0f04", "revision_note": "# pragma: allowlist secret - public provenance pin",
+    "distribution": "Comfy-Org/Wan-2.2",
+    "task": "image-to-video",
+    "allowed_backends": [
+      "cuda"
+    ],
+    "minimum_memory_mib": 30720,
+    "required_precision": "fp16",
+    "license": "Apache-2.0",
+    "commercial_use": true,
+    "files": [
+      {
+        "path": "split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors",
+        "size_bytes": 9999658848,
+        "sha256": "456f901338bd9eadbded3828b819109a9b68e8a525ca5cf8d0049a69fcfeca1e", "sha256_note": "# pragma: allowlist secret - public provenance pin",
+        "revision": "ee6f4a40737a995bf5818954cfce6d59443b0f04", "revision_note": "# pragma: allowlist secret - public provenance pin",
+        "url": "https://huggingface.co/Comfy-Org/Wan-2.2/resolve/ee6f4a40737a995bf5818954cfce6d59443b0f04/split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors", "url_note": "# pragma: allowlist secret - public provenance pin",
+        "license": "Apache-2.0 (repository declaration)"
+      },
+      {
+        "path": "split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+        "size_bytes": 6735906897,
+        "sha256": "c3355d30191f1f066b26d93fba017ae9809dce6c627dda5f6a66eaa651204f68", "sha256_note": "# pragma: allowlist secret - public provenance pin",
+        "revision": "ee6f4a40737a995bf5818954cfce6d59443b0f04", "revision_note": "# pragma: allowlist secret - public provenance pin",
+        "url": "https://huggingface.co/Comfy-Org/Wan-2.2/resolve/ee6f4a40737a995bf5818954cfce6d59443b0f04/split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors", "url_note": "# pragma: allowlist secret - public provenance pin",
+        "license": "Apache-2.0 (repository declaration)"
+      },
+      {
+        "path": "split_files/vae/wan2.2_vae.safetensors",
+        "size_bytes": 1409400960,
+        "sha256": "e40321bd36b9709991dae2530eb4ac303dd168276980d3e9bc4b6e2b75fed156", "sha256_note": "# pragma: allowlist secret - public provenance pin",
+        "revision": "ee6f4a40737a995bf5818954cfce6d59443b0f04", "revision_note": "# pragma: allowlist secret - public provenance pin",
+        "url": "https://huggingface.co/Comfy-Org/Wan-2.2/resolve/ee6f4a40737a995bf5818954cfce6d59443b0f04/split_files/vae/wan2.2_vae.safetensors", "url_note": "# pragma: allowlist secret - public provenance pin",
+        "license": "Apache-2.0 (repository declaration)"
+      }
+    ]
+  },
+  "runner": {
+    "revision": "6d352802d8f8b9133f664a1757d6c6d26390c335", "revision_note": "# pragma: allowlist secret - public provenance pin",
+    "custom_nodes": []
+  },
+  "workflow": {
+    "source_repository": "https://github.com/Comfy-Org/workflow_templates",
+    "source_revision": "c067929d7e9cc0f3fd15be348fa1a1d85da15946", "source_revision_note": "# pragma: allowlist secret - public provenance pin",
+    "source_path": "templates/video_wan2_2_5B_ti2v.json",
+    "source_raw_sha256": "23c93b88adecbdf5bcf4c5438117070fe757f30aca373dd6a2eb488d2c6a585a", "source_raw_sha256_note": "# pragma: allowlist secret - public provenance pin",
+    "license": "MIT",
+    "license_sha256": "5dccd61c80c847cd6b22fa98124010163ab8646e573557a16a5cae31122f2056", "license_sha256_note": "# pragma: allowlist secret - public provenance pin",
+    "allowed_classes": [
+      "CLIPLoader",
+      "CLIPTextEncode",
+      "KSampler",
+      "LoadImage",
+      "ModelSamplingSD3",
+      "SaveWEBM",
+      "UNETLoader",
+      "VAEDecode",
+      "VAELoader",
+      "Wan22ImageToVideoLatent"
+    ],
+    "bindings": {
+      "prompt": {
+        "node_id": "6",
+        "input_name": "text"
+      },
+      "seed": {
+        "node_id": "3",
+        "input_name": "seed"
+      }
+    },
+    "output_node": "47",
+    "output_kind": "images",
+    "output_index": 0,
+    "artifact_license": "LicenseRef-Generated-Unreviewed",
+    "media_type": "video/webm",
+    "duration_seconds": 2.0416666666666665,
+    "execution_digest": "Offline preflight binds the exact private reference and canonical API graph.",
+    "license_path": "WAN22-WORKFLOW-LICENSE",
+    "adaptation": [
+      "Enable core LoadImage -> Wan22ImageToVideoLatent.start_image; require one approved static RGB PNG.",
+      "Keep1280x704/20steps/CFG5/uni_pc/simple/shift8; shorten121 to49frames.",
+      "Use existing SaveWEBM vp9/CRF32 at24fps, adapted from MIT template output nodes.",
+      "Exact private reference, character/skill/rights snapshots, prompts/seeds and journal directory bind the separate approval subject."
+    ]
+  },
+  "hardware": {
+    "gpu": "NVIDIA GeForce RTX 5090",
+    "vram_gib": 32,
+    "resource_policy": {
+      "minimum_effective_ram_limit_bytes": 64000000000,
+      "minimum_available_ram_bytes": 34359738368,
+      "minimum_filesystem_free_bytes": 32212254720,
+      "note": "Conservative pre-download planning allowances, not measured model minima; 64GB is decimal, available RAM/disk thresholds use GiB; no swap counted."
+    }
+  },
+  "state": "proposed_not_approved",
+  "scope": {
+    "aggregate_usd": 1,
+    "max_acquisitions": 1,
+    "lifetime_seconds": 1800,
+    "gpu_compute_ceiling_usd_per_hour": 1.25,
+    "region": "EU-CZ-1",
+    "container_disk_gb": 80,
+    "persistent_volumes": []
+  },
+  "readiness": {
+    "owner_receipt": "pending",
+    "runtime_and_weights": "unverified",
+    "reference": "private exact bytes and rights required",
+    "three_clip_human_review": "pending",
+    "live_ready": false,
+    "weight_digests": "Published LFS metadata; actual bytes have not been downloaded or verified."
+  }
+}

@@ -67,6 +67,7 @@ class WorkflowTemplate:
     artifact_license: str
     output_index: int = 0
     duration_seconds: float = 1.0
+    conditioning: object | None = None
 
     def __post_init__(self) -> None:
         for name in ("model_id", "model_revision", "output_node", "artifact_license"):
@@ -106,7 +107,20 @@ class WorkflowTemplate:
                 or request.shot.workflow_digest != self.digest or request.shot.seed is None
                 or request.shot.duration_seconds != self.duration_seconds):
             raise ProviderError("request must pin this workflow/model and an explicit seed")
+        if request.shot.character_revision is not None or self.conditioning is not None:
+            # Creative JSON cannot manufacture this non-serialized, byte-verified gate.
+            from cineforge.conditioning import VerifiedConditioning
+            if type(self.conditioning) is not VerifiedConditioning:
+                raise ProviderError("workflow does not support character conditioning")
+            self.conditioning.require(request, self.digest)
         graph = strict_object(self.graph_json)
         graph[self.prompt.node_id]["inputs"][self.prompt.input_name] = request.shot.prompt
         graph[self.seed.node_id]["inputs"][self.seed.input_name] = request.shot.seed
         return graph
+
+    def require_submission(self, request: ExecutionRequest, worker_id: str | None) -> None:
+        if request.shot.character_revision is not None or self.conditioning is not None:
+            from cineforge.conditioning import VerifiedConditioning
+            if type(self.conditioning) is not VerifiedConditioning:
+                raise ProviderError("workflow does not support verified reference submission")
+            self.conditioning.require_submission(request, worker_id)

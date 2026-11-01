@@ -175,6 +175,8 @@ class ApprovedComfySelection:
         )
 
     def request(self, plan_shot: Shot) -> ExecutionRequest:
+        if plan_shot.character_revision is not None:
+            raise ComfyPolicyError("T2V selection cannot condition a character reference")
         request = ExecutionRequest(plan_shot, self.model)
         if (len(plan_shot.prompt) > 8192
                 or any(ord(c) < 32 and c not in "\n\r\t" for c in plan_shot.prompt)
