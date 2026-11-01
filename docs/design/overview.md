@@ -4,7 +4,7 @@
 
 A modular AI filmmaking platform: brief → screenplay → storyboard → shots → picture edit → sound → review → delivery. Keep creative intent and production metadata portable across models, GPU providers, and editing tools; require human approval of final picture, voice likeness, music, and mix.
 
-The private Python package implements strict immutable production contracts, declared model/device selection, a deterministic metadata-only mock CLI with local checkpoints/resume, and an explicitly opted-in private ComfyUI single-shot entrypoint verified offline. The first measured live-shot evidence remains M2.4; provisioning, audio analysis, mixing, and a web UI remain future work.
+The private Python package implements strict production contracts, model/device selection, offline mock checkpoint/resume, and an explicitly opted-in private ComfyUI single-shot command. [M2 measured one RTX 4090 shot](../evidence/m2-live-shot.json), including manual recovery after a now-fixed history-number mismatch; automated provisioning, live resume, audio processing and a web UI remain future work.
 
 ## File structure
 

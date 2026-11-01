@@ -1,4 +1,4 @@
-"""Offline integrity/admission checks for the pending M2.1 candidate; no model bytes."""
+"""Offline integrity/admission checks for the approved selection; no model bytes."""
 
 import copy
 import hashlib
@@ -54,12 +54,15 @@ class ComfySelectionTests(unittest.TestCase):
         assets = selection["model"]["files"]
         self.assertEqual(len(assets), len(ASSETS))
         self.assertEqual({asset["path"] for asset in assets}, set(ASSETS))
+        evidence = json.loads((ROOT.parents[1] / "docs/evidence/m2-live-shot.json").read_text())
+        measured = {item["path"]: item for item in evidence["worker"]["verified_model_files"]}
         for asset in assets:
             self.assertEqual((asset["size_bytes"], asset["sha256"]), ASSETS[asset["path"]])
             self.assertEqual(asset["revision"], selection["model"]["revision"])
             self.assertEqual(asset["url"], "https://huggingface.co/Comfy-Org/Wan-2.1/resolve/"
                              + asset["revision"] + "/" + asset["path"])
-            self.assertIn("not downloaded", asset["hash_verification"])
+            self.assertEqual(measured[asset["path"]]["sha256"], asset["sha256"])
+            self.assertEqual(measured[asset["path"]]["size_bytes"], asset["size_bytes"])
         self.assertEqual(selection["model"]["total_weight_bytes"], 9828025775)
         self.assertEqual(sum(a["size_bytes"] for a in assets), 9828025775)
 
@@ -118,7 +121,7 @@ class ComfySelectionTests(unittest.TestCase):
         loaded = {self.graph[node]["inputs"][field] for node, field in loaders.items()}
         self.assertEqual(loaded, {Path(path).name for path in ASSETS})
 
-    def test_declared_cuda_target_does_not_claim_measured_or_metal_support(self):
+    def test_declared_cuda_target_records_measurement_without_claiming_metal_support(self):
         declared = self.selection["model"]
         model = ModelSpec(
             model_id=declared["model_id"], revision=declared["revision"], task=declared["task"],
@@ -128,14 +131,31 @@ class ComfySelectionTests(unittest.TestCase):
             commercial_use=declared["commercial_use"],
         )
         self.assertEqual(model.allowed_backends, frozenset({Backend.CUDA}))
-        self.assertEqual(model.minimum_memory_mib, 24576)
-        candidate = GPUDevice("declared-4090", Backend.CUDA, 24576,
+        self.assertEqual(model.minimum_memory_mib, 24082)
+        candidate = GPUDevice("declared-4090", Backend.CUDA, 24082,
                               frozenset({Precision.FP16}))
         self.assertEqual(select_device(model, [candidate]), candidate)
-        self.assertIs(self.selection["hardware"]["measured"], False)
+        self.assertIs(self.selection["hardware"]["measured"], True)
         self.assertIn("not a measured minimum", declared["memory_note"])
         self.assertIn("Metal compatibility is not claimed", " ".join(
             self.selection["hardware"]["limits"]))
+
+    def test_usable_memory_correction_retains_original_owner_subject(self):
+        correction = self.selection["approval"]["model_workflow"]["technical_correction"]
+        self.assertEqual(correction["field"], "model.minimum_memory_mib")
+        self.assertEqual(correction["original_value"], 24576)
+        self.assertEqual(correction["corrected_value"], 24082)
+        original = copy.deepcopy(self.selection)
+        original["model"]["minimum_memory_mib"] = correction["original_value"]
+        original_subject = json.dumps(selection_subject(original), sort_keys=True,
+                                      separators=(",", ":"), ensure_ascii=False,
+                                      allow_nan=False).encode()
+        self.assertEqual(hashlib.sha256(original_subject).hexdigest(),
+                         correction["original_approved_subject_sha256"])
+        tampered = copy.deepcopy(self.selection)
+        tampered["model"]["minimum_memory_mib"] -= 1
+        with self.assertRaises(SelectionError):
+            require_selection_approval(tampered, self.graph)
 
     def test_owner_approval_binds_selection_without_claiming_live_readiness(self):
         selection = self.selection

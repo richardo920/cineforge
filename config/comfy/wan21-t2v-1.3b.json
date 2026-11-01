@@ -9,11 +9,11 @@
     "allowed_backends": [
       "cuda"
     ],
-    "minimum_memory_mib": 24576,
+    "minimum_memory_mib": 24082,
     "required_precision": "fp16",
     "license": "Apache-2.0",
     "commercial_use": true,
-    "memory_note": "24GiB is a conservative approved device admission target, not a measured minimum. Native upstream reports8.19GB; exact ComfyUI peak remains unmeasured.",
+    "memory_note": "24082 MiB is the observed CUDA-usable admission floor for the approved nominal 24 GB RTX 4090, not a measured minimum for this model; NVML reports 24564 MiB total and 482 MiB reserved. No other GPU is admitted.",
     "upstream_repository": "Wan-AI/Wan2.1-T2V-1.3B",
     "upstream_revision": "37ec512624d61f7aa208f7ea8140a131f93afc9a", "upstream_revision_note": "# pragma: allowlist secret - public provenance hash",
     "distribution": "Comfy-Org/Wan-2.1",
@@ -23,7 +23,7 @@
         "revision": "123acf1cc74bccbb9bfff8ac1ee72edc08c2341d", "revision_note": "# pragma: allowlist secret - public provenance hash",
         "sha256": "be531024cd9018cb5b48c40cfbb6a6191645b1c792eb8bf4f8c1c6e10f924dc5", "sha256_note": "# pragma: allowlist secret - public provenance hash",
         "size_bytes": 2838303560,
-        "hash_verification": "upstream LFS metadata only; actual bytes not downloaded",
+        "hash_verification": "Actual worker bytes verified in M2.4; see docs/evidence/m2-live-shot.json.",
         "url": "https://huggingface.co/Comfy-Org/Wan-2.1/resolve/123acf1cc74bccbb9bfff8ac1ee72edc08c2341d/split_files/diffusion_models/wan2.1_t2v_1.3B_fp16.safetensors",
         "license": "Apache-2.0 (repository declaration)"
       },
@@ -32,7 +32,7 @@
         "revision": "123acf1cc74bccbb9bfff8ac1ee72edc08c2341d", "revision_note": "# pragma: allowlist secret - public provenance hash",
         "sha256": "c3355d30191f1f066b26d93fba017ae9809dce6c627dda5f6a66eaa651204f68", "sha256_note": "# pragma: allowlist secret - public provenance hash",
         "size_bytes": 6735906897,
-        "hash_verification": "upstream LFS metadata only; actual bytes not downloaded",
+        "hash_verification": "Actual worker bytes verified in M2.4; see docs/evidence/m2-live-shot.json.",
         "url": "https://huggingface.co/Comfy-Org/Wan-2.1/resolve/123acf1cc74bccbb9bfff8ac1ee72edc08c2341d/split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors",
         "license": "Apache-2.0 (repository declaration)"
       },
@@ -41,7 +41,7 @@
         "revision": "123acf1cc74bccbb9bfff8ac1ee72edc08c2341d", "revision_note": "# pragma: allowlist secret - public provenance hash",
         "sha256": "2fc39d31359a4b0a64f55876d8ff7fa8d780956ae2cb13463b0223e15148976b", "sha256_note": "# pragma: allowlist secret - public provenance hash",
         "size_bytes": 253815318,
-        "hash_verification": "upstream LFS metadata only; actual bytes not downloaded",
+        "hash_verification": "Actual worker bytes verified in M2.4; see docs/evidence/m2-live-shot.json.",
         "url": "https://huggingface.co/Comfy-Org/Wan-2.1/resolve/123acf1cc74bccbb9bfff8ac1ee72edc08c2341d/split_files/vae/wan_2.1_vae.safetensors",
         "license": "Apache-2.0 (repository declaration)"
       }
@@ -108,7 +108,7 @@
     "vram_gib": 24,
     "proposed_host_ram_gib": 32,
     "proposed_free_disk_gib": 30,
-    "measured": false,
+    "measured": true,
     "evidence": "https://github.com/Wan-Video/Wan2.1/blob/9737cba9c1c3c4d04b33fcad41c111989865d315/README.md",
     "limits": [
       "32GiB RAM/30GiB disk are conservative planning allowances.",
@@ -155,7 +155,7 @@
       "license": "LicenseRef-Generated-Unreviewed",
       "evidence": "Original synthetic text prompt only; no image/audio/person/brand references.",
       "obligations": "Generated output still requires owner visual review; no blanket copyright/consent assertion.",
-      "status": "synthetic_prompt_selected_visual_review_pending"
+      "status": "test_visual_review_recorded_final_creative_approval_pending"
     }
   ],
   "approval": {
@@ -171,7 +171,17 @@
       "model_approved": true,
       "workflow_approved": true,
       "hardware_approved": true,
-      "approved_subject_sha256": "e053351d7cac17b14212c9a91aad382697cb6790adb360268a42b7e01c50f155", "approved_subject_sha256_note": "# pragma: allowlist secret - public provenance hash"
+      "technical_correction": {
+        "authority": "coordinator; independent scope review m24_scope_review_70b520f6",
+        "scope": "Same owner-approved RTX 4090 / 24 GB SKU; no new owner approval event or model/workflow/download/budget change.",
+        "field": "model.minimum_memory_mib",
+        "original_value": 24576,
+        "corrected_value": 24082,
+        "original_approved_subject_sha256": "e053351d7cac17b14212c9a91aad382697cb6790adb360268a42b7e01c50f155", "original_approved_subject_sha256_note": "# pragma: allowlist secret - public provenance hash",
+        "measurement": {"cuda_memory_bytes": 25252724736, "cuda_memory_mib": 24082, "nvml_total_mib": 24564, "nvml_reserved_mib": 482, "driver_version": "595.91.07"},
+        "reason": "CUDA-usable capacity excludes driver-reserved memory; preserve the actual measurement instead of rounding up nominal 24 GiB."
+      },
+      "approved_subject_sha256": "1aaa7e024932fe008bf0c13304ce80be66991d03a2b7d94aa4bd0f37987b15d0", "approved_subject_sha256_note": "# pragma: allowlist secret - public provenance hash"
     },
     "weight_downloads": true,
     "live_execution": false,
@@ -182,10 +192,9 @@
   "readiness": {
     "live_ready": false,
     "blockers": [
-      "M2.2 adapter and M2.3 safety gates must pass.",
-      "Record and approve actual worker image/Python/PyTorch/CUDA versions and private endpoint.",
-      "Verify actual worker model-file bytes/checksums before generation."
+      "Each live call still requires fresh operator verification, explicit opt-in and a supervised cloud budget."
     ],
-    "future_evidence": "The first bounded M2.4 run will record measured compatibility, timing, output provenance, failure recovery and visual review; these are completion evidence, not prerequisites to the first run."
+    "measured_evidence": "../../docs/evidence/m2-live-shot.json",
+    "live_ready_note": "No automatic admission or blanket execution permission; the measured one-shot and manual recovery are recorded separately."
   }
 }

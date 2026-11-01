@@ -1,0 +1,232 @@
+{
+  "schema_version": 1,
+  "task_id": "M2.4",
+  "scope": "One owner-approved Wan2.1 shot; manually supervised Runpod Pod and GET-only recovery. No automated cloud lifecycle or live resume.",
+  "orchestration": {
+    "base_revision": "e04230c667de5253e68fbb9cb1b22bd6ff703aed",     "base_revision_note": "# pragma: allowlist secret - public provenance hash",
+    "platform": "Apple M2 laptop; remote CUDA generation",
+    "provider": "cineforge.comfy-v1"
+  },
+  "approval": {
+    "receipt": "https://github.com/richardo920/cineforge/issues/40#issuecomment-6553169092",
+    "setup_limit_usd": 3,
+    "selection": "../../config/comfy/wan21-t2v-1.3b.json",
+    "technical_correction": "Nominal 24 GB approved RTX 4090 reports CUDA-usable 24082 MiB; original 24576 MiB admission target corrected to actual 24082 MiB without rounding or changing SKU."
+  },
+  "input": {
+    "character_revision": null,
+    "duration_seconds": 2.0625,
+    "model_id": "Wan-AI/Wan2.1-T2V-1.3B",
+    "model_revision": "123acf1cc74bccbb9bfff8ac1ee72edc08c2341d",     "model_revision_note": "# pragma: allowlist secret - public provenance hash",
+    "prompt": "A tiny red paper boat gently drifting across a calm pond, soft morning light, static camera.",
+    "revision": 1,
+    "scene_id": "pond",
+    "schema_version": 1,
+    "seed": 42,
+    "shot_id": "paper-boat",
+    "workflow_digest": "5f6860c7c9817023b37c0bbe707f7f50d922964a3b729cdac2d2831bf822c5a8",     "workflow_digest_note": "# pragma: allowlist secret - public provenance hash"
+  },
+  "worker": {
+    "image": "runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404",
+    "image_digest": "sha256:0a360022e8de4375af99430f84e8b38951acc397252163a37ceac7204d01be35",     "image_digest_note": "# pragma: allowlist secret - public provenance hash",
+    "amd64_image_digest": "sha256:4d1721e62b56d345c83b4fd6090664be6daf9312caab5b2e76f23d8231941851",     "amd64_image_digest_note": "# pragma: allowlist secret - public provenance hash",
+    "comfyui_repository": "Comfy-Org/ComfyUI",
+    "comfyui_revision": "6d352802d8f8b9133f664a1757d6c6d26390c335",     "comfyui_revision_note": "# pragma: allowlist secret - public provenance hash",
+    "python_version": "3.12.3",
+    "torch_version": "2.8.0+cu128",
+    "torchvision_version": "0.23.0+cu128",
+    "cuda_runtime_version": "12.8",
+    "driver_version": "595.91.07",
+    "gpu": {
+      "raw_name": "NVIDIA GeForce RTX 4090",
+      "approved_sku": "NVIDIA RTX4090",
+      "nominal_memory_gib": 24,
+      "nvml_total_mib": 24564,
+      "nvml_reserved_mib": 482,
+      "cuda_usable_bytes": 25252724736,
+      "cuda_usable_mib": 24082
+    },
+    "allocated_ram_bytes": 40999997440,
+    "requirements_sha256": "86abf78ac24e7dfd6ba66c8fc031b253be0eb4f3c6f048e7f32d5405986eb991",     "requirements_sha256_note": "# pragma: allowlist secret - public provenance hash",
+    "resolved_freeze_sha256": "a261beb6909850644768ed095720a1df7ff508e6179781385237cba950874840",     "resolved_freeze_sha256_note": "# pragma: allowlist secret - public provenance hash",
+    "dependency_policy": "source-pinned requirements; existing torch/torchvision constrained; exact resolved versions recorded in pip-freeze.log",
+    "verified_model_files": [
+      {
+        "path": "split_files/diffusion_models/wan2.1_t2v_1.3B_fp16.safetensors",
+        "sha256": "be531024cd9018cb5b48c40cfbb6a6191645b1c792eb8bf4f8c1c6e10f924dc5",         "sha256_note": "# pragma: allowlist secret - public provenance hash",
+        "size_bytes": 2838303560
+      },
+      {
+        "path": "split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+        "sha256": "c3355d30191f1f066b26d93fba017ae9809dce6c627dda5f6a66eaa651204f68",         "sha256_note": "# pragma: allowlist secret - public provenance hash",
+        "size_bytes": 6735906897
+      },
+      {
+        "path": "split_files/vae/wan_2.1_vae.safetensors",
+        "sha256": "2fc39d31359a4b0a64f55876d8ff7fa8d780956ae2cb13463b0223e15148976b",         "sha256_note": "# pragma: allowlist secret - public provenance hash",
+        "size_bytes": 253815318
+      }
+    ],
+    "verified_model_total_bytes": 9828025775,
+    "network": "ComfyUI binds 127.0.0.1:8188 behind private SSH tunnel; no public HTTP port exposed.",
+    "launch_flags": [
+      "--listen",
+      "127.0.0.1",
+      "--disable-all-custom-nodes",
+      "--disable-api-nodes",
+      "--disable-auto-launch"
+    ]
+  },
+  "execution": {
+    "job_id": "acf36e7c-759d-444d-9743-00db4a7ef2f8",
+    "submitted_generation_jobs": 1,
+    "server_result": "success",
+    "server_start_unix_ms": 1793512634117,
+    "server_success_unix_ms": 1793512681762,
+    "server_execution_seconds": 47.645,
+    "cli": {
+      "started_at": "2026-11-01T05:57:11.924463+00:00",
+      "finished_at": "2026-11-01T05:58:02.511223+00:00",
+      "wall_seconds": 50.58668383397162,
+      "exit_code": 2,
+      "bounds": {
+        "timeout_seconds": 600,
+        "request_timeout_seconds": 10,
+        "poll_interval_seconds": 1,
+        "max_polls": 600,
+        "max_result_bytes": 33554432
+      }
+    },
+    "cli_outcome": "incomplete; exit 2 after upstream FLOAT coercions changed canonical history JSON; no automatic resubmission.",
+    "weight_verification_timings": [
+      {
+        "path": "split_files/diffusion_models/wan2.1_t2v_1.3B_fp16.safetensors",
+        "seconds": 8.602
+      },
+      {
+        "path": "split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+        "seconds": 21.021
+      },
+      {
+        "path": "split_files/vae/wan_2.1_vae.safetensors",
+        "seconds": 1.503
+      }
+    ]
+  },
+  "failure_recovery": {
+    "pre_submit": {
+      "scenario": "actual CLI connection refused before submission; reuse rejected; successful recovery requires fresh directory",
+      "paid_generation_jobs_submitted": 0,
+      "attempts": [
+        {
+          "attempt": 1,
+          "exit_code": 2,
+          "wall_seconds": 3.123928042012267
+        },
+        {
+          "attempt": 2,
+          "exit_code": 2,
+          "wall_seconds": 0.08618091698735952
+        }
+      ],
+      "journal_outcome": "incomplete",
+      "known_run": null,
+      "artifact_count": 0,
+      "original_journal_sha256": "12cae5609ed55910883be3d38002acc771fdf86e3ef7542a8314b809fd926cf7",       "original_journal_sha256_note": "# pragma: allowlist secret - public provenance hash",
+      "same_directory_reuse": "rejected without modifying retained journal",
+      "bounds": {
+        "overall_seconds": 10,
+        "request_seconds": 3,
+        "max_polls": 2
+      },
+      "limits": "No post-submission disconnect/cancellation or automatic live resume is claimed."
+    },
+    "observed_live_failure": "Pinned upstream execution.py lines 1008-1013 casts inputs to int/float in place. History changed cfg=6/denoise=1/crf=32/fps=16/shift=8 to equal floats; canonical byte equality incorrectly rejected successful job.",
+    "fix": "Exact finite numeric equality for history only; booleans, changed values/types/keys/list order/length remain rejected. Immutable template and workflow approval hashes unchanged.",
+    "upstream_source": "https://github.com/Comfy-Org/ComfyUI/blob/6d352802d8f8b9133f664a1757d6c6d26390c335/execution.py#L1008",
+    "operator_recovery": "Fixed provider attached only to the validated retained owned job; GET history and GET view, no submit/cancel call or second generation. Original failed journal retained unchanged; separate recovered manifest.",
+    "requests": [
+      {
+        "method": "GET",
+        "path": "/history/acf36e7c-759d-444d-9743-00db4a7ef2f8",
+        "max_bytes": 4194304
+      },
+      {
+        "method": "GET",
+        "path": "/view?filename=cineforge-m2_00001_.webm&subfolder=&type=output",
+        "max_bytes": 33554432
+      }
+    ],
+    "recovery_seconds": 0.45401929202489555,
+    "original_failed_journal_sha256": "c9305e2a477ee482cf7e2b4cc998f176422b432608e3cfb296749987547394d0",     "original_failed_journal_sha256_note": "# pragma: allowlist secret - public provenance hash",
+    "recovered_journal_sha256": "51855661a2f8789ca6b2189aca7643115b8eb011235cf17af89a31a54b497feb",     "recovered_journal_sha256_note": "# pragma: allowlist secret - public provenance hash",
+    "operator_helper_sha256": "16e0fae782c21e971ca2e375c3324d4f7f7d0c814ed91482f3d4acbc9c09b6f1",     "operator_helper_sha256_note": "# pragma: allowlist secret - public provenance hash",
+    "bootstrap_helper_sha256": "a2c6f49eaeb1cbbabb3d34e739b22c526b2f9b8c2c7bbd2f31ef012a6a7174c8",     "bootstrap_helper_sha256_note": "# pragma: allowlist secret - public provenance hash",
+    "recovery_is_automatic": false,
+    "normal_cli_success_claimed": false,
+    "provider_source_sha256": "73dff3b28b3b1824e2f3d2ad1eca560b87b09764a0ad7e333dd453fe860c83ec",     "provider_source_sha256_note": "# pragma: allowlist secret - public provenance hash",
+    "pinned_upstream_execution_source_sha256": "4fa82de8dd76192fc6ce1a7c95e085d2c31a64d9e47f2ce3b44d0a86c2d68684",     "pinned_upstream_execution_source_sha256_note": "# pragma: allowlist secret - public provenance hash"
+  },
+  "output": {
+    "media_type": "video/webm",
+    "sha256": "001be6163564421bbd36c85c4344ebe0d075887998c716c0c911e3cf20282824",     "sha256_note": "# pragma: allowlist secret - public provenance hash",
+    "size_bytes": 132902,
+    "codec": "vp9",
+    "pixel_format": "yuv420p",
+    "width": 832,
+    "height": 480,
+    "decoded_frames": 33,
+    "fps": 16,
+    "container_duration_seconds": 2.063,
+    "planned_duration_seconds": 2.0625,
+    "storage": "Primary media, raw journals, logs and helper sources retained privately outside Git; checksums identify them."
+  },
+  "visual_review": {
+    "reviewer": "implementation agent /root/m24_author_70b520f6; coordinator independently inspected",
+    "sampled_frame_indices": [
+      0,
+      16,
+      32
+    ],
+    "observations": "Red folded paper boat, pond/reflection and changing ripples; coherent sampled frames with no obvious blank/corrupt image, text or watermark.",
+    "limitation": "Boat fills foreground despite tiny in prompt; sampled frames do not establish full temporal quality.",
+    "owner_feedback": "nice. i can also view the video via the localhost.",
+    "owner_feedback_scope": "Positive test feedback and playback-access confirmation; no blanket publication, rights or final creative approval.",
+    "publication_or_final_creative_approval": false
+  },
+  "billing": {
+    "hourly_gpu_usd": 0.89,
+    "limit_usd": 3,
+    "status": "Owner retained the Pod for learning within USD3 scope; one-off operator stop armed.",
+    "execution_manifest_cost_usd": 0,
+    "cost_note": "Manifest 0 is API default, not GPU rental; no free-compute claim.",
+    "created_at": "2026-11-01T05:52:20.191Z",
+    "snapshot_as_of": "2026-11-01T06:02:04.631757+00:00",
+    "gpu_rental_estimate_usd": 0.144487,
+    "invoice_status": "Billing API returned no records yet; final invoice unavailable, not zero cost.",
+    "lifecycle": "owner_retained_for_learning; not deleted",
+    "estimated_gpu_rental_to_stop_usd": 1.893675,
+    "estimated_container_disk_to_stop_usd": 0.023318,
+    "storage_rate_source": "https://github.com/runpod/docs/blob/main/accounts-billing/billing.mdx",
+    "operator_stop": {
+      "deadline_utc": "2026-11-01T08:00:00Z",
+      "action": "stop",
+      "status": "armed",
+      "as_of_unix": 1793513281.2117317,
+      "scope": "Only the conversation-created test Pod; Pod-scoped key remains inside that worker.",
+      "cli_version": "3.0.1-551d6a4",
+      "cli_sha256": "b66d11eca8cacbf18a2de6943c6e18a79ffbdc8a3c30aa13a49dc6cfc15d4239",       "cli_sha256_note": "# pragma: allowlist secret - public provenance hash",
+      "timer_source_sha256": "90df8c0fe6098aaecf1f41213f3e2e46f09c0b48540911b5952d68b87024a51e",       "timer_source_sha256_note": "# pragma: allowlist secret - public provenance hash",
+      "own_pod_read_verified": true,
+      "future_stop_completed": false,
+      "storage_after_stop": "Temporary container contents reset on stop; workflows/input/output backed up privately.",
+      "application_budget_enforcement": false
+    }
+  },
+  "limitations": [
+    "One measured worker/run only; no RTX 5090, Metal, CPU, Serverless, bit-identical reproducibility or peak-memory claim.",
+    "Resolved package versions and requirement/freeze hashes recorded; no complete transitive wheel lock or dependency audit claimed.",
+    "Manual GET-only reconciliation is an operator procedure; product live resume and cloud lifecycle/budget enforcement remain future milestones.",
+    "Private helper/journal hashes identify retained evidence; public metadata alone does not authenticate operator observations."
+  ]
+}

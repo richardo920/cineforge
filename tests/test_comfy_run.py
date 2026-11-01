@@ -74,6 +74,7 @@ class WireFixture:
         self.mode, self.failure = mode, failure
         self.schema_failure = False
         self.on_submit = None
+        self.history_graph_change = None
 
     def request(self, method, path, body=None, *, timeout_seconds, max_bytes):
         self.calls.append((method, path, copy.deepcopy(body), timeout_seconds, max_bytes))
@@ -99,13 +100,20 @@ class WireFixture:
         elif path.startswith("/history/"):
             value = {}
             if self.mode in ("success", "error", "cancelled"):
+                history_graph = copy.deepcopy(self.graph)
+                if self.history_graph_change:
+                    self.history_graph_change(history_graph)
                 value = {IDENTITY: {
-                    "prompt": [0, IDENTITY, self.graph, {}, ["47"]],
+                    "prompt": [0, IDENTITY, history_graph, {}, ["47"]],
                     "status": {"status_str": "success" if self.mode == "success" else "error",
                                "completed": self.mode == "success", "messages":
                                [["execution_interrupted", {}]] if self.mode == "cancelled" else []},
                     "outputs": {"47": {"images": [{"filename": "fixture.webm",
-                                                    "subfolder": "", "type": "output"}]}},
+                                                    "subfolder": "", "type": "output",
+                                                    "metadata": {"kind": "video", "width": 832,
+                                                                 "height": 480, "duration": 2.063,
+                                                                 "fps": 16.0}}],
+                                       "animated": [True]}},
                 }}
         elif path == "/queue":
             value = {"queue_running": [[0, IDENTITY]] if self.mode == "running" else [],
@@ -125,7 +133,7 @@ class ComfyAdmissionTests(unittest.TestCase):
         self.selection = load_comfy_selection(LEDGER)
         self.graph = json.loads(self.selection.graph_json)
 
-    def test_approved_snapshot_is_immutable_and_not_yet_measured(self):
+    def test_approved_snapshot_is_immutable_and_requires_per_run_opt_in(self):
         data = self.selection.declarations
         self.assertFalse(data["readiness"]["live_ready"])
         self.assertFalse(data["approval"]["live_execution"])
@@ -200,6 +208,19 @@ class ComfyAdmissionTests(unittest.TestCase):
             with self.subTest(data=data), self.assertRaises(ComfyPolicyError):
                 WorkerVerification.from_dict(data).require_matches(self.selection)
 
+    def test_measured_cuda_memory_is_never_rounded_up_or_used_for_another_gpu(self):
+        record = worker_record(self.selection)
+        record["gpu"]["memory_mib"] = 24082
+        worker = WorkerVerification.from_dict(record)
+        worker.require_matches(self.selection)
+        self.assertEqual(worker.record["gpu"]["memory_mib"], 24082)
+        record["gpu"]["memory_mib"] = 24081
+        with self.assertRaises(ComfyPolicyError):
+            WorkerVerification.from_dict(record).require_matches(self.selection)
+        record["gpu"].update(memory_mib=24082, name="NVIDIA RTX 3090")
+        with self.assertRaises(ComfyPolicyError):
+            WorkerVerification.from_dict(record).require_matches(self.selection)
+
 
 class ComfyRunTests(unittest.TestCase):
     def setUp(self):
@@ -235,6 +256,46 @@ class ComfyRunTests(unittest.TestCase):
         with self.assertRaises(ComfyRunError):
             self.execute()
         self.assertEqual(sum(c[1] == "/prompt" for c in self.wire.calls), 1)
+
+    def test_observed_upstream_float_coercions_persist_success_without_changing_template(self):
+        # These exact five coercions occurred in the approved M2.4 server history.
+        # Pinned execution.py:1008-1013 writes int()/float() casts back into inputs.
+        fields = (("3", "cfg"), ("3", "denoise"), ("47", "crf"),
+                  ("47", "fps"), ("48", "shift"))
+
+        def coerce(graph):
+            for node, field in fields:
+                graph[node]["inputs"][field] = float(graph[node]["inputs"][field])
+
+        original = self.selection.graph_json
+        self.wire.history_graph_change = coerce
+        manifest = self.execute()
+        self.assertEqual(manifest.shot_runs[0].status, RunStatus.SUCCEEDED)
+        self.assertEqual(self.selection.graph_json, original)
+        for node, field in fields:
+            self.assertIs(type(self.wire.graph[node]["inputs"][field]), int)
+        self.assertEqual(sum(c[1] == "/prompt" for c in self.wire.calls), 1)
+        self.assertEqual((self.output / manifest.artifacts[0].uri).read_bytes(), PAYLOAD)
+
+    def test_history_bool_numeric_string_structure_or_value_changes_still_fail(self):
+        changes = (
+            lambda g: g["3"]["inputs"].update(denoise=True),
+            lambda g: g["3"]["inputs"].update(cfg=6.000000000000001),
+            lambda g: g["3"]["inputs"].update(cfg="6.0"),
+            lambda g: g["3"]["inputs"].update(extra=0),
+            lambda g: g["3"]["inputs"].update(positive=[0, "6"]),
+            lambda g: g["3"]["inputs"].update(positive=["6", 0, 0]),
+        )
+        for index, change in enumerate(changes):
+            with self.subTest(index=index):
+                self.wire = WireFixture(self.selection)
+                self.wire.history_graph_change = change
+                self.output = self.root / f"altered-{index}"
+                with self.assertRaises(ComfyRunError):
+                    self.execute()
+                journal = json.loads((self.output / "run.json").read_text())
+                self.assertEqual(journal["outcome"], "incomplete")
+                self.assertNotIn("manifest", journal)
 
     def test_default_opt_in_wrong_plan_or_endpoint_rejects_before_io(self):
         for options in ({"allow_live": False}, {"endpoint": "http://public.example"},
