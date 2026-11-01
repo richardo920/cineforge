@@ -2,7 +2,7 @@
 
 Private foundation for a modular AI filmmaking platform: brief → screenplay → storyboard → shots → edit → sound → review → delivery.
 
-**Status:** strict versioned production metadata, declared device/model selection, and a deterministic offline mock runner. No media generation, paid API calls, or GPU provisioning.
+**Status:** strict versioned production metadata, declared device/model selection, and a deterministic offline mock runner with local checkpoints and resume. No media generation, paid API calls, or GPU provisioning.
 
 ## Quick start
 
@@ -13,6 +13,8 @@ python -m pip install -e .
 cineforge --version
 cineforge validate-plan examples/synthetic-plan.json
 cineforge mock-run examples/synthetic-plan.json --run-id demo-run
+cineforge mock-run examples/synthetic-plan.json --output-dir ./demo-run
+cineforge mock-run examples/synthetic-plan.json --output-dir ./demo-run --resume
 python -m unittest discover -s tests -v
 ```
 
@@ -20,7 +22,11 @@ Python 3.11+. Runtime has no third-party dependencies. `.env.example` lists futu
 
 The example wraps a `ProjectPlan` in `{schema_version: 1, plan, models, devices}` with explicit synthetic declarations; see its fields for the strict input schema. `validate-plan` checks the entire wrapper and emits its canonical domain `ProjectPlan`; `mock-run` consumes the wrapper and emits a canonical `RunManifest` only after all shots succeed.
 
-Both commands reject malformed UTF-8/JSON, unknown fields/references, invalid model metadata, and incompatible devices before submission. Mock artifacts are ephemeral metadata (`memory://`); output files and resume are not implemented. Identical inputs produce identical output; `--run-id` overrides the default input digest.
+Both commands reject malformed UTF-8/JSON, unknown fields/references, invalid model metadata, and incompatible devices before submission. Without `--output-dir`, artifacts are ephemeral metadata (`memory://`). A dedicated output directory stores `checkpoint.json` (full inputs and versioned manifest) plus checksum-named JSON payloads; `--resume` verifies all completed bytes before skipping them. Identical inputs produce identical output; `--run-id` overrides the default input digest.
+
+Persistence requires a local POSIX filesystem with `flock`, no-follow file opens, atomic rename, and `fsync`; another writer fails immediately. Symlink ancestors/files, hardlinks, unrelated files, changed inputs, and corrupt/missing completed artifacts are rejected. Locks coordinate cooperating processes on one host; network filesystems and hostile directory writers are unsupported.
+
+Failed attempts remain in the manifest; resume retries only unfinished/failed shots. Interrupted attempts replay the deterministic fake provider with the same identity; this recovery guarantee applies only to synthetic mock jobs. Artifact bytes precede the atomic success checkpoint; interrupted temporary files and valid unreferenced payloads can remain after a crash.
 
 ## CI guards
 
@@ -30,7 +36,7 @@ Dependency review also queries advisory services in CI (network required; failur
 
 ## Layout
 
-- `src/cineforge/`: contracts, device declarations, fake execution provider, and CLI.
+- `src/cineforge/`: contracts, device declarations, fake execution provider, local storage, and CLI.
 - `tests/`: offline smoke tests; `.github/workflows/ci.yml`: CI.
 - `AGENTS.md`: contributor rules and agent review expectations.
 - [Design overview](docs/design/overview.md): vision, file structure, and subsystem contracts.

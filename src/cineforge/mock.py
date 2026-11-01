@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -167,10 +168,15 @@ def mock_idempotency_key(run_id: str, request: ExecutionRequest) -> str:
     return f"mock-{hashlib.sha256(value.encode('utf-8')).hexdigest()}"
 
 
-def execute_mock(plan: MockPlan, *, run_id: str | None = None) -> MockRun:
+def execute_mock(plan: MockPlan, *, run_id: str | None = None,
+                 output_dir: str | Path | None = None, resume: bool = False) -> MockRun:
     """Run the fake provider with bounded polling; return metadata and ephemeral JSON bytes."""
     requests = plan.preflight()
     identity = mock_run_id(plan, run_id=run_id)
+    if type(resume) is not bool or (resume and output_dir is None):
+        raise ContractError("resume requires an output directory")
+    if output_dir is not None:
+        return _execute_stored(plan, identity, requests, output_dir, resume=resume)
     provider = FakeExecutionProvider()
     results = []
     for request in requests:
@@ -188,3 +194,72 @@ def execute_mock(plan: MockPlan, *, run_id: str | None = None) -> MockRun:
         artifacts=tuple(result.artifact for result in results),
     )
     return MockRun(manifest, tuple(results))
+
+
+def _execute_stored(plan: MockPlan, identity: str, requests: tuple[ExecutionRequest, ...],
+                    output_dir: str | Path, *, resume: bool) -> MockRun:
+    from cineforge.storage import LocalRunStore
+
+    with LocalRunStore(output_dir) as store:
+        manifest = store.start(plan, identity, resume=resume)
+        provider = FakeExecutionProvider()
+        runs = list(manifest.shot_runs)
+        artifacts = list(manifest.artifacts)
+
+        def checkpoint() -> RunManifest:
+            current = RunManifest(run_id=identity, plan=plan.plan, shot_runs=tuple(runs),
+                                  artifacts=tuple(artifacts))
+            store.checkpoint(plan, current)
+            return current
+
+        for base in requests:
+            history = [run for run in runs if run.shot_id == base.shot.shot_id]
+            previous = history[-1] if history else None
+            if previous is not None and previous.status == RunStatus.SUCCEEDED:
+                continue
+            attempt = (1 if previous is None else previous.attempt +
+                       (previous.status in (RunStatus.FAILED, RunStatus.CANCELLED)))
+            request = replace(base, attempt=attempt)
+            run = provider.submit(request, mock_idempotency_key(identity, request))
+            if previous is not None and previous.attempt == attempt:
+                if (run.job_id, run.provider_id) != (previous.job_id, previous.provider_id):
+                    raise ProviderError("replayed mock job identity differs from checkpoint")
+                index = runs.index(previous)
+                runs[index] = run
+            else:
+                index = len(runs)
+                runs.append(run)
+            checkpoint()
+            for _ in range(2):
+                try:
+                    run = provider.status(run.job_id)
+                except Exception as exc:
+                    run = replace(run, status=RunStatus.FAILED,
+                                  finished_at=datetime.now(timezone.utc).isoformat(),
+                                  error=f"mock provider error: {type(exc).__name__}")
+                    runs[index] = run
+                    checkpoint()
+                    raise ProviderError(run.error) from exc
+                if run.status == RunStatus.SUCCEEDED:
+                    break
+                runs[index] = run
+                checkpoint()
+                if run.status in (RunStatus.FAILED, RunStatus.CANCELLED):
+                    break
+            if run.status != RunStatus.SUCCEEDED:
+                if run.status not in (RunStatus.FAILED, RunStatus.CANCELLED):
+                    runs[index] = provider.cancel(run.job_id)
+                    checkpoint()
+                raise ProviderError(f"mock job did not succeed: {run.status.value}")
+            result = provider.result(run.job_id)
+            artifact = store.put(result)
+            artifacts.append(artifact)
+            runs[index] = result.run
+            manifest = checkpoint()
+        manifest = RunManifest(run_id=identity, plan=plan.plan, shot_runs=tuple(runs),
+                               artifacts=tuple(artifacts))
+        results = tuple(ExecutionResult(
+            next(run for run in runs if artifact.artifact_id in run.artifact_ids),
+            artifact, store.payload(artifact),
+        ) for artifact in artifacts)
+        return MockRun(manifest, results)
