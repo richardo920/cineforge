@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import sys
 from pathlib import Path
 
+from cineforge.native_remote_package import native_package
 from cineforge.private_store import read_private_input
 
 _PROFILE_IMPORT = b"from cineforge.worker_profiles import I2V_WORKER, S2V_WORKER, T2V_WORKER, WorkerProfile\n"
@@ -39,20 +41,32 @@ def worker_source() -> bytes:
             raise ValueError
         helpers = b""
         for name, imports in (
-            ("audio_pcm.py", ()),
+            ("native_speech_pins.py", ()),
+            ("native_remote_plan.py", (b"from cineforge.native_speech_pins import BASE_FILES, DESIGN_FILES, RUNTIME_DISTRIBUTIONS, SDK_FILES\n",)),
+            ("native_remote_bootstrap.py", (b"from cineforge.native_remote_plan import (\n    NR_BLOB_MAX,\n    NR_CHUNK,\n    nr_digest,\n    nr_encode,\n    nr_hash,\n    nr_json,\n    nr_token,\n)\n", b"from cineforge.worker_bootstrap import bounded_process\n",)),
+            ("audio_pcm.py", ()) ,
             ("paired_media.py", (b"from cineforge.audio_pcm import inspect_pcm16_wav\n",)),
             ("s2v_stage.py", (
                 b"from cineforge.paired_media import PNG_MAX_BYTES, SPEECH_MAX_BYTES, image_metadata, speech_metadata\n",
                 b"from cineforge.worker_bootstrap import BootstrapError, encode, private_write\n")),
         ):
             helper = read_private_input(root / name, max_bytes=MAX_SOURCE_BYTES)
-            if helper.count(_FUTURE) != 1:
+            if helper.count(_FUTURE) != (0 if name == "native_speech_pins.py" else 1):
                 raise ValueError
             for dependency in imports:
                 if helper.count(dependency) != 1:
                     raise ValueError
                 helper = helper.replace(dependency, b"")
             helpers += helper.replace(_FUTURE, b"") + b"\n"
+        package, pins = native_package()
+        helpers = helpers.replace(b'NR_PACKAGE_SHA256 = ""',
+            ("NR_PACKAGE_SHA256 = " + repr(hashlib.sha256(package).hexdigest())).encode())
+        helpers = helpers.replace(b"NR_PACKAGE_FILES: tuple[tuple[str, int, str], ...] = ()",
+            ("NR_PACKAGE_FILES = " + repr(pins)).encode())
+        native_import = b"        from cineforge.native_remote_bootstrap import nr_dispatch\n"
+        if bootstrap.count(native_import) != 1:
+            raise ValueError
+        bootstrap = bootstrap.replace(native_import, b"")
         staging_import = b"        from cineforge.s2v_stage import paired_transfer\n"
         if bootstrap.count(staging_import) != 1:
             raise ValueError

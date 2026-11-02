@@ -172,7 +172,8 @@ def clean_environment() -> dict[str, str]:
 def bounded_process(command: list[str], *, timeout: float, cwd: Path | None = None,
                     payload: bytes | None = None, max_output: int = 65536,
                     check: Any = None, environment: dict[str, str] | None = None,
-                    decode_setup_failure: bool = False) -> bytes:
+                    decode_setup_failure: bool = False,
+                    absolute_deadline: float | None = None) -> bytes:
     """Bound wall time and buffered bytes; kill this process group on every failure."""
     if (type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0
             or type(max_output) is not int or not 1 <= max_output <= 1024*1024
@@ -183,7 +184,14 @@ def bounded_process(command: list[str], *, timeout: float, cwd: Path | None = No
     selector: selectors.BaseSelector | None = None
     # A failed clock read cannot strand a newly spawned child; startup counts too.
     deadline = time.monotonic() + timeout
+    if absolute_deadline is not None:
+        if type(absolute_deadline) not in (int, float) or not math.isfinite(absolute_deadline):
+            raise BootstrapError("invalid absolute worker deadline")
+        deadline = min(deadline, absolute_deadline)
+    result = b""
     try:
+        if time.monotonic() >= deadline:
+            raise BootstrapError("worker process deadline exhausted")
         process = subprocess.Popen(command, cwd=cwd,
             env=clean_environment() if environment is None else environment,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -235,7 +243,7 @@ def bounded_process(command: list[str], *, timeout: float, cwd: Path | None = No
             raise BootstrapError("worker process did not complete", reason="process_failed")
         if check is not None:
             check()
-        return bytes(output)
+        result = bytes(output)
     finally:
         # A completed parent can leave descendants holding its pipes open. Always
         # tear down the dedicated group; nonblocking pipes cannot hold close() hostage.
@@ -257,6 +265,10 @@ def bounded_process(command: list[str], *, timeout: float, cwd: Path | None = No
                     finally:
                         if process.stdout is not None:
                             process.stdout.close()
+
+    if absolute_deadline is not None and time.monotonic() >= deadline:
+        raise BootstrapError("worker process cleanup exceeded absolute deadline")
+    return result
 
 
 def private_write(root: Path, name: str, payload: bytes, *, replace: bool = False) -> None:
@@ -870,6 +882,11 @@ def dispatch(request: dict[str, Any]) -> dict[str, Any]:
     if hashlib.sha256((root / "guard.py").read_bytes()).hexdigest() != request["guard_sha256"]:
         raise BootstrapError("worker guardian source changed")
     guard_alive(root, pid)
+    if operation.startswith("native_"):
+        if profile is None or profile["id"] != S2V_WORKER.profile_id:
+            raise BootstrapError("native speech requires the closed M5 service profile")
+        from cineforge.native_remote_bootstrap import nr_dispatch
+        return nr_dispatch(request, deadline)
     if operation == "heartbeat":
         heartbeat(root, request["plan"])
         return {"status": "heartbeat"}
@@ -902,6 +919,9 @@ def main() -> int:
         def expire(_signum: int, _frame: Any) -> None:
             raise BootstrapError("worker absolute operation deadline exceeded", reason="timeout")
         signal.signal(signal.SIGALRM, expire)
+        if str(request.get("operation", "")).startswith("native_"):
+            signal.signal(signal.SIGHUP, expire)
+            signal.signal(signal.SIGTERM, expire)
         signal.setitimer(signal.ITIMER_REAL, timeout)
         answer = dispatch(request)
     except (Exception, KeyboardInterrupt) as error:

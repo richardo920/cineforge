@@ -1,0 +1,341 @@
+"""Fixed stdlib transfer bootstrap. Included verbatim in the guarded SSH bundle."""
+
+from __future__ import annotations
+
+import base64
+import fcntl
+import hashlib
+import importlib
+import math
+import os
+import platform
+import re
+import stat
+import sys
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any
+
+from cineforge.native_remote_plan import (
+    NR_BLOB_MAX,
+    NR_CHUNK,
+    nr_digest,
+    nr_encode,
+    nr_hash,
+    nr_json,
+    nr_token,
+)
+from cineforge.worker_bootstrap import bounded_process
+
+# Replaced by worker_bundle with identities of the complete installed first party.
+NR_PACKAGE_SHA256 = ""
+NR_PACKAGE_FILES: tuple[tuple[str, int, str], ...] = ()
+
+
+def nr_private(path: Path, *, directory: bool = False) -> os.stat_result:
+    info = path.lstat()
+    if (
+        info.st_uid != os.getuid()
+        or info.st_mode & 0o077
+        or info.st_nlink != 1
+        and not directory
+        or (not stat.S_ISDIR(info.st_mode) if directory else not stat.S_ISREG(info.st_mode))
+    ):
+        raise ValueError("unsafe remote speech storage")
+    return info
+
+
+def nr_root(session: str, *, create: bool = False) -> Path:
+    if type(session) is not str or not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", session):
+        raise ValueError("invalid remote speech session")
+    parent = Path("/root")
+    info = parent.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:
+        raise ValueError("unsafe remote speech ancestor")
+    root = parent / ("cineforge-native-m5-" + session)
+    if create:
+        root.mkdir(mode=0o700)
+    nr_private(root, directory=True)
+    return root
+
+
+def nr_read(path: Path, *, maximum: int = NR_BLOB_MAX) -> bytes:
+    before = nr_private(path)
+    if before.st_size > maximum:
+        raise ValueError("remote speech data exceeds bound")
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        actual = os.fstat(fd)
+        raw = bytearray()
+        while True:
+            block = os.read(fd, min(65536, maximum + 1 - len(raw)))
+            if not block:
+                break
+            raw.extend(block)
+            if len(raw) > maximum:
+                raise ValueError("remote speech data exceeds bound")
+        after = os.fstat(fd)
+
+        def identity(value: os.stat_result) -> tuple[int, ...]:
+            return (
+                value.st_dev,
+                value.st_ino,
+                value.st_size,
+                value.st_mtime_ns,
+                value.st_ctime_ns,
+                value.st_nlink,
+                value.st_mode,
+            )
+
+        if (
+            identity(before) != identity(actual)
+            or identity(actual) != identity(after)
+            or identity(after) != identity(path.lstat())
+        ):
+            raise ValueError("remote speech storage changed")
+        return bytes(raw)
+    finally:
+        os.close(fd)
+
+
+def nr_write(path: Path, raw: bytes) -> None:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        with os.fdopen(fd, "wb", closefd=False) as stream:
+            stream.write(raw)
+            stream.flush()
+            os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+@contextmanager
+def nr_lock(root: Path) -> Iterator[None]:
+    path = root / "operation.lock"
+    before = nr_private(path)
+    fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW)
+    try:
+        if os.fstat(fd).st_ino != before.st_ino:
+            raise ValueError("remote speech operation lock changed")
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield
+    finally:
+        os.close(fd)
+
+
+def nr_check(deadline: float) -> None:
+    if time.monotonic() >= deadline:
+        raise ValueError("remote speech deadline exhausted")
+
+
+def nr_package(root: Path, *, install: bool = False) -> Path:
+    raw = nr_read(root / "package.blob")
+    if hashlib.sha256(raw).hexdigest() != NR_PACKAGE_SHA256:
+        raise ValueError("remote first party package differs")
+    value = nr_json(raw)
+    if set(value) != {name for name, _, _ in NR_PACKAGE_FILES}:
+        raise ValueError("remote first party closure differs")
+    target = root / "firstparty"
+    if install:
+        target.mkdir(mode=0o700)
+        (target / "cineforge").mkdir(mode=0o700)
+    nr_private(target, directory=True)
+    nr_private(target / "cineforge", directory=True)
+    for name, size, sha in NR_PACKAGE_FILES:
+        data = base64.b64decode(value[name], validate=True)
+        if len(data) != size or hashlib.sha256(data).hexdigest() != sha:
+            raise ValueError("remote first party source differs")
+        path = target / "cineforge" / name
+        if install:
+            nr_write(path, data)
+        elif nr_read(path) != data:
+            raise ValueError("remote first party source changed")
+    if set(p.name for p in (target / "cineforge").iterdir()) != set(value):
+        raise ValueError("remote first party closure changed")
+    return target
+
+
+def nr_preflight(deadline: float) -> dict[str, Any]:
+    # Measurements precede network staging; no Torch/SDK imports or apt fallback.
+    if (
+        sys.implementation.name != "cpython"
+        or sys.version_info[:2] != (3, 11)
+        or sys.platform != "linux"
+        or platform.machine() != "x86_64"
+        or platform.libc_ver()[0] != "glibc"
+        or tuple(int(p) for p in platform.libc_ver()[1].split(".")[:2]) < (2, 28)
+    ):
+        raise ValueError("unsupported fixed native worker ABI")
+    candidates = (
+        "/lib/x86_64-linux-gnu/libseccomp.so.2",
+        "/usr/lib/x86_64-linux-gnu/libseccomp.so.2",
+    )
+    library = next(
+        (str(Path(p).resolve(strict=True)) for p in candidates if Path(p).exists()), None
+    )
+    if library is None:
+        raise ValueError("required native isolation library missing")
+
+    def binary(path: str) -> dict[str, Any]:
+        info = Path(path).lstat()
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_nlink != 1
+            or info.st_mode & 0o022
+            or info.st_uid not in (0, os.getuid())
+            or not 0 < info.st_size <= 1024**3
+        ):
+            raise ValueError("native worker binary is unprotected")
+        sha = hashlib.sha256()
+        with open(path, "rb") as stream:
+            while block := stream.read(1024 * 1024):
+                nr_check(deadline)
+                sha.update(block)
+        return {"path": path, "size_bytes": info.st_size, "sha256": sha.hexdigest()}
+
+    probe = bounded_process(
+        [
+            "/usr/bin/nvidia-smi",
+            "--query-gpu=name,memory.total,compute_cap",
+            "--format=csv,noheader,nounits",
+        ],
+        timeout=min(5, max(0.01, deadline - time.monotonic())),
+        max_output=256,
+        environment={"PATH": "", "LANG": "C"},
+        absolute_deadline=deadline,
+    )
+    gpu = probe.decode("ascii").strip().split(",")
+    if (
+        len(gpu) != 3
+        or gpu[0].strip() != "NVIDIA GeForce RTX 5090"
+        or int(gpu[1].strip()) < 30720
+        or gpu[2].strip() != "12.0"
+    ):
+        raise ValueError("native GPU capability differs from guarded M5 recipe")
+    result = {
+        "interpreter": binary(str(Path(sys.executable).resolve(strict=True))),
+        "seccomp": binary(library),
+        "abi": "cpython311-linux-x86_64-glibc2.28",
+    }
+    nr_check(deadline)
+    return result
+
+
+def nr_dispatch(request: dict[str, Any], deadline: float) -> dict[str, Any]:
+    # The dispatcher already verified guardian source, ownership, profile and plan.
+    now, wall = time.monotonic(), time.time()
+    sent, expiry = request["native_sent_unix"], request["native_expires_unix"]
+    if (
+        type(sent) not in (int, float)
+        or not math.isfinite(sent)
+        or abs(sent - wall) > 5
+        or type(expiry) not in (int, float)
+        or not math.isfinite(expiry)
+    ):
+        raise ValueError("native phase clock or delivery bound exceeded")
+    deadline = min(deadline, now + request["plan"]["stop_at_unix"] - wall - 120)
+    nr_check(deadline)
+    op = request["operation"]
+    session = request["plan"]["session_id"]
+    binding = {
+        "worker": request["plan"]["pod_id"],
+        "session": session,
+        "scope": request["profile"]["scope_sha256"],
+        "guard": request["guard_sha256"],
+        "package": NR_PACKAGE_SHA256,
+        "source": request["native_source_sha256"],
+        "phase_expires_unix": expiry,
+    }
+    nr_hash(binding["source"])
+    if op == "native_preflight":
+        root = nr_root(session, create=True)  # Existing/uncertain setup cannot be restarted.
+        nr_write(root / "operation.lock", b"")
+        nr_write(root / "binding.json", nr_encode(binding))
+        deadline = min(deadline, now + expiry - wall - 5)
+        nr_check(deadline)
+        nr_write(root / "local-cap.json", nr_encode({"deadline": deadline}))
+        result = nr_preflight(deadline)
+        nr_write(root / "preflight.json", nr_encode(result))
+        return dict(result, binding_sha256=nr_digest(binding))
+    root = nr_root(session)
+    if nr_json(nr_read(root / "binding.json")) != binding or (root / "failed").exists():
+        raise ValueError("remote speech session differs or is unresolved")
+    deadline = min(deadline, nr_json(nr_read(root / "local-cap.json"))["deadline"])
+    nr_check(deadline)
+    with nr_lock(root):
+        try:
+            if op in ("native_begin", "native_chunk", "native_finish"):
+                role = request["role"]
+                if role not in ("package", "recipe", "sox", "selection", "input"):
+                    raise ValueError("unsupported remote speech transfer role")
+                token = request["token"]
+                nr_token(token)
+                if role == "input":
+                    blob = root / (token + ".input")
+                else:
+                    blob = root / (role + ".blob")
+                declaration = blob.with_suffix(blob.suffix + ".json")
+                done = blob.with_suffix(blob.suffix + ".done")
+                if op == "native_begin":
+                    size, sha = request["size_bytes"], request["sha256"]
+                    nr_hash(sha)
+                    if type(size) is not int or not 1 <= size <= NR_BLOB_MAX:
+                        raise ValueError("remote speech transfer exceeds bound")
+                    # Input capacity is a fixed reviewed one-design/two-utterance recipe.
+                    if role == "input" and len(list(root.glob("*.input.json"))) >= 3:
+                        raise ValueError("remote speech attempt capacity exhausted")
+                    nr_write(
+                        declaration, nr_encode({"token": token, "size_bytes": size, "sha256": sha})
+                    )
+                    nr_write(blob, b"")
+                else:
+                    item = nr_json(nr_read(declaration))
+                    if item["token"] != token or done.exists():
+                        raise ValueError("remote speech transfer consumed")
+                    if op == "native_chunk":
+                        data = base64.b64decode(request["data"], validate=True)
+                        info = nr_private(blob)
+                        offset = request["offset"]
+                        if (
+                            type(offset) is not int
+                            or info.st_size != offset
+                            or not 0 < len(data) <= NR_CHUNK
+                            or offset + len(data) > item["size_bytes"]
+                        ):
+                            raise ValueError("invalid remote speech chunk")
+                        fd = os.open(blob, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW)
+                        try:
+                            if os.fstat(fd).st_ino != info.st_ino or os.write(fd, data) != len(
+                                data
+                            ):
+                                raise ValueError("remote speech chunk write uncertain")
+                            os.fsync(fd)
+                        finally:
+                            os.close(fd)
+                    else:
+                        data = nr_read(blob)
+                        if (
+                            len(data) != item["size_bytes"]
+                            or hashlib.sha256(data).hexdigest() != item["sha256"]
+                        ):
+                            raise ValueError("remote speech transfer identity differs")
+                        nr_write(done, b"complete")
+                        if role == "package":
+                            nr_package(root, install=True)
+                nr_check(deadline)
+                return {"status": op, "token": token}
+            package = nr_package(root)
+            # Only a fixed module from just-verified first-party bytes is importable.
+            sys.path.insert(0, str(package))
+            implementation = importlib.import_module("cineforge.native_remote_worker")
+            reply: dict[str, Any] = implementation.remote_operation(
+                request, root, deadline, binding
+            )
+            nr_check(deadline)
+            return reply
+        except BaseException:
+            if not (root / "failed").exists():
+                nr_write(root / "failed", b"unresolved; owned Pod deletion required")
+            raise

@@ -88,14 +88,17 @@ def ssh_environment() -> dict[str, str]:
 
 def run_process(command: list[str], *, timeout: float, payload: bytes = b"",
                 check: Callable[[], None] = lambda: None, max_output: int = 65536,
-                decode_setup_failure: bool = False) -> bytes:
+                decode_setup_failure: bool = False,
+                absolute_deadline: float | None = None) -> bytes:
     """No shell; bounded request/response, killed process group on timeout/interruption."""
     failed = False
     answer = None
+    bounds: dict[str, Any] = {} if absolute_deadline is None else {"absolute_deadline": absolute_deadline}
     try:
         answer = worker_bootstrap.bounded_process(command, timeout=timeout, payload=payload,
             max_output=max_output, check=check, environment=ssh_environment(),
-            decode_setup_failure=decode_setup_failure)
+            decode_setup_failure=decode_setup_failure,
+            **bounds)
     except worker_bootstrap.SetupFailure:
         raise
     except (Exception, KeyboardInterrupt):
@@ -251,7 +254,8 @@ class SSHWorker:
             "-o", "ConnectTimeout=5", "-o", "ServerAliveInterval=5",
             "-o", "ServerAliveCountMax=1", "-o", "ExitOnForwardFailure=yes"]
 
-    def _request(self, request: dict[str, Any], timeout: float, *, supervise: bool = True) \
+    def _request(self, request: dict[str, Any], timeout: float, *, supervise: bool = True,
+                 absolute_deadline: float | None = None) \
             -> dict[str, Any]:
         if type(self.selection) is S2VServiceContext:
             self.selection.preflight()
@@ -259,16 +263,27 @@ class SSHWorker:
                        guard_sha256=worker_guard_source_sha256())
         if self._profile is not None:
             request["profile"] = self._profile
-        command = self._command() + [self._host, "python3 -I -c " + shlex.quote(self._source.decode())]
+        native = str(request.get("operation", "")).startswith("native_")
+        if absolute_deadline is not None:
+            timeout = min(timeout, absolute_deadline-time.monotonic())
+            if timeout <= 0:
+                raise WorkerError("absolute SSH deadline exhausted")
+            request["timeout_seconds"] = timeout
+        flags = "python3 -I -B -S -c " if native else "python3 -I -c "
+        command = self._command() + [self._host, flags + shlex.quote(self._source.decode())]
         diagnostic_setup = self._profile is not None and request.get("operation") == "setup"
+        bounds: dict[str, Any] = {} if absolute_deadline is None else {"absolute_deadline": absolute_deadline}
         try:
             raw = run_process(command, timeout=timeout, payload=canonical(request),
                 check=self.check if supervise else lambda: None,
-                **({"decode_setup_failure": True} if diagnostic_setup else {}))
+                **({"decode_setup_failure": True} if diagnostic_setup else {}),
+                **bounds)
         except worker_bootstrap.SetupFailure as error:
             if diagnostic_setup and self.setup_failure is None:
                 self.setup_failure = worker_bootstrap.checked_setup_failure(error.diagnostic)
             raise WorkerError("worker setup failed") from None
+        if absolute_deadline is not None and time.monotonic() >= absolute_deadline:
+            raise WorkerError("absolute SSH deadline exceeded")
         reply = strict_object(raw)
         if diagnostic_setup and set(reply) != {"verification", "runtime"}:
             raise WorkerError("worker setup response rejected")
@@ -435,6 +450,35 @@ class SSHWorker:
             failed = True
         if failed:
             raise WorkerError("current S2V request differs from guarded native worker scope")
+
+    def native_admission(self) -> None:
+        """Fresh work gate only; historical native provenance needs no live worker."""
+        if (type(self.selection) is not S2VServiceContext or self.plan is None
+                or self.runtime_evidence is None):
+            raise WorkerError("native speech needs an existing guarded M5 service")
+        worker_bootstrap.validate_s2v_runtime(self.runtime_evidence)
+        self.selection.preflight()
+        self.check()
+        if self.budget.remaining_seconds(self._key) <= 120:
+            raise WorkerError("insufficient owned lease for native speech")
+
+    def native_request(self, request: dict[str, Any], *, absolute_deadline: float) -> dict[str, Any]:
+        self.native_admission()
+        if (type(absolute_deadline) not in (int, float) or not math.isfinite(absolute_deadline)
+                or request.get("operation") not in {"native_preflight", "native_begin", "native_chunk",
+                    "native_finish", "native_setup", "native_select", "native_invoke", "native_fetch"}):
+            raise WorkerError("invalid fixed native dispatch")
+        timeout = min(1200, absolute_deadline-time.monotonic(),
+                      self.budget.remaining_seconds(self._key)-120)
+        if timeout <= 0:
+            raise WorkerError("native speech absolute deadline exhausted")
+        assert self.plan is not None
+        result = self._request(dict(request, plan=self.plan.to_dict()), timeout,
+                               absolute_deadline=absolute_deadline)
+        self.native_admission()
+        if time.monotonic() >= absolute_deadline:
+            raise WorkerError("native speech absolute deadline exceeded")
+        return result
 
     def run_guarded_native(self, invoke: Callable[[float], Any], *, allow_live: bool = False) -> Any:
         """Trusted native103 callback only, with the existing guard and lease reserve.
