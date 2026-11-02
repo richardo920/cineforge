@@ -172,7 +172,8 @@ class ComfyProviderTests(unittest.TestCase):
             self.provider.submit(replace(self.request, shot=replace(
                 self.request.shot, workflow_digest="0" * 64)), "new-key")
         self.assertEqual(len(self.server.calls), 1)
-        for method in (self.provider.status, self.provider.cancel, self.provider.result):
+        for method in (self.provider.status, self.provider.cancel, self.provider.result,
+                       self.provider.output_descriptor):
             with self.assertRaises(UnknownJobError):
                 method(OTHER)
 
@@ -295,9 +296,52 @@ class ComfyProviderTests(unittest.TestCase):
         with self.assertRaisesRegex(ProviderError, "oversized"):
             provider.result(run.job_id)
 
+    def test_success_near_job_deadline_has_a_separate_fixed_transfer_window(self):
+        now = [0.0]
+        provider = ComfyExecutionProvider(self.server, self.template, job_timeout_seconds=1,
+                                         clock=lambda: now[0])
+        run = provider.submit(self.request, "key")
+        now[0] = .99
+        self.server.mode = "success"
+        self.assertEqual(provider.status(run.job_id).status, RunStatus.SUCCEEDED)
+        now[0] = 1.01
+        result = provider.result(run.job_id)
+        self.assertEqual(result.payload, b"synthetic bytes, no media")
+        self.assertEqual(sum(c[1].startswith("/view?") for c in self.server.calls), 1)
+
+    def test_stalled_transfer_keeps_success_and_does_not_renew_its_deadline(self):
+        now = [0.0]
+
+        class SlowResult(ServerFixture):
+            def request(server, method, path, body=None, **kwargs):
+                raw = super().request(method, path, body, **kwargs)
+                if path.startswith("/view?"):
+                    now[0] += 2.01
+                return raw
+
+        server = SlowResult()
+        provider = ComfyExecutionProvider(server, self.template, result_timeout_seconds=2,
+                                         clock=lambda: now[0])
+        run = provider.submit(self.request, "key")
+        server.mode = "success"
+        provider.status(run.job_id)
+        descriptor = provider.output_descriptor(run.job_id)
+        with self.assertRaises(JobDeadlineError):
+            provider.result(run.job_id)
+        count = len(server.calls)
+        with self.assertRaises(JobDeadlineError):
+            provider.result(run.job_id)
+        self.assertEqual(len(server.calls), count)
+        self.assertEqual(provider.status(run.job_id).status, RunStatus.SUCCEEDED)
+        self.assertEqual(provider.output_descriptor(run.job_id), descriptor)
+        descriptor["filename"] = "changed"
+        self.assertNotEqual(provider.output_descriptor(run.job_id), descriptor)
+
     def test_invalid_bounds_and_strict_json_fail_without_submission(self):
         for options in ({"max_polls": True}, {"max_polls": 0},
                         {"max_result_bytes": 0}, {"job_timeout_seconds": float("nan")},
+                        {"result_timeout_seconds": 0}, {"result_timeout_seconds": True},
+                        {"result_timeout_seconds": float("inf")},
                         {"request_timeout_seconds": True}):
             with self.subTest(options=options), self.assertRaises(ProviderError):
                 ComfyExecutionProvider(self.server, self.template, **options)
