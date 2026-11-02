@@ -22,6 +22,7 @@ from cineforge.devices import Backend, GPUDevice, Precision
 from cineforge.runpod import LeaseSnapshot, WorkerObservation
 from cineforge.runpod_transport import CloudResponse
 from cineforge.ssh_worker import SSHWorker, WorkerError, run_process, ssh_environment
+from cineforge.worker_bundle import worker_source
 from cineforge.worker_guard import GuardReceipt, WorkerGuardPlan, worker_guard_source_sha256
 from cineforge.workflows import canonical
 
@@ -303,7 +304,8 @@ class SSHTests(unittest.TestCase):
             self.assertNotIn(payload["synthetic"], " ".join(command))
             self.assertEqual(json.loads(body)["synthetic"], payload["synthetic"])
             self.assertEqual(hashlib.sha256(worker._source).digest(),
-                             hashlib.sha256(Path("src/cineforge/worker_bootstrap.py").read_bytes()).digest())
+                             hashlib.sha256(worker_source()).digest())
+            self.assertIn("python3 -I -c ", command[-1])
 
 
 if __name__ == "__main__":

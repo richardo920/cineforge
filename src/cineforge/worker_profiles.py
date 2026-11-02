@@ -1,0 +1,59 @@
+"""Reviewed worker capability data; these constants grant no approval or execution authority."""
+
+from typing import NamedTuple
+
+
+class ReferenceRuntime(NamedTuple):
+    torch_version: str
+    maximum_memory_mib: int
+    capability: tuple[int, int]
+    architecture: str
+    minimum_effective_ram_bytes: int
+    minimum_available_ram_bytes: int
+    minimum_filesystem_free_bytes: int
+
+
+class WorkerProfile(NamedTuple):
+    profile_id: str  # Empty means the existing unnamed/default T2V worker.
+    runner_revision: str
+    model_revision: str
+    distribution: str
+    gpu: str
+    minimum_memory_mib: int
+    cuda_version: str
+    maximum_asset_bytes: int
+    files: tuple[tuple[str, int, str], ...]
+    reference_runtime: ReferenceRuntime | None
+
+
+T2V_WORKER = WorkerProfile(
+    profile_id="",
+    runner_revision="6d352802d8f8b9133f664a1757d6c6d26390c335",  # pragma: allowlist secret - public source revision
+    model_revision="123acf1cc74bccbb9bfff8ac1ee72edc08c2341d",  # pragma: allowlist secret - public model revision
+    distribution="Wan-2.1", gpu="NVIDIA GeForce RTX 4090",
+    minimum_memory_mib=24082, cuda_version="12.8",
+    maximum_asset_bytes=8 * 1024**3,
+    # Legacy downloads are selection/approval-bound on the host, not an exact worker manifest.
+    files=(), reference_runtime=None,
+)
+
+I2V_WORKER = WorkerProfile(
+    profile_id="m4-wan22-ti2v5b-5090-v1",
+    runner_revision="6d352802d8f8b9133f664a1757d6c6d26390c335",  # pragma: allowlist secret - public source revision
+    model_revision="ee6f4a40737a995bf5818954cfce6d59443b0f04",  # pragma: allowlist secret - public model revision
+    distribution="Wan-2.2", gpu="NVIDIA GeForce RTX 5090",
+    minimum_memory_mib=30720, cuda_version="12.8",
+    maximum_asset_bytes=10_000_000_000,
+    files=(
+        ("split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors", 9999658848,
+         "456f901338bd9eadbded3828b819109a9b68e8a525ca5cf8d0049a69fcfeca1e"),  # pragma: allowlist secret - public weight digest
+        ("split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors", 6735906897,
+         "c3355d30191f1f066b26d93fba017ae9809dce6c627dda5f6a66eaa651204f68"),  # pragma: allowlist secret - public weight digest
+        ("split_files/vae/wan2.2_vae.safetensors", 1409400960,
+         "e40321bd36b9709991dae2530eb4ac303dd168276980d3e9bc4b6e2b75fed156"),  # pragma: allowlist secret - public weight digest
+    ),
+    reference_runtime=ReferenceRuntime("2.8.0+cu128", 32768, (12, 0), "sm_120",
+                                       64_000_000_000, 32 * 1024**3, 30 * 1024**3),
+)
+
+# END_REVIEWED_WORKER_PROFILES
