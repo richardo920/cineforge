@@ -368,6 +368,16 @@ class AudioAnalysisTests(unittest.TestCase):
             report = self.analyze(tool=FFmpegTool(fifo))
         self.assertEqual(report.measurement_status, "unavailable")
         self.assertNotIn("private-canary", report.to_json())
+        with tempfile.TemporaryDirectory() as directory:
+            missing = Path(directory) / "private-missing-tool-canary"
+            tool = FFmpegTool(missing)
+            try:
+                tool.identify(timeout_seconds=1, max_output_bytes=4096)
+            except AudioAnalysisError as exc:
+                self.assertIsNone(exc.__context__)
+                self.assertNotIn("private-missing-tool-canary", traceback.format_exc())
+            else:
+                self.fail("missing native tool identity was accepted")
 
 
 class AudioProcessTests(unittest.TestCase):

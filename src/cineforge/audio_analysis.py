@@ -305,8 +305,11 @@ class FFmpegTool:
         self._identity: ToolIdentity | None = None
 
     def _binary_digest(self) -> str:
-        descriptor = os.open(self._path, os.O_RDONLY | os.O_NONBLOCK)
+        descriptor = -1
+        value = b""
+        failed = False
         try:
+            descriptor = os.open(self._path, os.O_RDONLY | os.O_NONBLOCK)
             info = os.fstat(descriptor)
             if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= 64 * 1024 * 1024:
                 raise AudioAnalysisError("unsupported audio tool executable")
@@ -314,8 +317,16 @@ class FFmpegTool:
                 value = stream.read(64 * 1024 * 1024 + 1)
             if len(value) != info.st_size:
                 raise AudioAnalysisError("audio tool executable changed")
+        except Exception:
+            failed = True
         finally:
-            os.close(descriptor)
+            if descriptor >= 0:
+                try:
+                    os.close(descriptor)
+                except Exception:
+                    failed = True
+        if failed:
+            raise AudioAnalysisError("audio tool identity unavailable") from None
         return hashlib.sha256(value).hexdigest()
 
     def identify(self, *, timeout_seconds: float, max_output_bytes: int) -> ToolIdentity:
