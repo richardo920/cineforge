@@ -26,6 +26,7 @@ from cineforge.devices import Backend, GPUDevice
 from cineforge.private_store import PrivateRunDirectory, read_private_input
 from cineforge.runpod import LeaseSnapshot, RunpodPodSpec, WorkerObservation
 from cineforge.runpod_transport import CloudTransport
+from cineforge.worker_bundle import worker_source
 from cineforge.worker_guard import GuardReceipt, WorkerGuardPlan, worker_guard_source_sha256
 from cineforge.workflows import canonical, strict_object
 
@@ -132,7 +133,7 @@ class SSHWorker:
         self._endpoint = ""
         self._claimed: PrivateRunDirectory | None = None
         self._enforce: Callable[[], tuple[str, ...]] | None = None
-        self._source = read_private_input(Path(worker_bootstrap.__file__), max_bytes=128*1024)
+        self._source = worker_source()
         from cineforge.conditioning import ConditioningSelection
         self._profile = selection.worker_profile if type(selection) is ConditioningSelection else None
         self.runtime_evidence: dict[str, Any] | None = None
@@ -227,7 +228,7 @@ class SSHWorker:
                        guard_sha256=worker_guard_source_sha256())
         if self._profile is not None:
             request["profile"] = self._profile
-        command = self._command() + [self._host, "python3 -c " + shlex.quote(self._source.decode())]
+        command = self._command() + [self._host, "python3 -I -c " + shlex.quote(self._source.decode())]
         diagnostic_setup = self._profile is not None and request.get("operation") == "setup"
         try:
             raw = run_process(command, timeout=timeout, payload=canonical(request),
