@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -13,11 +14,48 @@ from pathlib import Path
 
 from cineforge.comfy_runtime_launcher import launch_command
 from cineforge.comfy_runtime_worker import _server_start, server_facts
+from cineforge.native_remote_package import native_package
 from cineforge.native_remote_plan import nr_encode
 from cineforge.native_speech_integrity import NativeBinary, _directory, verify_binary
+from cineforge.worker_bundle import MAX_SOURCE_BYTES, worker_source
 
 
 class ClosedComfyProcessTests(unittest.TestCase):
+    def test_actual_linux_quoted_worker_command_and_package_remain_bounded(self):
+        self.assertEqual(sys.platform, "linux", "Linux command evidence cannot be skipped")
+        source = worker_source()
+        package, pins = native_package()
+        command = "python3 -I -B -S -c " + shlex.quote(source.decode())
+        self.assertLessEqual(len(source), MAX_SOURCE_BYTES)
+        self.assertLess(len(command.encode()), 128 * 1024)
+        self.assertLessEqual(len(package), 2 * 1024**2)
+        # Exact SSH remote shell argument/flags, using the explicit OS PATH and
+        # invalid admission data: compile/run first-party bundle, zero setup.
+        result = subprocess.run(
+            ["/bin/sh", "-c", command],
+            input=b"{}",
+            capture_output=True,
+            env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"},
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 2, result.stderr.decode())
+        self.assertEqual(json.loads(result.stdout)["status"], "worker_operation_failed")
+        print(
+            "COMFY_FIRST_PARTY_COMMAND_EVIDENCE="
+            + json.dumps(
+                {
+                    "source_bytes": len(source),
+                    "ssh_shell_argument_bytes": len(command.encode()),
+                    "package_bytes": len(package),
+                    "package_files": len(pins),
+                    "actual_linux_shell_execution": True,
+                    "invalid_admission_refused": True,
+                    "sdk_gpu_model_execution": False,
+                },
+                sort_keys=True,
+            )
+        )
+
     def test_fixed_no_site_process_identity_and_loaded_file_allowlist(self):
         self.assertEqual(sys.platform, "linux", "Linux first-party evidence cannot be skipped")
         with tempfile.TemporaryDirectory(prefix="cf-comfy-linux-process-") as temporary:

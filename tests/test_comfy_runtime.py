@@ -274,12 +274,19 @@ class ComfyExtractionTests(unittest.TestCase):
             (self.target / "site/distutils-precedence.pth").read_bytes(),
             bodies["distutils-precedence.pth"],
         )
-        # Native108's default remains strict, not relaxed to accept Comfy's extras.
+        # Owning root metadata is the distribution identity in both targets;
+        # nested vendor metadata/RECORD/pth bytes remain fully retained data.
         path = self.root / "legacy.whl"
         path.write_bytes(raw)
         path.chmod(0o600)
-        with self.assertRaises(ValueError):
-            _install_wheel(path, self.target, declaration, {}, self.deadline)
+        native = self.root / "native"
+        native.mkdir(mode=0o700)
+        native_manifest = {}
+        _install_wheel(path, native, declaration, native_manifest, self.deadline)
+        self.assertEqual(
+            native_manifest, {name: (len(body), sha(body)) for name, body in bodies.items()}
+        )
+        self.assertTrue(all((native / name).read_bytes() == body for name, body in bodies.items()))
 
     def test_wrong_bytes_metadata_tags_notices_and_record_refuse_before_imports(self):
         raw, declaration, _ = wheel()

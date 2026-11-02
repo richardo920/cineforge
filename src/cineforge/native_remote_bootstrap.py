@@ -32,6 +32,120 @@ from cineforge.worker_bootstrap import bounded_process
 # Replaced by worker_bundle with identities of the complete installed first party.
 NR_PACKAGE_SHA256 = ""
 NR_PACKAGE_FILES: tuple[tuple[str, int, str], ...] = ()
+NR_CAP_POLICY = "m5-fixed-native-facts-v1"
+NR_CAP_ALIASES = tuple(sorted((role, path) for role, paths in (
+    ("interpreter", ("/usr/bin/python3.11",)),
+    ("seccomp", ("/lib/x86_64-linux-gnu/libseccomp.so.2", "/usr/lib/x86_64-linux-gnu/libseccomp.so.2")),
+    ("nvidia_smi", ("/usr/bin/nvidia-smi", "/usr/local/nvidia/bin/nvidia-smi")),
+    ("cuda_driver", ("/usr/lib/x86_64-linux-gnu/libcuda.so.1", "/usr/lib64/libcuda.so.1",
+                     "/usr/local/nvidia/lib64/libcuda.so.1")),
+    ("nvml", ("/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1", "/usr/lib64/libnvidia-ml.so.1",
+              "/usr/local/nvidia/lib64/libnvidia-ml.so.1")),
+) for path in paths))
+NR_CAP_ROOTS = ("/usr/bin/", "/usr/local/nvidia/bin/", "/usr/lib/x86_64-linux-gnu/",
+                "/usr/lib64/", "/usr/local/nvidia/lib64/")
+
+
+def nr_file_identity(info: os.stat_result) -> tuple[int, ...]:
+    return (info.st_dev, info.st_ino, info.st_uid, info.st_mode, info.st_nlink,
+            info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def nr_cap_file(alias: str, deadline: float) -> dict[str, Any]:
+    # The only caller enumerates fixed aliases. Resolve protected symlinks with
+    # bounded descriptor traversal, then hash the actual no-follow owned body.
+    path = alias
+    links: list[tuple[str, tuple[int, ...], str]] = []
+    for _ in range(17):
+        nr_check(deadline)
+        if len(path) > 4096 or not path.startswith("/") or "\x00" in path:
+            raise ValueError("invalid fixed native capability path")
+        parts = path.split("/")[1:]
+        descriptor = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+        restart = False
+        try:
+            for index, name in enumerate(parts):
+                nr_check(deadline)
+                if name in ("", ".", ".."):
+                    raise ValueError("invalid fixed native capability component")
+                before = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                if before.st_uid not in (0, os.getuid()):
+                    raise ValueError("unowned fixed native capability")
+                if stat.S_ISLNK(before.st_mode):
+                    target = os.readlink(name, dir_fd=descriptor)
+                    after = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                    if nr_file_identity(before) != nr_file_identity(after):
+                        raise ValueError("fixed native capability link changed")
+                    links.append((os.path.join("/", *parts[:index+1]), nr_file_identity(before), target))
+                    path = os.path.normpath(os.path.join("/", *parts[:index], target, *parts[index+1:]))
+                    restart = True
+                    break
+                if before.st_mode & 0o022 and not (before.st_uid == 0 and before.st_mode & stat.S_ISVTX):
+                    raise ValueError("unprotected fixed native capability ancestor")
+                if index < len(parts)-1:
+                    child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor)
+                    if (os.fstat(child).st_dev, os.fstat(child).st_ino) != (before.st_dev, before.st_ino):
+                        os.close(child)
+                        raise ValueError("fixed native capability ancestor changed")
+                    os.close(descriptor)
+                    descriptor = child
+                    continue
+                if (not path.startswith(NR_CAP_ROOTS) or not stat.S_ISREG(before.st_mode)
+                        or before.st_nlink != 1 or before.st_mode & 0o022
+                        or not 0 < before.st_size <= 1024**3):
+                    raise ValueError("unprotected fixed native capability body")
+                fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=descriptor)
+                try:
+                    if nr_file_identity(before) != nr_file_identity(os.fstat(fd)):
+                        raise ValueError("fixed native capability changed before read")
+                    sha, count = hashlib.sha256(), 0
+                    while block := os.read(fd, 1024**2):
+                        nr_check(deadline)
+                        count += len(block)
+                        if count > before.st_size:
+                            raise ValueError("fixed native capability grew")
+                        sha.update(block)
+                    after = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                    if (count != before.st_size or nr_file_identity(before) != nr_file_identity(after)
+                            or nr_file_identity(before) != nr_file_identity(os.fstat(fd))):
+                        raise ValueError("fixed native capability changed during read")
+                finally:
+                    os.close(fd)
+                nr_check(deadline)
+                for link, identity, target in links:
+                    if nr_file_identity(os.lstat(link)) != identity or os.readlink(link) != target:
+                        raise ValueError("fixed native capability alias changed during read")
+                    nr_check(deadline)
+                return {"path": path, "size_bytes": count, "sha256": sha.hexdigest()}
+        finally:
+            os.close(descriptor)
+        if not restart:
+            break
+    raise ValueError("fixed native capability link bound exceeded")
+
+
+def nr_capabilities(deadline: float, binding: dict[str, Any]) -> dict[str, Any]:
+    files = []
+    total = 0
+    for role, alias in NR_CAP_ALIASES:
+        row: dict[str, Any] = {"role": role, "alias": alias}
+        try:
+            pin = nr_cap_file(alias, deadline)
+        except FileNotFoundError:
+            row["status"] = "missing"
+        else:
+            total += pin["size_bytes"]
+            if total > 2 * 1024**3:
+                raise ValueError("fixed native measurements exceed bound")
+            row.update(pin, status="measured")
+        files.append(row)
+    nr_check(deadline)
+    interpreter = str(Path(sys.executable).resolve(strict=True))
+    if not any(row["role"] == "interpreter" and row.get("path") == interpreter for row in files):
+        raise ValueError("running interpreter differs from fixed measurement candidate")
+    nr_check(deadline)
+    return {"version": 1, "policy": NR_CAP_POLICY, "binding_sha256": nr_digest(binding),
+            "interpreter_path": interpreter, "files": files}
 
 
 def nr_private(path: Path, *, directory: bool = False) -> os.stat_result:
@@ -224,6 +338,20 @@ def nr_preflight(deadline: float) -> dict[str, Any]:
 
 
 def nr_dispatch(request: dict[str, Any], deadline: float) -> dict[str, Any]:
+    result, cap = _nr_dispatch(request, deadline)
+    # Lock release/descriptor cleanup precede final admission against the exact
+    # derived worker cap. Late facts never become successful acknowledgements.
+    try:
+        nr_check(cap)
+    except BaseException:
+        root = nr_root(request["plan"]["session_id"])
+        if not (root / "failed").exists():
+            nr_write(root / "failed", b"late completion; owned Pod deletion required")
+        raise
+    return result
+
+
+def _nr_dispatch(request: dict[str, Any], deadline: float) -> tuple[dict[str, Any], float]:
     # The dispatcher already verified guardian source, ownership, profile and plan.
     now, wall = time.monotonic(), time.time()
     sent, expiry = request["native_sent_unix"], request["native_expires_unix"]
@@ -249,16 +377,17 @@ def nr_dispatch(request: dict[str, Any], deadline: float) -> dict[str, Any]:
         "phase_expires_unix": expiry,
     }
     nr_hash(binding["source"])
-    if op == "native_preflight":
+    if op == "native_capabilities" and set(request) - {
+            "operation", "plan", "profile", "guard_sha256", "native_source_sha256",
+            "native_sent_unix", "native_expires_unix", "allow_live", "timeout_seconds"}:
+        raise ValueError("fixed native measurements accept no path or command selector")
+    if op == "native_capabilities" or op == "native_preflight" and "capabilities_sha256" not in request:
         root = nr_root(session, create=True)  # Existing/uncertain setup cannot be restarted.
         nr_write(root / "operation.lock", b"")
         nr_write(root / "binding.json", nr_encode(binding))
         deadline = min(deadline, now + expiry - wall - 5)
         nr_check(deadline)
         nr_write(root / "local-cap.json", nr_encode({"deadline": deadline}))
-        result = nr_preflight(deadline)
-        nr_write(root / "preflight.json", nr_encode(result))
-        return dict(result, binding_sha256=nr_digest(binding))
     root = nr_root(session)
     if nr_json(nr_read(root / "binding.json")) != binding or (root / "failed").exists():
         raise ValueError("remote speech session differs or is unresolved")
@@ -266,6 +395,31 @@ def nr_dispatch(request: dict[str, Any], deadline: float) -> dict[str, Any]:
     nr_check(deadline)
     with nr_lock(root):
         try:
+            if op == "native_capabilities":
+                nr_write(root / "capabilities-consumed", b"consumed before fixed file measurement")
+                facts = nr_capabilities(deadline, binding)
+                nr_write(root / "capabilities.json", nr_encode(facts))
+                nr_check(deadline)
+                return facts, deadline
+            if op == "native_preflight":
+                nr_write(root / "preflight-consumed", b"consumed before fixed preflight")
+                if "capabilities_sha256" in request:
+                    nr_hash(request["capabilities_sha256"])
+                    captured = nr_read(root / "capabilities.json")
+                    if (hashlib.sha256(captured).hexdigest() != request["capabilities_sha256"]
+                            or nr_encode(nr_capabilities(deadline, binding)) != captured):
+                        raise ValueError("fixed native capability facts changed before staging")
+                result = nr_preflight(deadline)
+                if "capabilities_sha256" in request:
+                    rows = nr_json(captured)["files"]
+                    for role in ("interpreter", "seccomp"):
+                        if not any(row["role"] == role and row.get("status") == "measured"
+                                   and {k: row[k] for k in ("path", "size_bytes", "sha256")} == result[role]
+                                   for row in rows):
+                            raise ValueError("preflight differs from captured native capability")
+                nr_write(root / "preflight.json", nr_encode(result))
+                nr_check(deadline)
+                return dict(result, binding_sha256=nr_digest(binding)), deadline
             if op.startswith("native_comfy_") or request.get("role") == "comfy":
                 cutoff: Any = request.get("comfy_expires_unix")
                 if (type(cutoff) not in (int, float) or not math.isfinite(cutoff)
@@ -347,7 +501,7 @@ def nr_dispatch(request: dict[str, Any], deadline: float) -> dict[str, Any]:
                         if role == "package":
                             nr_package(root, install=True)
                 nr_check(deadline)
-                return {"status": op, "token": token}
+                return {"status": op, "token": token}, deadline
             package = nr_package(root)
             # Only a fixed module from just-verified first-party bytes is importable.
             sys.path.insert(0, str(package))
@@ -356,7 +510,7 @@ def nr_dispatch(request: dict[str, Any], deadline: float) -> dict[str, Any]:
                 request, root, deadline, binding
             )
             nr_check(deadline)
-            return reply
+            return reply, deadline
         except BaseException:
             if not (root / "failed").exists():
                 nr_write(root / "failed", b"unresolved; owned Pod deletion required")

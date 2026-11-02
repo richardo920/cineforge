@@ -17,12 +17,14 @@ from threading import Lock
 from typing import Any
 
 from cineforge.audio_pcm import PCM16Wave
+from cineforge.native_remote_bootstrap import NR_CAP_ALIASES, NR_CAP_POLICY, NR_CAP_ROOTS
 from cineforge.native_remote_package import native_package
 from cineforge.native_remote_plan import (
     NR_BLOB_MAX,
     NR_CHUNK,
     nr_digest,
     nr_encode,
+    nr_hash,
     nr_json,
     nr_recipe,
 )
@@ -105,6 +107,8 @@ class RemoteNativeSpeechRuntime:
         self._selection: NativeSpeechSelection | None = None
         self._lock = Lock()
         self._staging_attempted = False
+        self._capabilities_attempted = False
+        self._capabilities_sha256: str | None = None
         self._unresolved = False
         self._attempts = 0
         self._used: set[str] = set()
@@ -113,24 +117,13 @@ class RemoteNativeSpeechRuntime:
 
     def _call(self, operation: str, *, controller_deadline: float | None = None,
               **fields: Any) -> dict[str, Any]:
-        if self._unresolved or self._deadline is None or self._binding is None:
-            raise NativeSpeechError("remote native work is unavailable or unresolved")
+        self._bound_worker()
         worker = self._worker
-        assert isinstance(worker.selection, S2VServiceContext)
-        plan = worker.plan
-        if (
-            plan is None
-            or (plan.pod_id, plan.session_id) != (self._binding["worker"], self._binding["session"])
-            or worker_guard_source_sha256() != self._binding["guard"]
-            or hashlib.sha256(worker._source).hexdigest() != self._binding["source"]
-            or worker.selection.approval.subject_sha256 != self._binding["scope"]
-        ):
-            self._unresolved = True
-            raise NativeSpeechError("remote native worker or source scope changed")
         failed = False
         result = None
         try:
             cap = self._deadline
+            assert cap is not None and self._binding is not None
             if controller_deadline is not None:
                 if (type(controller_deadline) not in (int, float)
                         or not math.isfinite(controller_deadline)):
@@ -158,6 +151,120 @@ class RemoteNativeSpeechRuntime:
                 "remote native operation incomplete or unconfirmed", cleanup_uncertain=True
             ) from None
         return result
+
+    def _bound_worker(self) -> None:
+        if self._unresolved or self._deadline is None or self._binding is None:
+            raise NativeSpeechError("remote native work is unavailable or unresolved")
+        worker = self._worker
+        assert isinstance(worker.selection, S2VServiceContext)
+        plan = worker.plan
+        if (
+            plan is None
+            or (plan.pod_id, plan.session_id) != (self._binding["worker"], self._binding["session"])
+            or worker_guard_source_sha256() != self._binding["guard"]
+            or hashlib.sha256(worker._source).hexdigest() != self._binding["source"]
+            or worker.selection.approval.subject_sha256 != self._binding["scope"]
+        ):
+            self._unresolved = True
+            raise NativeSpeechError("remote native worker or source scope changed")
+
+    def _initialize(self, package: bytes, started_deadline: float) -> None:
+        worker = self._worker
+        worker.native_admission()
+        if self._binding is not None:
+            self._bound_worker()
+            if self._binding["package"] != hashlib.sha256(package).hexdigest():
+                raise NativeSpeechError("fixed first party package changed")
+            assert self._deadline is not None
+            self._deadline = min(self._deadline, started_deadline)
+            return
+        plan = worker.plan
+        assert plan is not None
+        self._deadline = min(started_deadline,
+            time.monotonic() + worker.budget.remaining_seconds(worker._key) - 120)
+        self._expires_unix = time.time() + self._deadline - time.monotonic()
+        assert isinstance(worker.selection, S2VServiceContext)
+        self._binding = {"worker": plan.pod_id, "session": plan.session_id,
+            "scope": worker.selection.approval.subject_sha256,
+            "guard": worker_guard_source_sha256(), "package": hashlib.sha256(package).hexdigest(),
+            "source": hashlib.sha256(worker._source).hexdigest(),
+            "phase_expires_unix": self._expires_unix}
+
+    def measure_capabilities(self, *, absolute_deadline: float | None = None) -> dict[str, Any]:
+        """Measure fixed protected native files once; no install, import or readiness.
+
+        This opens the same session used by stage. Operator review time consumes
+        its original cap; later staging cannot renew the channel or repeat facts.
+        """
+        deadline = time.monotonic() + self._timeout
+        for cap in (self._parent_deadline, absolute_deadline):
+            if cap is not None:
+                if type(cap) not in (int, float) or not math.isfinite(cap):
+                    raise NativeSpeechError("invalid native capability deadline")
+                deadline = min(deadline, cap)
+        if time.monotonic() >= deadline:
+            raise NativeSpeechError("native capability deadline exhausted")
+        if not self._lock.acquire(blocking=False):
+            raise NativeSpeechError("concurrent remote native work refused")
+        result = None
+        try:
+            if self._capabilities_attempted or self._staging_attempted or self._unresolved:
+                raise ValueError
+            self._capabilities_attempted = True
+            package, _ = native_package()
+            self._initialize(package, deadline)
+            result = self._call("native_capabilities")
+            self._validate_capabilities(result)
+            result = copy.deepcopy(result)
+        except BaseException:
+            self._unresolved = True
+            result = None
+        finally:
+            self._lock.release()
+        if result is not None:
+            try:
+                self._worker.native_admission()
+                self._bound_worker()
+                assert self._deadline is not None
+                if time.monotonic() >= self._deadline:
+                    raise ValueError
+                self._capabilities_sha256 = nr_digest(result)
+                if time.monotonic() >= self._deadline:
+                    raise ValueError
+            except BaseException:
+                self._unresolved = True
+                result = None
+        if result is None:
+            raise NativeSpeechError("native measurements incomplete or unconfirmed; never replay",
+                                    cleanup_uncertain=True) from None
+        return result
+
+    def _validate_capabilities(self, result: Any) -> None:
+        if (type(result) is not dict or set(result) != {"version", "policy", "binding_sha256", "interpreter_path", "files"}
+                or type(result["version"]) is not int or result["version"] != 1
+                or result["policy"] != NR_CAP_POLICY
+                or result["binding_sha256"] != nr_digest(self._binding)
+                or type(result["files"]) is not list or len(result["files"]) != len(NR_CAP_ALIASES)):
+            raise ValueError("invalid fixed native measurements")
+        total = 0
+        for row, (role, alias) in zip(result["files"], NR_CAP_ALIASES):
+            if type(row) is not dict or row.get("role") != role or row.get("alias") != alias:
+                raise ValueError("fixed native measurement alias differs")
+            if row.get("status") == "missing" and set(row) == {"role", "alias", "status"}:
+                continue
+            if (set(row) != {"role", "alias", "status", "path", "size_bytes", "sha256"}
+                    or row["status"] != "measured" or type(row["path"]) is not str
+                    or not row["path"].startswith(NR_CAP_ROOTS) or len(row["path"]) > 4096
+                    or "\x00" in row["path"] or any(p in ("", ".", "..") for p in row["path"].split("/")[1:])
+                    or type(row["size_bytes"]) is not int or not 0 < row["size_bytes"] <= 1024**3):
+                raise ValueError("invalid fixed native measurement body")
+            nr_hash(row["sha256"])
+            total += row["size_bytes"]
+        if total > 2 * 1024**3:
+            raise ValueError("fixed native measurements exceed bound")
+        if not any(row["role"] == "interpreter" and row.get("path") == result["interpreter_path"]
+                   for row in result["files"]):
+            raise ValueError("fixed running interpreter measurement missing")
 
     def _upload(self, role: str, data: bytes, *, token: str | None = None,
                 comfy_expires_unix: float | None = None) -> str:
@@ -216,10 +323,23 @@ class RemoteNativeSpeechRuntime:
     def stage(self, recipe: dict[str, Any], built_sox_wheel: bytes) -> dict[str, Any]:
         if not self._lock.acquire(blocking=False):
             raise NativeSpeechError("concurrent remote native work refused")
+        result = None
         try:
-            return self._stage(recipe, built_sox_wheel)
+            result = self._stage(recipe, built_sox_wheel)
         finally:
             self._lock.release()
+        failed = False
+        try:
+            self._worker.native_admission()
+            self._bound_worker()
+            if self._deadline is None or time.monotonic() >= self._deadline:
+                raise ValueError
+        except BaseException:
+            self._unresolved = True
+            failed = True
+        if failed or result is None:
+            raise NativeSpeechError("native staging exceeded final admission", cleanup_uncertain=True)
+        return result
 
     def _stage(self, recipe: dict[str, Any], built_sox_wheel: bytes) -> dict[str, Any]:
         """Network staging opt-in. Returns measurements, never a selected execution gate."""
@@ -240,27 +360,12 @@ class RemoteNativeSpeechRuntime:
             package, _ = native_package()
         except BaseException:
             raise NativeSpeechError("fixed first party native package unavailable") from None
-        worker = self._worker
-        worker.native_admission()
-        plan = worker.plan
-        assert plan is not None
-        self._deadline = min(
-            started_deadline, time.monotonic() + worker.budget.remaining_seconds(worker._key) - 120
-        )
-        self._expires_unix = time.time() + self._deadline - time.monotonic()
-        assert isinstance(worker.selection, S2VServiceContext)
-        self._binding = {
-            "worker": plan.pod_id,
-            "session": plan.session_id,
-            "scope": worker.selection.approval.subject_sha256,
-            "guard": worker_guard_source_sha256(),
-            "package": hashlib.sha256(package).hexdigest(),
-            "source": hashlib.sha256(worker._source).hexdigest(),
-            "phase_expires_unix": self._expires_unix,
-        }
+        self._initialize(package, started_deadline)
         self._staging_attempted = True
         try:
-            preflight = self._call("native_preflight")
+            fields: dict[str, Any] = ({} if self._capabilities_sha256 is None
+                                     else {"capabilities_sha256": self._capabilities_sha256})
+            preflight = self._call("native_preflight", **fields)
             if (
                 set(preflight) != {"interpreter", "seccomp", "abi", "binding_sha256"}
                 or preflight["binding_sha256"] != nr_digest(self._binding)
@@ -281,7 +386,7 @@ class RemoteNativeSpeechRuntime:
                 raise ValueError
             self._installed = copy.deepcopy(result)
             self._recipe = recipe["reviewed_subject_sha256"]
-            if time.monotonic() >= self._deadline:
+            if self._deadline is None or time.monotonic() >= self._deadline:
                 raise ValueError
             return copy.deepcopy(result)
         except BaseException:

@@ -524,7 +524,7 @@ class SSHWorker:
     def native_request(self, request: dict[str, Any], *, absolute_deadline: float) -> dict[str, Any]:
         self.native_admission()
         if (type(absolute_deadline) not in (int, float) or not math.isfinite(absolute_deadline)
-                or request.get("operation") not in {"native_preflight", "native_begin", "native_chunk",
+                or request.get("operation") not in {"native_capabilities", "native_preflight", "native_begin", "native_chunk",
                     "native_finish", "native_setup", "native_select", "native_invoke", "native_fetch",
                     "native_comfy_install", "native_comfy_model", "native_comfy_setup", "native_comfy_verify"}):
             raise WorkerError("invalid fixed native dispatch")
