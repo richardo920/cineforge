@@ -456,8 +456,11 @@ class SSHWorker:
             if directory is None or not self._control_ready():
                 raise WorkerError("owned SSH control path unavailable")
             control = directory / "c"
-        command = self._command() + ["-S", str(control),
-            "-o", "ControlMaster=no", "-O", operation]
+        # Failed mux HELLO can fall back even with -O. Replace the first value:
+        # appending ProxyCommand would be shadowed by _command's earlier "none".
+        base = ["ProxyCommand=/usr/bin/false" if value == "ProxyCommand=none" else value
+                for value in self._command()]
+        command = base + ["-S", str(control), "-o", "ControlMaster=no", "-O", operation]
         if forward is not None:
             command.extend(["-L", forward])
         command.append(self._host)
@@ -512,7 +515,7 @@ class SSHWorker:
                     listener.bind(("127.0.0.1", 0))
                     port = listener.getsockname()[1]
                 # Native mux acknowledgement proves this master owns the bind.
-                # -O commands fail closed without opening a fallback SSH connection.
+                # The mux-only deny proxy prevents a failed HELLO from connecting directly.
                 self._mux("forward", deadline, f"127.0.0.1:{port}:127.0.0.1:8188")
                 endpoint = f"http://127.0.0.1:{port}"
                 health = ComfyHTTPTransport(endpoint, allow_live=True)
