@@ -21,12 +21,12 @@ from cineforge.audio import (
 )
 from cineforge.audio_pcm import PCM16Wave, PCMError, inspect_pcm16_wav
 from cineforge.characters import CharacterPin, CharacterRegistry, RightsBinding
-from cineforge.contracts import Contract, ContractError, ProjectPlan, _integer, _text
+from cineforge.contracts import Contract, ContractError, ProjectPlan, _identifier, _integer, _text
 from cineforge.rights import RightsLedger, Use
 
-SDK_REVISION = "022e286b98fbec7e1e916cb940cdf532cd9f488e"
+SDK_REVISION = "022e286b98fbec7e1e916cb940cdf532cd9f488e"  # pragma: allowlist secret - public source revision
 BASE_MODEL = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
-BASE_REVISION = "fd4b254389122332181a7c3db7f27e918eec64e3"
+BASE_REVISION = "fd4b254389122332181a7c3db7f27e918eec64e3"  # pragma: allowlist secret - public model revision
 _MAX_BYTES = 16 * 1024 * 1024
 
 
@@ -37,6 +37,16 @@ class SpeechError(ContractError):
 def _instance(value: object, kind: type[object]) -> None:
     if type(value) is not kind:
         raise SpeechError("invalid speech record")
+
+
+def _private_text(value: object) -> None:
+    failed = False
+    try:
+        _text(value, "speech text")
+    except ContractError:
+        failed = True
+    if failed:
+        raise SpeechError("invalid private speech text")
 
 
 def _pcm(payload: bytes, *, mono: bool = False) -> PCM16Wave:
@@ -86,7 +96,9 @@ class SyntheticReferenceInput(_AudioContract):
         if (self.permission.subject.kind != "voice"
                 or self.permission.subject.sha256 != self.source.sha256):
             raise SpeechError("reference permission does not match recording")
-        _text(self.transcript, "reference transcript")
+        _private_text(self.transcript)
+        if len(self.transcript) > 4096:
+            raise SpeechError("reference transcript exceeds adapter limit")
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,8 +149,8 @@ class QwenBaseRequest(_AudioContract):
             raise SpeechError("unsupported Qwen Base translation target or controls")
         if self.language not in ("English", "Chinese"):
             raise SpeechError("unsupported speech language")
-        _text(self.text, "speech text")
-        _text(self.ref_text, "reference transcript")
+        _private_text(self.text)
+        _private_text(self.ref_text)
         if len(self.text) > 4096 or len(self.ref_text) > 4096:
             raise SpeechError("speech text exceeds adapter limit")
         _integer(self.reference_frames, "reference frames", 1, 60 * 48000)
@@ -227,6 +239,7 @@ class QwenBaseSpeechAdapter:
                             (ledger, RightsLedger), (current_picture, RevisionPin),
                             (current_script, RevisionPin)):
             _instance(value, kind)
+        _identifier(utterance_id, "utterance ID")
         if sheet.script.pin() != current_script:
             raise SpeechError("stale dialogue script")
         utterance = next((item for item in sheet.script.utterances
@@ -284,11 +297,15 @@ class QwenBaseSpeechAdapter:
                                  registry=registry, ledger=ledger, current_picture=current_picture,
                                  current_script=current_script)
         wave = _pcm(reference_payload, mono=True)
-        failed = False
+        failed = cancelled = False
         try:
             payload = self._runtime.synthesize(request, wave)
-        except Exception:
+        except KeyboardInterrupt:
+            cancelled = True
+        except BaseException:
             failed = True
+        if cancelled:
+            raise KeyboardInterrupt from None
         if failed:
             raise SpeechError("speech runtime failed")
         fresh = self.translate(sheet, utterance_id, reference, reference_payload, plan=plan,
