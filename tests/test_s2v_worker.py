@@ -77,7 +77,7 @@ class S2VWorkerTests(unittest.TestCase):
                 bootstrap.download(self.root, audio, time.monotonic() + 5, profile=data)
             self.assertEqual(opener.call_count, 1)
 
-    def test_setup_consumes_before_hardware_failure_and_never_installs_or_downloads(self):
+    def test_legacy_m5_setup_refuses_before_any_ambient_import_or_effect(self):
         gate, _ = context(self.root)
         request = {"profile": gate.service.worker_profile,
             "plan": {"session_id": "fixture"}, "selection": select_s2v(gate).declarations,
@@ -89,11 +89,11 @@ class S2VWorkerTests(unittest.TestCase):
                 patch.object(bootstrap, "download") as download:
             with self.assertRaises(bootstrap.SetupFailure):
                 bootstrap.setup(request, time.monotonic() + 30)
-            self.assertTrue((self.root / "s2v-setup-consumed.json").is_file())
-            self.assertEqual(probe.call_count, 1)
+            self.assertFalse((self.root / "s2v-setup-consumed.json").exists())
+            self.assertEqual(probe.call_count, 0)
             with self.assertRaises(bootstrap.SetupFailure):
                 bootstrap.setup(request, time.monotonic() + 30)
-            self.assertEqual(probe.call_count, 1)
+            self.assertEqual(probe.call_count, 0)
             process.assert_not_called()
             download.assert_not_called()
 
@@ -117,10 +117,9 @@ class S2VWorkerTests(unittest.TestCase):
         resources = {key: runtime[key] for key in bootstrap.M4_RESOURCE_FIELDS}
         with patch.object(bootstrap, "bounded_process", side_effect=process), \
                 patch.object(bootstrap, "resource_evidence", return_value=resources):
-            measured = bootstrap.runtime_probe(10, profile=self.service.worker_profile)
-        self.assertEqual(measured, runtime)
-        self.assertIn("dtype=torch.bfloat16", commands[0][-1])
-        self.assertIn("compute_precision", commands[0][-1])
+            with self.assertRaises(bootstrap.BootstrapError):
+                bootstrap.runtime_probe(10, profile=self.service.worker_profile)
+        self.assertEqual(commands, [])  # M5 real kernel proof belongs to its closed launcher.
 
     def test_installed_stdlib_worker_bundle_handles_ping_without_package_imports(self):
         source = worker_source()

@@ -256,7 +256,8 @@ def verify_binary(binary: NativeBinary, deadline: float) -> None:
         os.close(descriptor)
 
 
-def verify_tree(tree: NativeTree, deadline: float, *, distributions: bool = False) -> str:
+def verify_tree(tree: NativeTree, deadline: float, *, distributions: bool = False,
+                empty_directories: frozenset[str] = frozenset()) -> str:
     """Check exact tree through no-follow descriptors; retain no private filenames in errors."""
     expected = {p[0]: p for p in tree.files}
     directories = {""} | {path.rsplit("/", i)[0] for path in expected
@@ -273,7 +274,7 @@ def verify_tree(tree: NativeTree, deadline: float, *, distributions: bool = Fals
             path = prefix + name
             info = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
             if stat.S_ISDIR(info.st_mode):
-                if path not in directories:
+                if path not in directories and path not in empty_directories:
                     raise NativeSpeechError("unexpected speech staging directory")
                 child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
                                 dir_fd=descriptor)

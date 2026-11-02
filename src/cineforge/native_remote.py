@@ -111,7 +111,8 @@ class RemoteNativeSpeechRuntime:
         self._proofs: dict[tuple[str, str, str], RemoteNativeProof] = {}
         self.last_attempt: str | None = None
 
-    def _call(self, operation: str, **fields: Any) -> dict[str, Any]:
+    def _call(self, operation: str, *, controller_deadline: float | None = None,
+              **fields: Any) -> dict[str, Any]:
         if self._unresolved or self._deadline is None or self._binding is None:
             raise NativeSpeechError("remote native work is unavailable or unresolved")
         worker = self._worker
@@ -129,6 +130,14 @@ class RemoteNativeSpeechRuntime:
         failed = False
         result = None
         try:
+            cap = self._deadline
+            if controller_deadline is not None:
+                if (type(controller_deadline) not in (int, float)
+                        or not math.isfinite(controller_deadline)):
+                    raise ValueError
+                cap = min(cap, controller_deadline)
+            if time.monotonic() >= cap:
+                raise ValueError
             result = worker.native_request(
                 dict(
                     fields,
@@ -137,9 +146,9 @@ class RemoteNativeSpeechRuntime:
                     native_sent_unix=time.time(),
                     native_expires_unix=self._expires_unix,
                 ),
-                absolute_deadline=self._deadline,
+                absolute_deadline=cap,
             )
-            if time.monotonic() >= self._deadline:
+            if time.monotonic() >= cap:
                 raise ValueError
         except BaseException:
             failed = True
@@ -150,11 +159,17 @@ class RemoteNativeSpeechRuntime:
             ) from None
         return result
 
-    def _upload(self, role: str, data: bytes, *, token: str | None = None) -> str:
+    def _upload(self, role: str, data: bytes, *, token: str | None = None,
+                comfy_expires_unix: float | None = None) -> str:
         if type(data) is not bytes or not 0 < len(data) <= NR_BLOB_MAX:
             raise NativeSpeechError("remote native input exceeds fixed bound")
         token = uuid.uuid4().hex if token is None else token
-        common = {"role": role, "token": token}
+        common: dict[str, Any] = {"role": role, "token": token}
+        if comfy_expires_unix is not None:
+            if (role != "comfy" or type(comfy_expires_unix) not in (int, float)
+                    or not math.isfinite(comfy_expires_unix)):
+                raise NativeSpeechError("invalid fixed Comfy transfer deadline")
+            common["comfy_expires_unix"] = comfy_expires_unix
 
         def call(operation: str, **fields: Any) -> None:
             reply = self._call(operation, **common, **fields)

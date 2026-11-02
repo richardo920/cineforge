@@ -132,6 +132,7 @@ def _install_wheel(
     declaration: dict[str, Any],
     manifest: dict[str, tuple[int, str]],
     deadline: float,
+    *, top_level_metadata: bool = False,
 ) -> None:
     nr_private(path)
     with zipfile.ZipFile(path) as archive:
@@ -139,8 +140,10 @@ def _install_wheel(
         names = [item.filename for item in infos]
         if len(set(names)) != len(names) or len(infos) > 100000:
             raise ValueError("ambiguous native wheel closure")
-        metadata = [n for n in names if n.endswith(".dist-info/METADATA")]
-        records = [n for n in names if n.endswith(".dist-info/RECORD")]
+        metadata = [n for n in names if n.endswith(".dist-info/METADATA")
+                    and (not top_level_metadata or n.count("/") == 1)]
+        records = [n for n in names if n.endswith(".dist-info/RECORD")
+                   and (not top_level_metadata or n.count("/") == 1)]
         if (
             len(metadata) != 1
             or len(records) != 1
@@ -333,6 +336,16 @@ def remote_operation(
     request: dict[str, Any], root: Path, deadline: float, binding: dict[str, Any]
 ) -> dict[str, Any]:
     op = request["operation"]
+    if op in ("native_comfy_install", "native_comfy_model", "native_comfy_setup", "native_comfy_verify"):
+        from cineforge.comfy_runtime_worker import (
+            current_comfy,
+            install_comfy,
+            setup_comfy,
+            stage_comfy_model,
+        )
+        functions = {"native_comfy_install": install_comfy, "native_comfy_model": stage_comfy_model,
+                     "native_comfy_setup": setup_comfy, "native_comfy_verify": current_comfy}
+        return functions[op](request, root, deadline)
     if op == "native_setup":
         return _setup(root, deadline)
     if op == "native_select":

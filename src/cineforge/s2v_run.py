@@ -121,6 +121,7 @@ def _admit(selection: S2VSelection, verification: WorkerVerification, driver: SS
     validate_s2v_runtime(driver.runtime_evidence)
     selection.require_execution_worker(verification)
     driver.check()
+    driver.verify_comfy_current()
 
 
 def run_s2v(selection: S2VSelection, verification: WorkerVerification, driver: SSHWorker,

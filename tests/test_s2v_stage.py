@@ -20,6 +20,7 @@ from test_s2v_profile import png
 
 from cineforge import s2v_profile as profile
 from cineforge import worker_bootstrap as bootstrap
+from cineforge.comfy_runtime import ClosedComfyRuntime
 from cineforge.runpod import RunpodPodSpec
 from cineforge.s2v import S2VError, digest, select_s2v
 from cineforge.s2v_stage import paired_transfer
@@ -70,6 +71,10 @@ class PairTransferTests(unittest.TestCase):
         driver.plan, driver._key = self.plan, "lease"
         driver.runtime_evidence = self.runtime
         driver._prepared_s2v = worker(self.gate)
+        # This suite's synthetic Comfy wire does not prove an installed runtime.
+        closed = object.__new__(ClosedComfyRuntime)
+        closed.verify = lambda driver, selected, **kw: selected.gate.preflight()
+        driver._closed_comfy, driver._comfy_selection = closed, self.selection
         driver._request = self.rpc
         self.addCleanup(driver.close)
         return driver
@@ -114,12 +119,16 @@ class PairTransferTests(unittest.TestCase):
             requests.append(request)
             raise WorkerError("synthetic setup lost ACK")
         self.driver._request = lost
-        self.static_failure(lambda: self.driver.prepare(self.selection))
+        runtime = object.__new__(ClosedComfyRuntime)  # Explicit trusted synthetic RPC stand-in.
+        runtime._admit = lambda *args: None
+        runtime.prepare = lambda driver, selection, **kw: driver._request({
+            "operation": "native_comfy_setup", "selection": selection.declarations}, 10)
+        self.static_failure(lambda: self.driver.prepare(self.selection, runtime=runtime))
         self.assertEqual(len(requests), 1)
-        self.assertEqual(requests[0]["operation"], "setup")
+        self.assertEqual(requests[0]["operation"], "native_comfy_setup")
         self.assertEqual(requests[0]["selection"], self.selection.declarations)
         self.assertIsNone(self.driver.s2v_verification)
-        self.static_failure(lambda: self.driver.prepare(self.selection))
+        self.static_failure(lambda: self.driver.prepare(self.selection, runtime=runtime))
         self.assertEqual(len(requests), 1)
 
     def test_setup_rechecks_rights_after_reply_before_committing_prepared_worker(self):
@@ -128,7 +137,11 @@ class PairTransferTests(unittest.TestCase):
             self.gate.ledger.revoke(self.gate.model_rights, reason="CANARY")
             return {"verification": worker(self.gate).record, "runtime": self.runtime}
         self.driver._request = reply
-        self.static_failure(lambda: self.driver.prepare(self.selection))
+        runtime = object.__new__(ClosedComfyRuntime)  # Does not claim actual runtime proof.
+        runtime._admit = lambda *args: None
+        runtime.prepare = lambda driver, selection, **kw: driver._request({
+            "operation": "native_comfy_setup", "selection": selection.declarations}, 10)
+        self.static_failure(lambda: self.driver.prepare(self.selection, runtime=runtime))
         self.assertIsNone(self.driver.s2v_verification)
         self.assertTrue(self.driver._s2v_setup_attempted)
 

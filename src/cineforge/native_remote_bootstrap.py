@@ -266,9 +266,31 @@ def nr_dispatch(request: dict[str, Any], deadline: float) -> dict[str, Any]:
     nr_check(deadline)
     with nr_lock(root):
         try:
+            if op.startswith("native_comfy_") or request.get("role") == "comfy":
+                cutoff: Any = request.get("comfy_expires_unix")
+                if (type(cutoff) not in (int, float) or not math.isfinite(cutoff)
+                        or cutoff > expiry):
+                    raise ValueError("invalid fixed Comfy original cap")
+                cap_file = root / "comfy-local-cap.json"
+                if op == "native_begin":
+                    cap: dict[str, Any] = {"expires_unix": cutoff, "deadline": min(deadline, now + cutoff - wall - 5)}
+                    nr_check(cap["deadline"])
+                    nr_write(cap_file, nr_encode(cap))
+                else:
+                    cap = nr_json(nr_read(cap_file))
+                    if cap["expires_unix"] != cutoff:
+                        raise ValueError("fixed Comfy original cap changed")
+                deadline = min(deadline, cap["deadline"])
+                if op.startswith("native_comfy_"):
+                    call_cutoff: Any = request.get("comfy_call_expires_unix")
+                    if (type(call_cutoff) not in (int, float) or not math.isfinite(call_cutoff)
+                            or call_cutoff > cutoff):
+                        raise ValueError("invalid fixed Comfy caller cap")
+                    deadline = min(deadline, now + call_cutoff - wall - 5)
+                nr_check(deadline)
             if op in ("native_begin", "native_chunk", "native_finish"):
                 role = request["role"]
-                if role not in ("package", "recipe", "sox", "selection", "input"):
+                if role not in ("package", "recipe", "sox", "selection", "input", "comfy"):
                     raise ValueError("unsupported remote speech transfer role")
                 token = request["token"]
                 nr_token(token)

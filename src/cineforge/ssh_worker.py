@@ -23,6 +23,7 @@ from typing import Any, Callable, Protocol
 from cineforge import worker_bootstrap, worker_guard
 from cineforge.cloud_budget import CloudBudgetSession
 from cineforge.comfy_policy import ApprovedComfySelection, WorkerVerification
+from cineforge.comfy_runtime import ClosedComfyRuntime
 from cineforge.comfy_transport import ComfyHTTPTransport
 from cineforge.devices import Backend, GPUDevice
 from cineforge.private_store import PrivateRunDirectory, read_private_input
@@ -172,6 +173,8 @@ class SSHWorker:
         self._s2v_consumed: set[str] = set()
         self._s2v_setup_attempted = False
         self._prepared_s2v: WorkerVerification | None = None
+        self._closed_comfy: ClosedComfyRuntime | None = None
+        self._comfy_selection: S2VSelection | None = None
         self.runtime_evidence: dict[str, Any] | None = None
         self.setup_failure: dict[str, Any] | None = None
         self._reference_staged = False
@@ -327,7 +330,7 @@ class SSHWorker:
         runtime = reply["runtime"]
         if self._profile is not None:
             self.runtime_evidence = self._runtime_evidence(runtime,
-                s2v=type(self.selection) is S2VServiceContext)
+                s2v=type(self.selection) is S2VServiceContext, admission=True)
         self.observation = WorkerObservation(GPUDevice(str(snapshot.resource_id), Backend.CUDA,
             runtime["gpu_memory_mib"], frozenset({self.selection.model.required_precision})),
             runtime["gpu_raw_name"])
@@ -360,6 +363,8 @@ class SSHWorker:
         try:
             if self._stop.is_set():
                 raise ValueError
+            if type(self.selection) is S2VServiceContext and worker_source() != self._source:
+                raise ValueError
             # Never hold the tunnel lock across provider/budget locks or callbacks.
             if self._enforce is not None and self._enforce():
                 raise ValueError
@@ -390,7 +395,9 @@ class SSHWorker:
             self._remote_suspended.set()
         return self.plan
 
-    def prepare(self, selection: S2VSelection | None = None) -> WorkerVerification:
+    def prepare(self, selection: S2VSelection | None = None, *,
+                runtime: ClosedComfyRuntime | None = None,
+                absolute_deadline: float | None = None) -> WorkerVerification:
         self.check()
         if self.plan is None:
             raise WorkerError("worker guard not armed")
@@ -399,16 +406,28 @@ class SSHWorker:
             raise WorkerError("insufficient lease time for setup and shot retrieval")
         declarations = self.selection.declarations
         if type(self.selection) is S2VServiceContext:
+            if type(runtime) is not ClosedComfyRuntime:
+                raise WorkerError("M5 requires a separately checked closed Comfy runtime")
             if self._s2v_setup_attempted:
                 raise WorkerError("M5 service setup already attempted; inspect owned worker state")
             self._require_s2v(selection)
             assert selection is not None
             declarations = selection.declarations
+            deadline = time.monotonic() + timeout
+            if absolute_deadline is not None:
+                if type(absolute_deadline) not in (int, float) or not math.isfinite(absolute_deadline):
+                    raise WorkerError("invalid M5 preparation absolute deadline")
+                deadline = min(deadline, absolute_deadline)
+            if time.monotonic() >= deadline:
+                raise WorkerError("M5 preparation original deadline exhausted")
+            runtime._admit(self, deadline)
             # Consume before any model setup/download request; a lost ACK is uncertain.
             self._s2v_setup_attempted = True
-        reply = self._request({"operation": "setup", "plan": self.plan.to_dict(),
-            "selection": declarations, "image_digest": self.spec.image.split("@", 1)[1]},
-            timeout)
+            reply = runtime.prepare(self, selection, deadline=deadline)
+            worker_bootstrap.validate_s2v_runtime(reply["runtime"])
+        else:
+            reply = self._request({"operation": "setup", "plan": self.plan.to_dict(),
+                "selection": declarations, "image_digest": self.spec.image.split("@", 1)[1]}, timeout)
         result = WorkerVerification.from_dict(reply["verification"])
         result.require_matches(self.selection)
         if self._profile is not None:
@@ -419,11 +438,22 @@ class SSHWorker:
             raise WorkerError("worker verification identity differs")
         if type(self.selection) is S2VServiceContext:
             self._require_s2v(selection)
+            if time.monotonic() >= deadline:
+                raise WorkerError("M5 preparation exceeded original deadline")
+            self._closed_comfy, self._comfy_selection = runtime, selection
             self._prepared_s2v = result
         return result
 
     @staticmethod
-    def _runtime_evidence(runtime: dict[str, Any], *, s2v: bool = False) -> dict[str, Any]:
+    def _runtime_evidence(runtime: dict[str, Any], *, s2v: bool = False,
+                          admission: bool = False) -> dict[str, Any]:
+        if s2v and admission and (type(runtime) is not dict or "admission_status" not in runtime):
+            raise WorkerError("M5 arm cannot attest an unreviewed imported runtime")
+        if s2v and type(runtime) is dict and "admission_status" in runtime:
+            worker_bootstrap.validate_s2v_admission(runtime)
+            if len(canonical(runtime)) > 4096:
+                raise WorkerError("M5 hardware admission exceeds bound")
+            return strict_object(canonical(runtime))
         fields = {"python_version", "torch_version", "torchvision_version", "cuda_version",
                   "gpu_raw_name", "gpu_memory_mib", "cuda_available", "arch_list", "capability",
                   "cuda_kernel_ok", "device_count", "nvml_total_mib",
@@ -445,7 +475,7 @@ class SSHWorker:
                     or selection.gate.service != self.selection or self.plan is None
                     or self.runtime_evidence is None):
                 raise ValueError
-            worker_bootstrap.validate_s2v_runtime(self.runtime_evidence)
+            worker_bootstrap.validate_s2v_admission(self.runtime_evidence)
             trace = selection.gate.preflight()
             selection.request(selection.gate.shot)
             if trace["speech_native_proof"]["worker_id"] != self.plan.pod_id:
@@ -460,7 +490,7 @@ class SSHWorker:
         if (type(self.selection) is not S2VServiceContext or self.plan is None
                 or self.runtime_evidence is None):
             raise WorkerError("native speech needs an existing guarded M5 service")
-        worker_bootstrap.validate_s2v_runtime(self.runtime_evidence)
+        worker_bootstrap.validate_s2v_admission(self.runtime_evidence)
         self.selection.preflight()
         self.check()
         if self.budget.remaining_seconds(self._key) <= 120:
@@ -470,7 +500,8 @@ class SSHWorker:
         self.native_admission()
         if (type(absolute_deadline) not in (int, float) or not math.isfinite(absolute_deadline)
                 or request.get("operation") not in {"native_preflight", "native_begin", "native_chunk",
-                    "native_finish", "native_setup", "native_select", "native_invoke", "native_fetch"}):
+                    "native_finish", "native_setup", "native_select", "native_invoke", "native_fetch",
+                    "native_comfy_install", "native_comfy_model", "native_comfy_setup", "native_comfy_verify"}):
             raise WorkerError("invalid fixed native dispatch")
         timeout = min(1200, absolute_deadline-time.monotonic(),
                       self.budget.remaining_seconds(self._key)-120)
@@ -496,7 +527,7 @@ class SSHWorker:
         if (allow_live is not True or type(self.selection) is not S2VServiceContext
                 or self.plan is None or self.runtime_evidence is None or not callable(invoke)):
             raise WorkerError("native speech needs explicit guarded M5 service opt-in")
-        worker_bootstrap.validate_s2v_runtime(self.runtime_evidence)
+        worker_bootstrap.validate_s2v_admission(self.runtime_evidence)
         self.selection.preflight()
         self.check()
         timeout = min(1200, self.budget.remaining_seconds(self._key) - 120)
@@ -529,6 +560,7 @@ class SSHWorker:
             if self._prepared_s2v is None or self.plan is None:
                 raise WorkerError("S2V service model/worker preparation is required before staging")
             self._prepared_s2v.require_matches(selection)
+            self.verify_comfy_current()
             media = selection.gate.media
             scope = selection.gate.service.approval.subject_sha256
             subject = selection.approved_subject_sha256
@@ -581,6 +613,7 @@ class SSHWorker:
                         "subject_sha256": subject, "media": media, "worker_id": self.plan.pod_id}:
                     raise ValueError
                 self._require_s2v(selection)
+                self._comfy_selection = selection
                 result = StagedS2VPair(self.plan.pod_id, scope, subject, canonical(media).decode())
             except (Exception, KeyboardInterrupt):
                 failed = True
@@ -786,6 +819,21 @@ class SSHWorker:
     def execution_transport(self) -> SupervisedComfyTransport:
         return SupervisedComfyTransport(self, ComfyHTTPTransport(self.endpoint(), allow_live=True))
 
+    def verify_comfy_current(self, *, absolute_deadline: float | None = None) -> None:
+        if type(self.selection) is not S2VServiceContext:
+            return
+        if type(self._closed_comfy) is not ClosedComfyRuntime or self._comfy_selection is None:
+            raise WorkerError("current fixed Comfy runtime proof required")
+        remaining = min(120, self.budget.remaining_seconds(self._key) - 120)
+        if remaining <= 0:
+            raise WorkerError("insufficient lease for current Comfy verification")
+        deadline = time.monotonic() + remaining
+        if absolute_deadline is not None:
+            if type(absolute_deadline) not in (int, float) or not math.isfinite(absolute_deadline):
+                raise WorkerError("invalid Comfy currentness original deadline")
+            deadline = min(deadline, absolute_deadline)
+        self._closed_comfy.verify(self, self._comfy_selection, deadline=deadline)
+
     def close(self) -> None:
         self._stop.set()
         failed = False
@@ -809,6 +857,8 @@ class SupervisedComfyTransport:
     def request(self, method: str, path: str, body: dict[str, object] | None = None,
                 *, timeout_seconds: float, max_bytes: int) -> bytes:
         self.worker.check()
+        if method == "POST" and path == "/prompt":
+            self.worker.verify_comfy_current()
         value = self.transport.request(method, path, body, timeout_seconds=min(timeout_seconds,
             self.worker.budget.remaining_seconds(self.worker._key)), max_bytes=max_bytes)
         self.worker.check()
