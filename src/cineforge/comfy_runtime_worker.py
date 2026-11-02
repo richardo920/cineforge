@@ -16,6 +16,7 @@ from typing import Any
 from cineforge.comfy_runtime_plan import (
     COMFY_SOURCE,
     _files,
+    _wheel,
     comfy_plan,
     comfy_subject,
     notice_bytes,
@@ -31,6 +32,7 @@ def install_wheel(path: Path, target: Path, wheel: dict[str, Any],
                   shared_files: tuple[dict[str, Any], ...] = ()) -> None:
     # Validate reviewed bytes, headers, tags, notices and all destination conflicts
     # before the shared RECORD verifier/exclusive writer sees any extraction target.
+    _wheel(wheel)
     verify_binary(NativeBinary(str(path), wheel["size_bytes"], wheel["sha256"]), deadline)
     with zipfile.ZipFile(path) as archive:
         if len(archive.infolist()) > 100000:

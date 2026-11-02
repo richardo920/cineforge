@@ -25,6 +25,7 @@ COMFY_EXECUTABLES = frozenset({"site/torch/bin/protoc", "site/torch/bin/protoc-3
     "site/torch/bin/torch_shm_manager", "site/triton/backends/nvidia/bin/cuobjdump",
     "site/triton/backends/nvidia/bin/nvdisasm", "site/triton/backends/nvidia/bin/ptxas"})
 COMFY_ABI = "cpython311-linux-x86_64-glibc2.28"
+COMFY_REQUIRES_DIST_MAX = 1024
 COMFY_SOURCE = S2V_WORKER.runner_revision
 COMFY_REQUIREMENTS_SHA256 = "86abf78ac24e7dfd6ba66c8fc031b253be0eb4f3c6f048e7f32d5405986eb991"  # pragma: allowlist secret - public source hash
 COMFY_ROOTS = frozenset((
@@ -92,9 +93,10 @@ def _wheel(value: Any) -> None:
     for key in ("sha256", "metadata_sha256", "wheel_sha256"):
         nr_hash(value[key])
     if (type(value["requires_python"]) is not str or len(value["requires_python"]) > 256
-            or type(value["requires_dist"]) is not list or len(value["requires_dist"]) > 256
+            or type(value["requires_dist"]) is not list or len(value["requires_dist"]) > COMFY_REQUIRES_DIST_MAX
             or any(type(v) is not str or not 1 <= len(v) <= 4096 for v in value["requires_dist"])
-            or value["requires_dist"] != sorted(set(value["requires_dist"]))
+            # Requires-Dist is an exact header multiset, including repetitions.
+            or value["requires_dist"] != sorted(value["requires_dist"])
             or type(value["tags"]) is not list or not value["tags"]
             or any(type(v) is not str or len(v) > 256 for v in value["tags"])
             or value["tags"] != sorted(set(value["tags"]))):
