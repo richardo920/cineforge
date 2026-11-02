@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import importlib.util
 import json
 import os
 import struct
@@ -499,7 +500,12 @@ class NativeSDKBridgeTests(unittest.TestCase):
 
 class NativeProcessTests(unittest.TestCase):
     def test_descriptor_reuse_is_distinguished_from_an_aliased_open_file(self):
-        from tests_linux_native.test_native_speech_network import descriptor_identity, same_identity
+        path = Path(__file__).resolve().parents[1] / "tests_linux_native/test_native_speech_network.py"
+        spec = importlib.util.spec_from_file_location("cineforge_native_fd_fixture", path)
+        self.assertIsNotNone(spec)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        descriptor_identity, same_identity = module.descriptor_identity, module.same_identity
         with tempfile.TemporaryDirectory(prefix="cineforge-fd-identity-") as temporary:
             root = Path(temporary)
             first = os.open(root / "first", os.O_CREAT | os.O_RDWR, 0o600)
