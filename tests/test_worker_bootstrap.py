@@ -16,7 +16,7 @@ from unittest.mock import Mock, patch
 
 from test_cloud_budget import selection
 
-from cineforge import worker_bootstrap, worker_guard
+from cineforge import worker_guard
 from cineforge.worker_bootstrap import (
     MODEL_REVISION,
     REVISION,
@@ -31,6 +31,7 @@ from cineforge.worker_bootstrap import (
     private_write,
     setup,
 )
+from cineforge.worker_bundle import worker_source
 
 
 def exercise_descendant_pipe(test, root, module, function):
@@ -328,7 +329,7 @@ class BootstrapTests(unittest.TestCase):
 
     def test_standalone_failure_does_not_echo_input_or_traceback(self):
         request = {"operation": "fixture-sensitive-value", "allow_live": False, "timeout_seconds": 1}
-        result = subprocess.run([sys.executable, worker_bootstrap.__file__],
+        result = subprocess.run([sys.executable, "-I", "-c", worker_source().decode()],
             input=json.dumps(request).encode(), capture_output=True)
         self.assertEqual(result.returncode, 2)
         self.assertEqual(result.stdout, b'{"status":"worker_operation_failed"}\n')
