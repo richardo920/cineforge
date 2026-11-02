@@ -727,7 +727,7 @@ class ComfyNoticeAndExecutionTests(unittest.TestCase):
         for field, bad in (
             ("sha256", "b" * 64),
             ("size_bytes", True),
-            ("source_uri", "https://user:secret@example.test/LICENSE"),
+            ("source_uri", "https://synthetic-user@example.test/LICENSE"),
             ("source_revision", "PRIVATE-CANARY/path"),
             ("content_base64", "INVALID"),
             ("packages", [{"name": selected["name"], "version": "unreviewed"}]),
