@@ -43,7 +43,7 @@ def inspect_s2v_media(path: Path, *, absolute_deadline: float | None = None,
             "-f", "matroska", "-count_frames", "-show_entries",
             "stream=codec_type,codec_name,width,height,pix_fmt,avg_frame_rate,nb_read_frames:format=duration",
             "-of", "json", str(path)], timeout=require_time(deadline, clock), max_output=65536,
-            check=check))
+            check=check, absolute_deadline=deadline))
         streams = data["streams"]
         if not isinstance(streams, list) or len(streams) != 1:
             raise ValueError
@@ -169,6 +169,7 @@ def run_s2v(selection: S2VSelection, verification: WorkerVerification, driver: S
             output_dir: str | Path, *, allow_live: bool = False,
             execute: Callable[..., RunManifest] = execute_comfy,
             inspect_media: Callable[[Path], dict[str, Any]] = inspect_s2v_media,
+            absolute_deadline: float | None = None,
             clock: Callable[[], float] = time.monotonic) -> dict[str, Any]:
     """No retries. Caller keeps outer budget/guard/enforcer and guaranteed lease cleanup.
 
@@ -177,18 +178,21 @@ def run_s2v(selection: S2VSelection, verification: WorkerVerification, driver: S
     Any attempted run consumes this nonserialized intent, including lost acknowledgements.
     The durable journal retains generated evidence, never review readiness. Only the
     returned copy is finalized after all owned cleanup and fresh current admission.
+    absolute_deadline is a trusted cap on this host's monotonic clock; it only
+    shortens the phase/lease windows and is never transferred to another host.
     """
     record = None
     try:
         if allow_live is not True:
             raise ValueError
         # Capture the controller cap before any foreign proof/admission code.
-        deadline = request_deadline(600, None, clock)
+        deadline = request_deadline(600, absolute_deadline, clock)
+        sampled = clock()
         remaining = driver.budget.remaining_seconds(driver._key)
         if (type(remaining) not in (int, float) or not math.isfinite(remaining)
                 or remaining <= 150):
             raise ValueError
-        deadline = min(deadline, clock() + remaining - 120)
+        deadline = min(deadline, sampled + remaining - 120)
         _admit(selection, verification, driver, deadline, clock)
         trace = selection.gate.preflight()
         record = {"schema_version": 1, "mode": "m5-s2v-one-shot", "outcome": "prepared",
@@ -219,8 +223,8 @@ def run_s2v(selection: S2VSelection, verification: WorkerVerification, driver: S
             try:
                 checkpoint(store)
                 _admit(selection, verification, driver, deadline, clock)
-                endpoint = driver.endpoint()
-                transport = driver.execution_transport()
+                endpoint = driver.endpoint(absolute_deadline=deadline)
+                transport = driver.execution_transport(absolute_deadline=deadline)
                 _admit(selection, verification, driver, deadline, clock)
                 remaining = min(deadline - clock(), driver.budget.remaining_seconds(driver._key) - 120)
                 if remaining <= 0:
