@@ -4,15 +4,17 @@ from __future__ import annotations
 
 import base64
 import ipaddress
+import math
 import os
 import shlex
 import signal
 import socket
 import stat
 import subprocess
+import tempfile
 import time
 from pathlib import Path
-from threading import Event, Lock, Thread
+from threading import Event, Lock, RLock, Thread
 from types import TracebackType
 from typing import Any, Callable
 
@@ -123,6 +125,10 @@ class SSHWorker:
         self._remote_suspended, self._remote_lock = Event(), Lock()
         self._thread: Thread | None = None
         self._tunnel: subprocess.Popen[bytes] | None = None
+        self._endpoint_lock, self._tunnel_lock = Lock(), RLock()
+        self._control_dir: Path | None = None
+        self._control_identity: tuple[int, int] | None = None
+        self._control_socket_identity: tuple[int, int] | None = None
         self._endpoint = ""
         self._claimed: PrivateRunDirectory | None = None
         self._enforce: Callable[[], tuple[str, ...]] | None = None
@@ -139,36 +145,66 @@ class SSHWorker:
 
     def __exit__(self, kind: type[BaseException] | None, value: BaseException | None,
                  traceback: TracebackType | None) -> None:
-        self.close()
-        if self._claimed is not None:
-            self._claimed.__exit__(kind, value, traceback)
+        try:
+            self.close()
+        finally:
+            if self._claimed is not None:
+                claimed, self._claimed = self._claimed, None
+                claimed.__exit__(kind, value, traceback)
 
     def _connection(self, snapshot: LeaseSnapshot, timeout: float) -> bool:
-        reply = self.transport.request("GET", "/v2/pods/" + str(snapshot.resource_id),
-            timeout_seconds=min(10, timeout), max_bytes=1024*1024)
-        if reply.status != 200:
-            raise WorkerError("owned worker connection unavailable")
-        pod = strict_object(reply.body)
-        intent = self.budget.guard_plan(snapshot.key)
-        env = pod.get("env")
-        if (pod.get("id") != snapshot.resource_id or pod.get("status") != "RUNNING"
-                or pod.get("dataCenterId") != self.spec.data_center_id
-                or pod.get("image") != self.spec.image or pod.get("mounts") != {}
-                or not isinstance(env, dict) or env.get("CINEFORGE_SESSION") != self.spec.session_id
-                or env.get("CINEFORGE_LEASE") != intent.lease_token):
-            raise WorkerError("worker connection ownership differs")
-        direct = pod["ssh"]["direct"]
-        if direct is None:
-            return False
-        address = ipaddress.ip_address(direct["host"])
-        unicast = address.ipv4_mapped if isinstance(address, ipaddress.IPv6Address) \
-            and address.ipv4_mapped is not None else address
-        if (not address.is_global or address.is_multicast
-                or isinstance(address, ipaddress.IPv6Address) and address.scope_id is not None
-                or not unicast.is_global or unicast.is_multicast or direct["username"] != "root"
-                or type(direct["port"]) is not int or not 1 <= direct["port"] <= 65535):
-            raise WorkerError("invalid direct SSH endpoint")
-        self._host, self._port = str(address), direct["port"]
+        # A previous connection must not survive a newly missing/rejected observation.
+        self._host, self._port = "", 0
+        failed = False
+        try:
+            remaining = self.budget.remaining_seconds(snapshot.key)
+            if (type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0
+                    or type(remaining) not in (int, float) or not math.isfinite(remaining)
+                    or remaining <= 0):
+                raise ValueError
+            timeout = min(10, timeout, remaining)
+            deadline = time.monotonic() + timeout
+            reply = self.transport.request("GET", "/v2/pods/" + str(snapshot.resource_id),
+                timeout_seconds=timeout, max_bytes=1024*1024)
+            if reply.status != 200 or len(reply.body) > 1024*1024:
+                raise ValueError
+            pod = strict_object(reply.body)
+            intent = self.budget.guard_plan(snapshot.key)
+            env = pod.get("env")
+            if (intent.pod_id != snapshot.resource_id or intent.session_id != self.spec.session_id
+                    or pod.get("id") != snapshot.resource_id or pod.get("status") != "RUNNING"
+                    or pod.get("dataCenterId") != self.spec.data_center_id
+                    or pod.get("image") != self.spec.image or pod.get("mounts") != {}
+                    or not isinstance(env, dict)
+                    or env.get("CINEFORGE_SESSION") != self.spec.session_id
+                    or env.get("CINEFORGE_LEASE") != intent.lease_token):
+                raise ValueError
+            if time.monotonic() >= deadline:
+                return False
+            ssh = pod.get("ssh")
+            if ssh is None:
+                return False
+            if not isinstance(ssh, dict):
+                raise ValueError
+            direct = ssh.get("direct")
+            if direct is None:
+                return False
+            if not isinstance(direct, dict) or not isinstance(direct.get("host"), str):
+                raise ValueError
+            address = ipaddress.ip_address(direct["host"])
+            unicast = address.ipv4_mapped if isinstance(address, ipaddress.IPv6Address) \
+                and address.ipv4_mapped is not None else address
+            if (not address.is_global or address.is_multicast
+                    or isinstance(address, ipaddress.IPv6Address) and address.scope_id is not None
+                    or not unicast.is_global or unicast.is_multicast
+                    or direct.get("username") != "root" or type(direct.get("port")) is not int
+                    or not 1 <= direct["port"] <= 65535):
+                raise ValueError
+            self._host, self._port = str(address), direct["port"]
+        except (Exception, KeyboardInterrupt):
+            failed = True
+        if failed:
+            raise WorkerError("owned worker connection metadata rejected")
         return True
 
     def _command(self) -> list[str]:
@@ -218,10 +254,15 @@ class SSHWorker:
         # This read-only connectivity check may retry while sshd boots. An ARM request
         # is never retried after a lost acknowledgement: provisioner cleans up the Pod.
         try:
-            self._request({"operation": "ping"}, min(5, timeout), supervise=False)
+            remaining = min(timeout - (time.monotonic() - started),
+                            self.budget.remaining_seconds(snapshot.key))
+            if remaining <= 0:
+                return None
+            self._request({"operation": "ping"}, min(5, remaining), supervise=False)
         except (Exception, KeyboardInterrupt):
             return None
-        remaining = timeout - (time.monotonic() - started)
+        remaining = min(timeout - (time.monotonic() - started),
+                        self.budget.remaining_seconds(snapshot.key))
         if remaining <= 0:
             return None
         plan = self.budget.guard_plan(snapshot.key)
@@ -256,18 +297,31 @@ class SSHWorker:
                 self.budget.heartbeat(self._key)
             except (Exception, KeyboardInterrupt):
                 self._failed.set()
+                try:
+                    self._close_tunnel()
+                except WorkerError:
+                    pass
                 break
 
     def check(self) -> None:
-        if self._stop.is_set():
-            raise WorkerError("worker supervision stopped")
-        # Run admission's cleanup decision before interpreting zero remaining time;
-        # the decision releases outside the budget lock and can race a blocked probe.
-        if self._enforce is not None and self._enforce():
-            raise WorkerError("worker lease or idle budget expired")
-        if (self._failed.is_set()
-                or self.plan is not None and self.budget.remaining_seconds(self._key) <= 0
-                or self._tunnel is not None and self._tunnel.poll() is not None):
+        failed = False
+        try:
+            if self._stop.is_set():
+                raise ValueError
+            # Never hold the tunnel lock across provider/budget locks or callbacks.
+            if self._enforce is not None and self._enforce():
+                raise ValueError
+            if (self._failed.is_set()
+                    or self.plan is not None and self.budget.remaining_seconds(self._key) <= 0
+                    or self._tunnel is not None and self._tunnel.poll() is not None):
+                raise ValueError
+        except (Exception, KeyboardInterrupt):
+            failed = True
+        if failed:
+            try:
+                self._close_tunnel()
+            except WorkerError:
+                pass
             raise WorkerError("worker supervision or lease deadline failed")
 
     def set_enforcer(self, enforce: Callable[[], tuple[str, ...]]) -> None:
@@ -332,44 +386,186 @@ class SSHWorker:
             raise WorkerError("staged reference evidence differs")
         return reply["reference"]  # type: ignore[no-any-return]
 
-    def endpoint(self) -> str:
-        self.check()
-        if self._endpoint:
-            return self._endpoint
-        if self.plan is None:
-            raise WorkerError("worker guard not armed")
-        with socket.socket() as listener:
-            listener.bind(("127.0.0.1", 0))
-            port = listener.getsockname()[1]
-        command = self._command() + ["-N", "-L", f"127.0.0.1:{port}:127.0.0.1:8188", self._host]
-        self._tunnel = subprocess.Popen(command, stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=ssh_environment(),
-            start_new_session=True)
-        deadline = time.monotonic() + min(10, self.budget.remaining_seconds(self._key))
-        while time.monotonic() < deadline:
-            self.check()
+    def _control_ready(self) -> bool:
+        with self._tunnel_lock:
+            if self._control_dir is None:
+                raise WorkerError("owned SSH control path unavailable")
+            info = self._control_dir.lstat()
+            if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
+                    or stat.S_IMODE(info.st_mode) != 0o700
+                    or (info.st_dev, info.st_ino) != self._control_identity):
+                raise WorkerError("owned SSH control directory changed")
             try:
-                with socket.create_connection(("127.0.0.1", port), timeout=.2):
-                    self._endpoint = f"http://127.0.0.1:{port}"
+                control = (self._control_dir / "c").lstat()
+            except FileNotFoundError:
+                return False
+            identity = (control.st_dev, control.st_ino)
+            if (not stat.S_ISSOCK(control.st_mode) or control.st_uid != os.getuid()
+                    or control.st_nlink != 1 or self._control_socket_identity is not None
+                    and identity != self._control_socket_identity):
+                raise WorkerError("owned SSH control socket changed")
+            self._control_socket_identity = identity
+            return True
+
+    def _close_tunnel(self) -> None:
+        failed = False
+        with self._tunnel_lock:
+            self._endpoint = ""
+            process = self._tunnel
+            if process is not None:
+                killed = True
+                try:
+                    # A departed leader may leave descendants in its owned group.
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                except (Exception, KeyboardInterrupt):
+                    killed = False
+                    failed = True
+                try:
+                    if type(process.wait(timeout=2)) is not int:
+                        raise ValueError
+                    if killed:
+                        self._tunnel = None
+                except (Exception, KeyboardInterrupt):
+                    failed = True
+            if self._tunnel is None and self._control_dir is not None:
+                try:
+                    if self._control_ready():
+                        (self._control_dir / "c").unlink()
+                    # Never recursively remove unexpected/replaced path contents.
+                    self._control_dir.rmdir()
+                    self._control_dir = None
+                    self._control_identity = self._control_socket_identity = None
+                except (Exception, KeyboardInterrupt):
+                    failed = True
+        if failed:
+            raise WorkerError("owned SSH tunnel cleanup is not confirmed") from None
+
+    def _tunnel_remaining(self, deadline: float) -> float:
+        self.check()
+        remaining = min(deadline - time.monotonic(), self.budget.remaining_seconds(self._key))
+        if not math.isfinite(remaining) or remaining <= 0:
+            raise WorkerError("private tunnel readiness deadline exceeded")
+        return remaining
+
+    def _mux(self, operation: str, deadline: float, forward: str | None = None) -> None:
+        with self._tunnel_lock:
+            directory = self._control_dir
+            if directory is None or not self._control_ready():
+                raise WorkerError("owned SSH control path unavailable")
+            control = directory / "c"
+        command = self._command() + ["-S", str(control),
+            "-o", "ControlMaster=no", "-O", operation]
+        if forward is not None:
+            command.extend(["-L", forward])
+        command.append(self._host)
+        def check() -> None:
+            self._tunnel_remaining(deadline)
+        run_process(command, timeout=min(1, self._tunnel_remaining(deadline)), max_output=1024,
+                    check=check)
+        self._tunnel_remaining(deadline)
+        if not self._control_ready():
+            raise WorkerError("owned SSH control socket disappeared")
+
+    def endpoint(self) -> str:
+        with self._endpoint_lock:
+            failed = cleanup_failed = False
+            try:
+                self.check()
+                if self._endpoint:
                     return self._endpoint
-            except OSError:
-                time.sleep(.1)
-        raise WorkerError("private loopback tunnel unavailable")
+                if self.plan is None:
+                    raise ValueError
+                # A failed prior teardown must never be overwritten by another child.
+                self._close_tunnel()
+                remaining = self.budget.remaining_seconds(self._key)
+                if not math.isfinite(remaining) or remaining <= 0:
+                    raise ValueError
+                deadline = time.monotonic() + min(10, remaining)
+                with self._tunnel_lock:
+                    self._control_dir = Path(tempfile.mkdtemp(
+                        prefix="cf-ssh-" + self.spec.session_id + "-", dir="/tmp"))
+                    info = self._control_dir.lstat()
+                    self._control_identity = (info.st_dev, info.st_ino)
+                    control = self._control_dir / "c"
+                    if len(os.fsencode(control)) > 100:
+                        raise ValueError
+                    command = self._command() + ["-M", "-S", str(control),
+                        "-o", "ControlPersist=no", "-N", self._host]
+                    self._tunnel = subprocess.Popen(command, stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=ssh_environment(),
+                        start_new_session=True)
+                for _ in range(101):
+                    self._tunnel_remaining(deadline)
+                    if self._control_ready():
+                        try:
+                            self._mux("check", deadline)
+                            break
+                        except WorkerError:
+                            pass
+                    time.sleep(min(.1, self._tunnel_remaining(deadline)))
+                else:
+                    raise ValueError
+                with socket.socket() as listener:
+                    listener.bind(("127.0.0.1", 0))
+                    port = listener.getsockname()[1]
+                # Native mux acknowledgement proves this master owns the bind.
+                # -O commands fail closed without opening a fallback SSH connection.
+                self._mux("forward", deadline, f"127.0.0.1:{port}:127.0.0.1:8188")
+                endpoint = f"http://127.0.0.1:{port}"
+                health = ComfyHTTPTransport(endpoint, allow_live=True)
+                for _ in range(101):
+                    timeout = min(1, self._tunnel_remaining(deadline))
+                    try:
+                        raw = health.request("GET", "/system_stats", timeout_seconds=timeout,
+                                             max_bytes=65536)
+                    except Exception:
+                        time.sleep(min(.1, self._tunnel_remaining(deadline)))
+                        continue
+                    data = strict_object(raw)
+                    if (set(data) != {"system", "devices"} or not isinstance(data["system"], dict)
+                            or not isinstance(data["devices"], list)
+                            or any(not isinstance(device, dict) for device in data["devices"])):
+                        raise ValueError
+                    self._tunnel_remaining(deadline)
+                    with self._tunnel_lock:
+                        if (not self._control_ready() or self._tunnel is None
+                                or self._tunnel.poll() is not None or self._stop.is_set()
+                                or self._failed.is_set()):
+                            raise ValueError
+                        self._endpoint = endpoint
+                        return endpoint
+                raise ValueError
+            except (Exception, KeyboardInterrupt):
+                failed = True
+            finally:
+                if failed:
+                    try:
+                        self._close_tunnel()
+                    except WorkerError:
+                        cleanup_failed = True  # Keep uncertain references for close/retry.
+            if cleanup_failed:
+                raise WorkerError("private tunnel failed with unconfirmed cleanup")
+            raise WorkerError("private owned tunnel readiness failed")
 
     def execution_transport(self) -> SupervisedComfyTransport:
         return SupervisedComfyTransport(self, ComfyHTTPTransport(self.endpoint(), allow_live=True))
 
     def close(self) -> None:
         self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=7)
-        if self._tunnel is not None:
-            if self._tunnel.poll() is None:
-                try:
-                    os.killpg(self._tunnel.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-            self._tunnel.wait(timeout=2)
+        failed = False
+        try:
+            if self._thread is not None:
+                self._thread.join(timeout=7)
+        except (Exception, KeyboardInterrupt):
+            failed = True
+        try:
+            self._close_tunnel()
+        except WorkerError:
+            failed = True
+        if failed:
+            raise WorkerError("owned SSH worker cleanup is not confirmed") from None
 
 
 class SupervisedComfyTransport:
