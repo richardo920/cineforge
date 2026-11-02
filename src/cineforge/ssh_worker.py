@@ -23,7 +23,12 @@ from typing import Any, Callable, Protocol
 from cineforge import worker_bootstrap, worker_guard
 from cineforge.cloud_budget import CloudBudgetSession
 from cineforge.comfy_policy import ApprovedComfySelection, WorkerVerification
-from cineforge.comfy_transport import ComfyHTTPTransport
+from cineforge.comfy_transport import (
+    ComfyHTTPTransport,
+    request_capped,
+    request_deadline,
+    require_time,
+)
 from cineforge.devices import Backend, GPUDevice
 from cineforge.private_store import PrivateRunDirectory, read_private_input
 from cineforge.runpod import LeaseSnapshot, RunpodPodSpec, WorkerObservation
@@ -763,9 +768,21 @@ class SupervisedComfyTransport:
         self.worker, self.transport = worker, transport
 
     def request(self, method: str, path: str, body: dict[str, object] | None = None,
-                *, timeout_seconds: float, max_bytes: int) -> bytes:
+                *, timeout_seconds: float, max_bytes: int,
+                absolute_deadline: float | None = None,
+                clock: Callable[[], float] | None = None) -> bytes:
+        clock = time.monotonic if clock is None else clock
+        deadline = request_deadline(timeout_seconds, absolute_deadline, clock)
         self.worker.check()
-        value = self.transport.request(method, path, body, timeout_seconds=min(timeout_seconds,
-            self.worker.budget.remaining_seconds(self.worker._key)), max_bytes=max_bytes)
+        reserve = 120 if type(self.worker.selection) is S2VServiceContext else 0
+        remaining = min(require_time(deadline, clock),
+                        self.worker.budget.remaining_seconds(self.worker._key) - reserve)
+        deadline = min(deadline, clock() + remaining)
+        require_time(deadline, clock)
+        value = request_capped(self.transport, method, path, body,
+            timeout_seconds=remaining, max_bytes=max_bytes, absolute_deadline=deadline, clock=clock)
         self.worker.check()
+        require_time(deadline, clock)
+        if self.worker.budget.remaining_seconds(self.worker._key) <= reserve:
+            raise WorkerError("ComfyUI response exceeded the owned lease reserve")
         return value

@@ -4,6 +4,8 @@ from __future__ import annotations
 import copy
 import json
 import unittest
+from dataclasses import replace
+from unittest.mock import patch
 
 import test_s2v_stage as stage_fixtures
 from test_cloud_budget import Clock
@@ -12,8 +14,10 @@ from test_s2v import worker
 
 from cineforge import s2v_profile as profile
 from cineforge.comfy_run import execute_comfy
+from cineforge.private_store import PrivateRunDirectory
 from cineforge.s2v import S2VError
 from cineforge.s2v_run import run_s2v
+from cineforge.ssh_worker import SupervisedComfyTransport
 
 
 def media(_):
@@ -172,6 +176,133 @@ class S2VRunTests(unittest.TestCase):
         self.assertIn("manifest", outer)
         self.assertNotIn("technical_result", outer)
         self.assertEqual(outer["manifest"]["shot_runs"][0]["status"], "succeeded")
+
+    def _absolute_fixture(self):
+        now = [100.0]
+        self.driver.budget.remaining_seconds = lambda _: 180 - (now[0] - 100)
+        self.driver.execution_transport = lambda: SupervisedComfyTransport(self.driver, self.wire)
+        return now
+
+    def test_slow_initial_native_proof_cannot_renew_run_cap_or_claim_storage(self):
+        now = self._absolute_fixture()
+        native, armed, slept = self.selection.gate.verify_speech, [False], [False]
+        def proof(*args):
+            if armed[0] and not slept[0]:
+                now[0] = 161
+                slept[0] = True
+            return native(*args)
+        self.selection = replace(self.selection, gate=replace(self.selection.gate, verify_speech=proof))
+        armed[0] = True
+        with self.assertRaises(S2VError):
+            self.run_scene(clock=lambda: now[0])
+        self.assertTrue(slept[0])
+        self.assertFalse(self.output.exists())
+        self.assertEqual(self.wire.calls, [])
+
+    def test_slow_real_execute_preflight_keeps_original_cap_through_supervised_provider(self):
+        now = self._absolute_fixture()
+        native, entered, slept, caps = self.selection.gate.verify_speech, [False], [False], []
+        def proof(*args):
+            if entered[0] and not slept[0]:
+                now[0] = 161
+                slept[0] = True
+            return native(*args)
+        self.selection = replace(self.selection, gate=replace(self.selection.gate, verify_speech=proof))
+        def execute(*args, **kwargs):
+            entered[0] = True
+            caps.append(kwargs["absolute_deadline"])
+            return execute_comfy(*args, **kwargs)
+        with self.assertRaises(S2VError):
+            self.run_scene(clock=lambda: now[0], execute=execute)
+        self.assertEqual(caps, [160])
+        self.assertTrue(slept[0])
+        self.assertEqual(self.wire.calls, [])
+        outer = json.loads((self.output / "run.json").read_text())
+        self.assertEqual((outer["outcome"], outer["human_review"]), ("incomplete", "unavailable"))
+        self.assertFalse((self.output / "shot").exists())
+
+    def test_slow_final_provider_proof_after_schema_checks_cannot_submit(self):
+        now = self._absolute_fixture()
+        native, delayed = self.selection.gate.verify_speech, []
+        schemas = len(self.selection.workflow.allowed_classes)
+        def proof(*args):
+            if len(self.wire.calls) == schemas and not delayed:
+                delayed.append(now[0])
+                now[0] = 161
+            return native(*args)
+        self.selection = replace(self.selection, gate=replace(self.selection.gate, verify_speech=proof))
+        with self.assertRaises(S2VError):
+            self.run_scene(clock=lambda: now[0])
+        self.assertEqual(delayed, [100])
+        self.assertEqual(len(self.wire.calls), schemas)
+        self.assertFalse(any(call[1] == "/prompt" for call in self.wire.calls))
+
+    def test_supervised_last_post_admission_cannot_send_after_original_cap(self):
+        now = self._absolute_fixture()
+        schemas = len(self.selection.workflow.allowed_classes)
+        original, visits = self.driver.check, []
+        def check():
+            original()
+            if len(self.wire.calls) == schemas:
+                visits.append(now[0])
+                if len(visits) == 2:  # After final schema return, then before POST.
+                    now[0] = 161
+        self.driver.check = check
+        with self.assertRaises(S2VError):
+            self.run_scene(clock=lambda: now[0])
+        self.assertEqual(len(visits), 2)
+        self.assertFalse(any(call[1] == "/prompt" for call in self.wire.calls))
+        inner = json.loads((self.output / "shot/run.json").read_text())
+        self.assertEqual(inner["outcome"], "incomplete")
+        self.assertIsNone(inner["known_run"])
+        self.assertFalse(inner["cancellation"]["attempted"])
+
+    def test_late_technical_inspector_cannot_publish_readiness_and_keeps_generated_identity(self):
+        now = self._absolute_fixture()
+        def late(path):
+            now[0] = 161
+            return media(path)
+        with self.assertRaises(S2VError):
+            self.run_scene(clock=lambda: now[0], inspect_media=late)
+        outer = json.loads((self.output / "run.json").read_text())
+        self.assertEqual((outer["outcome"], outer["human_review"]), ("incomplete", "unavailable"))
+        self.assertNotIn("technical_result", outer)
+        self.assertEqual(outer["manifest"]["shot_runs"][0]["status"], "succeeded")
+        self.assertEqual(sum(call[1] == "/prompt" for call in self.wire.calls), 1)
+
+    def test_final_checkpoint_returning_late_is_corrected_to_incomplete_without_losing_manifest(self):
+        now = self._absolute_fixture()
+        original, late = PrivateRunDirectory.checkpoint, []
+        def checkpoint(store, payload):
+            original(store, payload)
+            if json.loads(payload).get("outcome") == "pending_human_review":
+                late.append(now[0])
+                now[0] = 161
+        with patch.object(PrivateRunDirectory, "checkpoint", checkpoint), self.assertRaises(S2VError):
+            self.run_scene(clock=lambda: now[0])
+        self.assertEqual(late, [100])
+        outer = json.loads((self.output / "run.json").read_text())
+        self.assertEqual((outer["outcome"], outer["human_review"]), ("incomplete", "unavailable"))
+        self.assertIn("manifest", outer)
+        self.assertNotIn("technical_result", outer)
+
+    def test_transport_typeerror_after_post_is_consumed_once_without_fallback(self):
+        self._absolute_fixture()
+        original, posts = self.wire.request, []
+        def request(method, path, body=None, **limits):
+            if path == "/prompt":
+                posts.append(path)
+                raise TypeError("CANARY transport body failure")
+            return original(method, path, body, **limits)
+        self.wire.request = request
+        with self.assertRaises(S2VError):
+            self.run_scene(clock=lambda: 100)
+        with self.assertRaises(S2VError):
+            self.run_scene(clock=lambda: 100)
+        self.assertEqual(posts, ["/prompt"])
+        inner = json.loads((self.output / "shot/run.json").read_text())
+        self.assertIsNone(inner["known_run"])
+        self.assertFalse(inner["cancellation"]["attempted"])
 
     def test_cancellation_cannot_extend_original_deadline_or_outer_lease_reserve(self):
         clock = Clock()

@@ -301,6 +301,19 @@ class PairTransferTests(unittest.TestCase):
             self.static_failure(lambda: self.driver.run_guarded_native(late, allow_live=True))
         self.assertEqual(calls, [(3, 103)])
 
+    def test_final_pair_ack_does_not_commit_proof_after_voice_revocation(self):
+        def revoke(request):
+            if request["operation"] == "s2v_pair_finish":
+                self.gate.ledger.revoke(self.gate.utterance.voice.permission.rights, reason="CANARY")
+        self.fault = revoke
+        self.static_failure(lambda: self.driver.stage_s2v(self.selection))
+        self.assertEqual(self.requests[-1]["operation"], "s2v_pair_finish")
+        before = len(self.requests)
+        self.static_failure(lambda: self.driver.stage_s2v(self.selection))
+        self.assertEqual(len(self.requests), before)
+        with self.assertRaises(S2VError):
+            self.selection.require_execution_worker(worker(self.gate))
+
     def test_dispatch_checks_guard_and_bound_profile_before_transfer(self):
         (self.remote / "plan.json").write_bytes(canonical(self.plan.to_dict()))
         (self.remote / "profile.json").write_bytes(canonical(self.driver._profile))

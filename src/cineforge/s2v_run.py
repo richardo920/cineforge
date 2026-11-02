@@ -16,6 +16,7 @@ from typing import Any, Callable, cast
 from cineforge import s2v_profile as profile
 from cineforge.comfy_policy import WorkerVerification
 from cineforge.comfy_run import execute_comfy
+from cineforge.comfy_transport import request_deadline, require_time
 from cineforge.contracts import RunManifest
 from cineforge.private_store import PrivateRunDirectory, read_private_input
 from cineforge.s2v import S2VError, S2VSelection
@@ -25,18 +26,23 @@ from cineforge.worker_bootstrap import validate_s2v_runtime
 from cineforge.workflows import canonical, strict_object
 
 
-def inspect_s2v_media(path: Path) -> dict[str, Any]:
+def inspect_s2v_media(path: Path, *, absolute_deadline: float | None = None,
+                      clock: Callable[[], float] = time.monotonic) -> dict[str, Any]:
     """Fixed local Matroska/VP9 probe; no network protocols or arbitrary media URL."""
     result = None
     try:
+        deadline = request_deadline(10, absolute_deadline, clock)
         binary = shutil.which("ffprobe")
         if binary is None:
             raise ValueError
+        def check() -> None:
+            require_time(deadline, clock)
         data = strict_object(run_process([binary, "-v", "error", "-max_alloc", "67108864",
             "-protocol_whitelist", "file,pipe", "-format_whitelist", "matroska,webm",
             "-f", "matroska", "-count_frames", "-show_entries",
             "stream=codec_type,codec_name,width,height,pix_fmt,avg_frame_rate,nb_read_frames:format=duration",
-            "-of", "json", str(path)], timeout=10, max_output=65536))
+            "-of", "json", str(path)], timeout=require_time(deadline, clock), max_output=65536,
+            check=check))
         streams = data["streams"]
         if not isinstance(streams, list) or len(streams) != 1:
             raise ValueError
@@ -54,6 +60,7 @@ def inspect_s2v_media(path: Path) -> dict[str, Any]:
         result = {"media_type": "video/webm", "codec": "vp9", "pixel_format": "yuv420p",
             "width": profile.WIDTH, "height": profile.HEIGHT, "decoded_frames": profile.FRAMES,
             "fps": float(profile.FPS), "duration_seconds": duration}
+        require_time(deadline, clock)
     except (Exception, KeyboardInterrupt):
         pass
     if result is None:
@@ -62,11 +69,18 @@ def inspect_s2v_media(path: Path) -> dict[str, Any]:
 
 
 def technical_result(selection: S2VSelection, manifest: RunManifest, directory: Path,
-                     inspect_media: Callable[[Path], dict[str, Any]] = inspect_s2v_media) -> dict[str, Any]:
+                     inspect_media: Callable[[Path], dict[str, Any]] = inspect_s2v_media,
+                     *, absolute_deadline: float | None = None,
+                     clock: Callable[[], float] = time.monotonic) -> dict[str, Any]:
     """Actual decoded output plus paired speech timing, not semantic or visible-sync review."""
     result = None
     try:
+        def check() -> None:
+            if absolute_deadline is not None:
+                require_time(absolute_deadline, clock)
+        check()
         selection.gate.preflight()
+        check()
         if (len(manifest.artifacts) != 1 or len(manifest.shot_runs) != 1
                 or manifest.shot_runs[0].status.value != "succeeded"
                 or manifest.plan != selection.plan()):
@@ -79,7 +93,10 @@ def technical_result(selection: S2VSelection, manifest: RunManifest, directory: 
         if (len(before) != artifact.size_bytes
                 or hashlib.sha256(before).hexdigest() != artifact.sha256):
             raise ValueError
-        media = inspect_media(path)
+        check()
+        media = (inspect_s2v_media(path, absolute_deadline=absolute_deadline, clock=clock)
+                 if inspect_media is inspect_s2v_media else inspect_media(path))
+        check()
         expected = {"media_type": "video/webm", "codec": "vp9", "pixel_format": "yuv420p",
                     "width": profile.WIDTH, "height": profile.HEIGHT,
                     "decoded_frames": profile.FRAMES, "fps": float(profile.FPS)}
@@ -93,6 +110,7 @@ def technical_result(selection: S2VSelection, manifest: RunManifest, directory: 
                 or read_private_input(path, max_bytes=32 * 1024 * 1024) != before):
             raise ValueError
         selection.gate.preflight()
+        check()
         speech = selection.gate.speech
         result = {"video": media, "video_sha256": artifact.sha256,
             "speech": speech.pin.to_dict(), "speech_frames": speech.frames,
@@ -110,7 +128,17 @@ def technical_result(selection: S2VSelection, manifest: RunManifest, directory: 
     return result
 
 
-def _admit(selection: S2VSelection, verification: WorkerVerification, driver: SSHWorker) -> None:
+def _window(driver: SSHWorker, deadline: float, clock: Callable[[], float]) -> None:
+    require_time(deadline, clock)
+    remaining = driver.budget.remaining_seconds(driver._key)
+    if type(remaining) not in (int, float) or not math.isfinite(remaining) or remaining <= 120:
+        raise S2VError("S2V attempt reached its owned lease cleanup reserve")
+    require_time(deadline, clock)
+
+
+def _admit(selection: S2VSelection, verification: WorkerVerification, driver: SSHWorker,
+           deadline: float, clock: Callable[[], float]) -> None:
+    _window(driver, deadline, clock)
     if (type(selection) is not S2VSelection or type(verification) is not WorkerVerification
             or type(driver.selection) is not S2VServiceContext
             or driver.selection != selection.gate.service or driver.plan is None
@@ -121,6 +149,7 @@ def _admit(selection: S2VSelection, verification: WorkerVerification, driver: SS
     validate_s2v_runtime(driver.runtime_evidence)
     selection.require_execution_worker(verification)
     driver.check()
+    _window(driver, deadline, clock)
 
 
 def run_s2v(selection: S2VSelection, verification: WorkerVerification, driver: SSHWorker,
@@ -138,12 +167,14 @@ def run_s2v(selection: S2VSelection, verification: WorkerVerification, driver: S
     try:
         if allow_live is not True:
             raise ValueError
-        _admit(selection, verification, driver)
+        # Capture the controller cap before any foreign proof/admission code.
+        deadline = request_deadline(600, None, clock)
         remaining = driver.budget.remaining_seconds(driver._key)
-        if not math.isfinite(remaining) or remaining <= 150:
+        if (type(remaining) not in (int, float) or not math.isfinite(remaining)
+                or remaining <= 150):
             raise ValueError
-        timeout = min(600, remaining - 120)
-        deadline = clock() + timeout
+        deadline = min(deadline, clock() + remaining - 120)
+        _admit(selection, verification, driver, deadline, clock)
         trace = selection.gate.preflight()
         record = {"schema_version": 1, "mode": "m5-s2v-one-shot", "outcome": "prepared",
             "subject_sha256": selection.approved_subject_sha256,
@@ -153,43 +184,50 @@ def run_s2v(selection: S2VSelection, verification: WorkerVerification, driver: S
             "controller_source_sha256": hashlib.sha256(read_private_input(
                 Path(__file__), max_bytes=128 * 1024)).hexdigest(),
             "runner_revision": profile.RUNNER_REVISION,
+            "controller_deadline": deadline,
             "shot_record": "shot/run.json", "visible_lip_sync": "not_assessed",
-            "human_review": "pending_human_review", "export_authority": "none"}
+            "human_review": "unavailable", "export_authority": "none"}
+        _window(driver, deadline, clock)
         selection.gate.attempt.consume()
     except (Exception, KeyboardInterrupt):
         record = None
     if record is None:
         raise S2VError("S2V run preflight rejected or execution intent already consumed")
     failed = False
+    def checkpoint(store: PrivateRunDirectory) -> None:
+        _window(driver, deadline, clock)
+        store.checkpoint(canonical(record))
+        _window(driver, deadline, clock)
     try:
         directory = Path(output_dir)
         with PrivateRunDirectory(directory) as store:
             try:
-                store.checkpoint(canonical(record))
-                _admit(selection, verification, driver)
+                checkpoint(store)
+                _admit(selection, verification, driver, deadline, clock)
                 endpoint = driver.endpoint()
                 transport = driver.execution_transport()
-                _admit(selection, verification, driver)
+                _admit(selection, verification, driver, deadline, clock)
                 remaining = min(deadline - clock(), driver.budget.remaining_seconds(driver._key) - 120)
                 if remaining <= 0:
                     raise ValueError
                 manifest = execute(selection.plan(), selection, verification, directory / "shot",
                     allow_live=True, endpoint=endpoint,
                     transport=transport, timeout_seconds=remaining, clock=clock,
-                    result_timeout_seconds=min(30, remaining / 2))
+                    result_timeout_seconds=min(30, remaining / 2), absolute_deadline=deadline)
                 # Preserve paid output identity before fallible technical inspection.
                 record.update(outcome="generated", manifest=manifest.to_dict())
-                store.checkpoint(canonical(record))
-                _admit(selection, verification, driver)
-                if driver.budget.remaining_seconds(driver._key) <= 15:
-                    raise ValueError
-                measured = technical_result(selection, manifest, directory / "shot", inspect_media)
-                _admit(selection, verification, driver)
-                record.update(outcome="pending_human_review", technical_result=measured)
-                store.checkpoint(canonical(record))
+                checkpoint(store)
+                _admit(selection, verification, driver, deadline, clock)
+                measured = technical_result(selection, manifest, directory / "shot", inspect_media,
+                                            absolute_deadline=deadline, clock=clock)
+                _admit(selection, verification, driver, deadline, clock)
+                record.update(outcome="pending_human_review", technical_result=measured,
+                              human_review="pending_human_review")
+                checkpoint(store)
             except (Exception, KeyboardInterrupt):
                 failed = True
-                record["outcome"] = "incomplete"
+                record.update(outcome="incomplete", human_review="unavailable")
+                record.pop("technical_result", None)
                 try:
                     store.checkpoint(canonical(record))
                 except (Exception, KeyboardInterrupt):

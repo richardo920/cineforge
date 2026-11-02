@@ -23,8 +23,8 @@ from cineforge.private_store import read_private_input
 from cineforge.providers import ExecutionRequest
 from cineforge.rights import EvidenceRef, RightsLedger, RightsRef, SubjectRef, Use
 from cineforge.s2v_service import S2VServiceContext
-from cineforge.skills import ShotSkills, SkillCatalog
-from cineforge.speech import SpeechArtifact
+from cineforge.skills import CatalogEntry, ShotSkills, SkillCatalog
+from cineforge.speech import QwenBaseRequest, SpeechArtifact
 from cineforge.workflows import InputBinding, WorkflowTemplate, canonical, strict_object
 
 
@@ -98,6 +98,13 @@ class ActorReviewProof:
     def __post_init__(self) -> None:
         if type(self.character) is not CharacterPin or type(self.evidence) is not EvidenceRef:
             raise S2VError("invalid actor review proof")
+        if (type(self.character.character_id) is not str
+                or type(self.character.revision) is not int
+                or type(self.character.sha256) is not str
+                or type(self.evidence.uri) is not str or type(self.evidence.sha256) is not str):
+            raise S2VError("invalid actor review proof leaves")
+        CharacterPin.from_dict(self.character.to_dict())
+        EvidenceRef.from_dict(self.evidence.to_dict())
         _sha(self.reference_sha256)
 
 
@@ -219,7 +226,8 @@ class VerifiedS2V:
         return {"image": image_metadata(self.actor.read()),
                 "audio": speech_metadata(self.speech.payload)}
 
-    def _check(self) -> dict[str, Any]:
+    def _current(self) -> dict[str, Any]:
+        """Pure current admission; never calls operator/proof code."""
         for value, kind in ((self.service, S2VServiceContext), (self.sheet, CueSheet),
                 (self.plan, ProjectPlan), (self.actor, PrivateActorReference),
                 (self.speech, SpeechArtifact), (self.registry, CharacterRegistry),
@@ -230,7 +238,16 @@ class VerifiedS2V:
         if type(self.attempt) is not S2VAttempt:
             raise ValueError
         self.service.preflight()
-        self.descriptor.__post_init__()
+        ActorDescriptor.__post_init__(self.descriptor)
+        # Reconstruct nested metadata too: typed objects may bypass constructors.
+        CueSheet.from_dict(self.sheet.to_dict())
+        ProjectPlan.from_dict(self.plan.to_dict())
+        RevisionPin.from_dict(self.current_picture.to_dict())
+        RevisionPin.from_dict(self.current_script.to_dict())
+        ReferenceArtifact.from_dict(self.actor.artifact.to_dict())
+        QwenBaseRequest.from_dict(self.speech.request.to_dict())
+        ShotSkills.from_dict(self.binding.to_dict())
+        RightsRef.from_dict(self.model_rights.to_dict())
         if (not callable(self.verify_actor) or not callable(self.verify_speech)
                 or not callable(self.authorize) or self.speech.runtime_kind == "synthetic_fixture"
                 or self.sheet.script.pin() != self.current_script
@@ -275,18 +292,6 @@ class VerifiedS2V:
                     raise ValueError
         actor_bytes = self.actor.read()
         media = {"image": image_metadata(actor_bytes), "audio": speech_metadata(self.speech.payload)}
-        reviewed_actor = self.verify_actor(character.pin(), self.actor.artifact, actor_bytes,
-                                           self.descriptor)
-        speech_proof = self.verify_speech(self.speech, self.service)
-        if (type(reviewed_actor) is not ActorReviewProof
-                or reviewed_actor.character != character.pin()
-                or reviewed_actor.reference_sha256 != media["image"]["sha256"]
-                or type(speech_proof) is not NativeSpeechProof
-                or speech_proof.request_sha256 != self.speech.request.digest()
-                or speech_proof.speech_sha256 != media["audio"]["sha256"]
-                or speech_proof.reference_sha256 != self.speech.request.reference.sha256
-                or speech_proof.scope_sha256 != self.service.approval.subject_sha256):
-            raise ValueError
         device = GPUDevice("s2v-profile", Backend.CUDA, profile.MEMORY_MIB,
                            frozenset({Precision.BF16}))
         ready = self.catalog.resolve_shot(self.binding, shot=shot, ledger=self.ledger, device=device)
@@ -310,14 +315,48 @@ class VerifiedS2V:
                 or workflow_terms.terms is None or workflow_terms.terms.sha256
                 != hashlib.sha256(profile.WORKFLOW_LICENSE).hexdigest()):
             raise ValueError
+        type(character).from_dict(character.to_dict())
+        for entry in entries:
+            if entry is not None:
+                CatalogEntry.from_dict(entry.to_dict())
         return {"character": character.to_dict(), "actor": self.actor.artifact.to_dict(),
-            "actor_review": reviewed_actor.evidence.to_dict(), "speech": self.speech.pin.to_dict(),
-            "speech_request": self.speech.request.to_dict(), "speech_native_proof": {
-                key: getattr(speech_proof, key) for key in speech_proof.__dataclass_fields__},
+            "speech": self.speech.pin.to_dict(), "speech_request": self.speech.request.to_dict(),
             "input_media": media, "catalog": [entry.to_dict() for entry in entries if entry is not None],
             "binding": self.binding.to_dict(), "source_plan_sha256": digest(self.plan.to_dict()),
             "sheet_sha256": self.sheet.digest(), "picture": self.current_picture.to_dict(),
             "script": self.current_script.to_dict()}
+
+    def _require_current(self, trace: dict[str, Any]) -> None:
+        admitted = {key: value for key, value in trace.items()
+                    if key not in {"actor_review", "speech_native_proof"}}
+        if canonical(self._current()) != canonical(admitted):
+            raise S2VError("S2V inputs or admission changed during verification")
+
+    def _check(self) -> dict[str, Any]:
+        before = self._current()
+        snapshot = canonical(before)
+        actor_bytes = self.actor.read()
+        reviewed_actor = self.verify_actor(self.utterance.character, self.actor.artifact,
+                                           actor_bytes, self.descriptor)
+        speech_proof = self.verify_speech(self.speech, self.service)
+        if type(reviewed_actor) is not ActorReviewProof or type(speech_proof) is not NativeSpeechProof:
+            raise S2VError("invalid typed S2V proof response")
+        # Validate after *both* foreign calls, including nested pins/evidence.
+        ActorReviewProof.__post_init__(reviewed_actor)
+        NativeSpeechProof.__post_init__(speech_proof)
+        media = before["input_media"]
+        if (reviewed_actor.character != self.utterance.character
+                or reviewed_actor.reference_sha256 != media["image"]["sha256"]
+                or speech_proof.request_sha256 != self.speech.request.digest()
+                or speech_proof.speech_sha256 != media["audio"]["sha256"]
+                or speech_proof.reference_sha256 != self.speech.request.reference.sha256
+                or speech_proof.scope_sha256 != self.service.approval.subject_sha256):
+            raise S2VError("S2V proof differs from current inputs")
+        after = self._current()
+        if canonical(after) != snapshot:
+            raise S2VError("S2V inputs or admission changed during verification")
+        return dict(after, actor_review=reviewed_actor.evidence.to_dict(), speech_native_proof={
+            key: getattr(speech_proof, key) for key in NativeSpeechProof.__dataclass_fields__})
 
     def preflight(self) -> dict[str, Any]:
         result = None
@@ -348,6 +387,7 @@ class VerifiedS2V:
         try:
             if self.authorize(subject) is not None:
                 raise ValueError
+            self._require_current(subject["lineage"])
         except (Exception, KeyboardInterrupt):
             failed = True
         if failed:
@@ -362,8 +402,9 @@ class VerifiedS2V:
                 or speech_proof["worker_id"] != worker_id
                 or proof.scope_sha256 != self.service.approval.subject_sha256
                 or proof.subject_sha256 != digest(current_subject)
-                or strict_object(proof.metadata_json) != self.media):
+                or canonical(strict_object(proof.metadata_json)) != canonical(self.media)):
             raise S2VError("S2V submission requires this owned worker's exact staged pair")
+        self._require_current(current_subject["lineage"])
 
 
 @dataclass(frozen=True)
