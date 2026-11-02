@@ -290,14 +290,17 @@ class CloudBudgetSession:
                  clock: Callable[[], float] = time.time,
                  monotonic: Callable[[], float] = time.monotonic,
                  idle_seconds: float = 120, quote_max_age_seconds: float = 30) -> None:
-        if (type(approval) not in {BudgetApproval, ConditioningBudgetApproval}
+        from cineforge.s2v_service import S2VBudgetApproval
+        if (type(approval) not in {BudgetApproval, ConditioningBudgetApproval, S2VBudgetApproval}
                 or type(guard_deployment_configured) is not bool
                 or not _number(idle_seconds) or idle_seconds > 300
                 or not _number(quote_max_age_seconds) or quote_max_age_seconds > 30):
             raise CloudBudgetError("invalid cloud budget configuration")
-        if (type(approval) is ConditioningBudgetApproval
+        if (isinstance(approval, (ConditioningBudgetApproval, S2VBudgetApproval))
                 and str(Path(path).absolute()) != approval.journal_directory):
-            raise CloudBudgetError("M4 journal path differs from the independently approved scope")
+            raise CloudBudgetError("M4 journal path differs from the independently approved scope"
+                if type(approval) is ConditioningBudgetApproval else
+                "M5 journal path differs from the independently approved scope")
         self.approval, self.transport = approval, transport
         self.clock, self.monotonic = clock, monotonic
         self.idle_seconds, self.quote_max_age_seconds = idle_seconds, quote_max_age_seconds
@@ -313,6 +316,7 @@ class CloudBudgetSession:
         self._cleanup_inflight: set[str] = set()
 
     def __enter__(self) -> CloudBudgetSession:
+        from cineforge.s2v_service import S2VBudgetApproval
         self._journal.__enter__()
         failed = False
         try:
@@ -321,8 +325,10 @@ class CloudBudgetSession:
                 raise ValueError
             self._last_wall, self._last_mono, self._effective = wall, mono, wall
             if self._journal.initial is None:
-                if type(self.approval) is ConditioningBudgetApproval:
-                    raise CloudBudgetError("M4 journal must be initialized by offline preflight")
+                if type(self.approval) in (ConditioningBudgetApproval, S2VBudgetApproval):
+                    raise CloudBudgetError("M4 journal must be initialized by offline preflight"
+                        if type(self.approval) is ConditioningBudgetApproval else
+                        "M5 journal must be initialized by offline preflight")
                 self._data = {"schema_version": 1, "approval_sha256": self.approval.subject_sha256,
                               "last_wall": wall, "records": {}}
             else:

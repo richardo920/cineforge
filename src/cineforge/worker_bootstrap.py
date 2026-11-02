@@ -27,7 +27,7 @@ import zlib
 from pathlib import Path
 from typing import Any
 
-from cineforge.worker_profiles import I2V_WORKER, T2V_WORKER, WorkerProfile
+from cineforge.worker_profiles import I2V_WORKER, S2V_WORKER, T2V_WORKER, WorkerProfile
 
 # Existing inspection names remain available; operational data is immutable and shared.
 REVISION = T2V_WORKER.runner_revision
@@ -70,14 +70,17 @@ def checked_setup_failure(value: Any) -> dict[str, Any] | None:
     """Closed descriptive data only; never retains remote strings or arbitrary fields."""
     if not isinstance(value, dict):
         return None
+    schema = value.get("schema")
+    if type(schema) is not str or schema not in ("m4-setup-failure-v1", "m5-setup-failure-v1"):
+        return None
+    assets = SETUP_ASSETS | ({"audio_encoder"} if schema == "m5-setup-failure-v1" else set())
     base = {"schema", "stage", "asset", "reason"}
     if (set(value) != base | ({"http_status"} if value.get("reason") == "http_error" else set())
-            or value.get("schema") != "m4-setup-failure-v1"
             or type(value.get("stage")) is not str or value["stage"] not in SETUP_REASONS
             or type(value.get("reason")) is not str
             or value["reason"] not in SETUP_REASONS[value["stage"]]
             or type(value.get("asset")) is not str
-            or (value["asset"] not in SETUP_ASSETS if value["stage"] == "weights"
+            or (value["asset"] not in assets if value["stage"] == "weights"
                 else value["asset"] != "none")
             or value["reason"] == "http_error" and (
                 type(value.get("http_status")) is not int or not 400 <= value["http_status"] <= 599)):
@@ -92,7 +95,8 @@ class SetupFailure(BootstrapError):
         checked = checked_setup_failure(diagnostic)
         if checked is None:
             raise BootstrapError("invalid setup diagnostic")
-        super().__init__("M4 worker setup failed")
+        super().__init__("M4 worker setup failed" if checked["schema"] == "m4-setup-failure-v1"
+                         else "M5 worker setup failed")
         self.diagnostic = checked
 
 
@@ -484,6 +488,11 @@ def validate_m4_runtime(runtime: dict[str, Any]) -> None:
 def checked_profile(value: Any) -> dict[str, Any] | None:
     if value is None:
         return None
+    if isinstance(value, dict) and value.get("id") == S2V_WORKER.profile_id:
+        if (set(value) != {"id", "scope_sha256"} or type(value["scope_sha256"]) is not str
+                or re.fullmatch(r"[0-9a-f]{64}", value["scope_sha256"]) is None):
+            raise BootstrapError("invalid closed M5 service scope")
+        return value
     if not isinstance(value, dict) or set(value) != {"id", "reference"} or value["id"] != M4_PROFILE:
         raise BootstrapError("unknown worker profile")
     reference = value["reference"]
@@ -498,7 +507,17 @@ def checked_profile(value: Any) -> dict[str, Any] | None:
 
 
 def _configuration(value: Any) -> WorkerProfile:
-    return T2V_WORKER if checked_profile(value) is None else I2V_WORKER
+    checked = checked_profile(value)
+    return T2V_WORKER if checked is None else (
+        S2V_WORKER if checked["id"] == S2V_WORKER.profile_id else I2V_WORKER)
+
+
+def validate_s2v_runtime(runtime: dict[str, Any]) -> None:
+    """Same reviewed5090 resources plus an actual BF16 attention-kernel probe."""
+    if runtime.get("compute_precision") != "bf16":
+        raise BootstrapError("M5 BF16 compute capability unavailable")
+    validate_m4_runtime({key: value for key, value in runtime.items()
+                         if key != "compute_precision"})
 
 
 def runtime_probe(timeout: float, python: str = sys.executable, *,
@@ -525,6 +544,9 @@ def runtime_probe(timeout: float, python: str = sys.executable, *,
                 "arch_list=torch.cuda.get_arch_list(),capability=list(torch.cuda.get_device_capability()),"
                 "device_count=torch.cuda.device_count(),"
                 "cuda_kernel_ok=bool(torch.isfinite(y).all().item()))))")
+        if configured is S2V_WORKER:
+            code = code.replace("device='cuda');", "device='cuda',dtype=torch.bfloat16);")
+            code = code.replace("cuda_kernel_ok=", "compute_precision='bf16' if x.dtype == torch.bfloat16 else 'invalid',cuda_kernel_ok=")
     runtime = _json(bounded_process([python, "-c", code], timeout=timeout))
     if (runtime["cuda_available"] is not True or runtime["gpu_raw_name"] != configured.gpu
             or type(runtime["gpu_memory_mib"]) is not int
@@ -563,7 +585,10 @@ def runtime_probe(timeout: float, python: str = sys.executable, *,
         runtime.update(nvml_total_mib=total, nvml_reserved_mib=reserved,
                        driver_version=values[2].strip())
         runtime.update(resource_evidence(resource_root or Path("/workspace")))
-        validate_m4_runtime(runtime)
+        if configured is S2V_WORKER:
+            validate_s2v_runtime(runtime)
+        else:
+            validate_m4_runtime(runtime)
     return runtime
 
 
@@ -619,7 +644,8 @@ def download(root: Path, asset: dict[str, Any], deadline: float, *,
     configured = _configuration(profile)
     revision, distribution = configured.model_revision, configured.distribution
     path = asset["path"]
-    if (not isinstance(path, str) or re.fullmatch(r"split_files/(diffusion_models|text_encoders|vae)"
+    folders = "diffusion_models|text_encoders|vae" + ("|audio_encoders" if configured is S2V_WORKER else "")
+    if (not isinstance(path, str) or re.fullmatch(r"split_files/(" + folders + r")"
             r"/[A-Za-z0-9._-]+\.safetensors", path) is None
             or asset["revision"] != revision
             or asset["url"] != "https://huggingface.co/Comfy-Org/" + distribution + "/resolve/"
@@ -679,7 +705,8 @@ def setup(request: dict[str, Any], deadline: float) -> dict[str, Any]:
             reason = error.reason
         if reason not in SETUP_REASONS[progress["stage"]]:
             reason, status = "unknown", {}
-        raise SetupFailure({"schema": "m4-setup-failure-v1", **progress,
+        schema = "m5-setup-failure-v1" if profile is not None and profile["id"] == S2V_WORKER.profile_id else "m4-setup-failure-v1"
+        raise SetupFailure({"schema": schema, **progress,
                             "reason": reason, **status}) from None
 
 
@@ -694,6 +721,13 @@ def _setup(request: dict[str, Any], deadline: float,
     configured = _configuration(profile)
     revision = configured.model_revision
     root = worker_root(plan["session_id"])
+    if configured is S2V_WORKER:
+        subject = selection.get("approval", {}).get("model_workflow", {}).get("approved_subject_sha256")
+        if type(subject) is not str or re.fullmatch(r"[0-9a-f]{64}", subject) is None:
+            raise BootstrapError("M5 setup requires an exact materialized request subject")
+        private_write(root, "s2v-setup-consumed.json", encode({
+            "scope_sha256": profile["scope_sha256"] if profile is not None else None,
+            "subject_sha256": subject}))
     if (selection["runner"]["revision"] != configured.runner_revision
             or selection["runner"]["custom_nodes"] != []
             or selection["model"]["revision"] != revision
@@ -750,7 +784,8 @@ def _setup(request: dict[str, Any], deadline: float,
                 != {path for path, _, _ in configured.files}):
             raise BootstrapError("M4 disk or weight manifest incompatible", reason="setup_rejected")
     files = []
-    roles = {"diffusion_models": "diffusion_model", "text_encoders": "text_encoder", "vae": "vae"}
+    roles = {"diffusion_models": "diffusion_model", "text_encoders": "text_encoder", "vae": "vae",
+             "audio_encoders": "audio_encoder"}
     for asset in selection["model"]["files"]:
         stage("weights", roles.get(asset["path"].split("/")[1], "none"))
         files.append(download(root, asset, deadline, profile=profile) if profile is not None
@@ -764,8 +799,12 @@ def _setup(request: dict[str, Any], deadline: float,
         "model_files": files, "custom_nodes_disabled": True}
     private_write(root, "worker-verification.json", encode(verification))
     stage("server_start")
-    process = subprocess.Popen([python, "main.py", "--listen", "127.0.0.1", "--port", "8188",
-        "--disable-all-custom-nodes", "--disable-api-nodes", "--disable-auto-launch"], cwd=comfy,
+    command = [python, "main.py", "--listen", "127.0.0.1", "--port", "8188",
+        "--disable-all-custom-nodes", "--disable-api-nodes", "--disable-auto-launch"]
+    if configured is S2V_WORKER:
+        command.append("--bf16-unet")
+        private_write(root, "s2v-component-notices.json", encode(selection["component_notices"]))
+    process = subprocess.Popen(command, cwd=comfy,
         env=clean_environment(), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL, start_new_session=True)
     private_write(root, "server-pid.json", encode({"pid": process.pid}))
@@ -790,6 +829,8 @@ def stage_reference(request: dict[str, Any], root: Path) -> dict[str, Any]:
     profile = checked_profile(request.get("profile"))
     if profile is None:
         raise BootstrapError("legacy worker does not support reference staging")
+    if profile["id"] != M4_PROFILE:
+        raise BootstrapError("M5 media requires the private paired staging protocol")
     expected = profile["reference"]
     try:
         payload = base64.b64decode(request["payload"], validate=True)
@@ -836,6 +877,11 @@ def dispatch(request: dict[str, Any]) -> dict[str, Any]:
         return setup(request, deadline)
     if operation == "stage_reference":
         return stage_reference(request, root)
+    if operation in ("s2v_pair_begin", "s2v_pair_chunk", "s2v_pair_finish"):
+        if profile is None or profile["id"] != S2V_WORKER.profile_id:
+            raise BootstrapError("paired media requires the closed M5 service profile")
+        from cineforge.s2v_stage import paired_transfer
+        return paired_transfer(request, root)
     raise BootstrapError("unknown worker operation")
 
 

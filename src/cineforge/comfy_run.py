@@ -16,6 +16,9 @@ from cineforge.comfy_transport import (
     ComfyTransport,
     TransportError,
     positive_seconds,
+    request_capped,
+    request_deadline,
+    require_time,
 )
 from cineforge.contracts import ProjectPlan, RunManifest, RunStatus, ShotRun
 from cineforge.private_store import PrivateRunDirectory
@@ -39,17 +42,17 @@ class _BoundedTransport:
         failed = False
         raw = b""
         try:
-            raw = self.transport.request(method, path, body,
-                                         timeout_seconds=min(remaining, timeout_seconds),
-                                         max_bytes=max_bytes)
+            raw = request_capped(self.transport, method, path, body,
+                timeout_seconds=min(remaining, timeout_seconds), max_bytes=max_bytes,
+                absolute_deadline=self.deadline, clock=self.clock)
         except Exception:
             failed = True
         # Raise outside the exception handler so neither traceback context nor cause
         # retains arbitrary transport/HTTP exception text containing credentials.
-        if failed:
-            raise TransportError("ComfyUI transport request failed")
         if self.clock() >= self.deadline:
             raise JobDeadlineError("single-shot deadline exceeded")
+        if failed:
+            raise TransportError("ComfyUI transport request failed")
         return raw
 
 
@@ -80,7 +83,11 @@ def _verify_nodes(transport: ComfyTransport, selection: ApprovedComfySelection,
                 target = schemas[graph[value[0]]["class_type"]]
                 if value[1] >= len(target["output"]):
                     raise ComfyRunError("worker node output slot is missing")
-            if field in ("unet_name", "clip_name", "vae_name") or (
+            from cineforge.s2v import S2VSelection
+            paired_file = (type(selection) is S2VSelection and (
+                node["class_type"] == "LoadAudio" and field == "audio"
+                or node["class_type"] == "AudioEncoderLoader" and field == "audio_encoder_name"))
+            if field in ("unet_name", "clip_name", "vae_name") or paired_file or (
                     node["class_type"] == "LoadImage" and field == "image"):
                 spec = (required | optional)[field]
                 if (not isinstance(spec, list) or not spec or not isinstance(spec[0], list)
@@ -100,6 +107,7 @@ def execute_comfy(
     max_polls: int = 600, max_result_bytes: int = 32 * 1024 * 1024,
     transport: ComfyTransport | None = None, clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
+    absolute_deadline: float | None = None,
 ) -> RunManifest:
     """Run exactly one approved shot; never provision, install, download weights or retry.
 
@@ -108,6 +116,8 @@ def execute_comfy(
     A failure may leave active GPU work; run.json records bounded cancellation results.
     The absolute timeout includes setup, inference, transfer and cancellation. Reserve
     transfer time inside it (default: min(request timeout, half the total)).
+    A trusted absolute_deadline uses the supplied clock and includes preflight;
+    it is forwarded unchanged across transport admission and cannot be renewed.
     """
     failed = False
     provider = None
@@ -123,9 +133,14 @@ def execute_comfy(
                 or len(plan.shots) != 1 or not isinstance(selection, ApprovedComfySelection)
                 or not isinstance(worker, WorkerVerification)):
             raise ComfyRunError("explicit opt-in and one approved shot are required")
+        if absolute_deadline is not None:
+            deadline = request_deadline(timeout_seconds, absolute_deadline, clock)
         worker.require_matches(selection)
         from cineforge.conditioning import ConditioningSelection
+        from cineforge.s2v import S2VSelection
         if type(selection) is ConditioningSelection:
+            selection.require_execution_worker(worker)
+        elif type(selection) is S2VSelection:
             selection.require_execution_worker(worker)
         request = selection.request(plan.shots[0])
         timeout_seconds = positive_seconds(timeout_seconds)
@@ -140,8 +155,11 @@ def execute_comfy(
                 or not 0 <= poll_interval_seconds <= 60):
             raise ComfyRunError("invalid polling interval")
         native = ComfyHTTPTransport(endpoint, allow_live=True)
-        deadline = clock() + timeout_seconds
+        if absolute_deadline is None:
+            deadline = clock() + timeout_seconds
+        require_time(deadline, clock)
         inference_deadline = deadline - result_timeout_seconds
+        require_time(inference_deadline, clock)
         bounded = _BoundedTransport(native if transport is None else transport,
                                     inference_deadline, clock)
         provider = ComfyExecutionProvider(
@@ -151,6 +169,7 @@ def execute_comfy(
             max_result_bytes=max_result_bytes, clock=clock,
             verified_server_revision=worker.record["server_revision"],
             verified_worker_id=worker.record["worker_id"],
+            absolute_deadline=deadline,
         )
         # Translation rechecks current rights; record/approval access and JSON
         # preparation must also reject statically before claiming private storage.
@@ -168,6 +187,7 @@ def execute_comfy(
             "cancellation": {"attempted": False, "confirmed_terminal": False},
         }
         prepared_record = canonical(record)
+        require_time(inference_deadline, clock)
     except (Exception, KeyboardInterrupt):
         failed = True
     if (failed or provider is None or bounded is None or request is None
@@ -182,6 +202,7 @@ def execute_comfy(
             try:
                 # Persist intent before any request; never replay this directory on restart.
                 store.checkpoint(prepared_record)
+                require_time(inference_deadline, clock)
                 _verify_nodes(bounded, selection, request_timeout_seconds)
                 record["outcome"] = "submitting"
                 store.checkpoint(canonical(record))
@@ -205,11 +226,14 @@ def execute_comfy(
                 # cap still includes it and remains inside any caller's lease cutoff.
                 bounded.deadline = deadline
                 result = provider.result(run.job_id)
+                require_time(deadline, clock)
                 artifact = store.put(result)
+                require_time(deadline, clock)
                 completed = RunManifest(run_id, plan, (result.run,), (artifact,))
                 record.update(outcome="succeeded", known_run=result.run.to_dict(),
                               manifest=completed.to_dict())
                 store.checkpoint(canonical(record))
+                require_time(deadline, clock)
             except (Exception, KeyboardInterrupt):
                 failed = True
                 # One bounded attempt, for this instance's confirmed job only. A missing

@@ -238,6 +238,14 @@ class ComfyRunTests(unittest.TestCase):
         values.update(changes)
         return execute_comfy(self.plan, self.selection, self.worker, self.output, **values)
 
+    def test_expired_trusted_absolute_cap_refuses_before_callbacks_storage_or_wire(self):
+        with patch.object(WorkerVerification, "require_matches") as match:
+            with self.assertRaises(ComfyRunError):
+                self.execute(absolute_deadline=160, clock=lambda: 161)
+        match.assert_not_called()
+        self.assertFalse(self.output.exists())
+        self.assertEqual(self.wire.calls, [])
+
     def test_success_persists_verified_bytes_and_manifest_outside_git(self):
         manifest = self.execute()
         artifact = manifest.artifacts[0]

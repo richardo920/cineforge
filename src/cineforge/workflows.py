@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from cineforge.comfy_transport import positive_seconds
 from cineforge.json_codec import canonical_json, strict_loads
@@ -75,6 +75,19 @@ def reference_inputs(graph: dict[str, Any]) -> bool:
                for node in graph.values())
 
 
+def audio_reference_inputs(graph: dict[str, Any]) -> bool:
+    """All submitted core audio loaders/explicit references require the checked S2V gate.
+
+    Hidden and utility nodes count too; this is not a classifier for arbitrary
+    custom-node code or authority to install any node.
+    """
+    fields = {"audio", "audio_file", "audio_path", "audio_url", "reference_audio", "ref_audio",
+              "audio_encoder_output", "speech", "speech_audio"}
+    return any(node["class_type"] == "LoadAudio" or any(
+        name in node["inputs"] and node["inputs"][name] is not None for name in fields)
+        for node in graph.values())
+
+
 @dataclass(frozen=True)
 class InputBinding:
     node_id: str
@@ -142,8 +155,9 @@ class WorkflowTemplate:
 
     def _requires_conditioning(self, request: ExecutionRequest) -> bool:
         return (request.shot.character_revision is not None or self.conditioning is not None
-                or request.model.task == "image-to-video"
-                or reference_inputs(strict_object(self.graph_json)))
+                or request.model.task in ("image-to-video", "speech-to-video")
+                or reference_inputs(strict_object(self.graph_json))
+                or audio_reference_inputs(strict_object(self.graph_json)))
 
     def translate(self, request: ExecutionRequest) -> dict[str, Any]:
         if (not isinstance(request, ExecutionRequest)
@@ -155,9 +169,12 @@ class WorkflowTemplate:
         if self._requires_conditioning(request):
             # Creative JSON cannot manufacture this non-serialized, byte-verified gate.
             from cineforge.conditioning import VerifiedConditioning
-            if type(self.conditioning) is not VerifiedConditioning:
+            from cineforge.s2v import VerifiedS2V
+            if (type(self.conditioning) not in (VerifiedConditioning, VerifiedS2V)
+                    or audio_reference_inputs(strict_object(self.graph_json))
+                    and type(self.conditioning) is not VerifiedS2V):
                 raise ProviderError("workflow does not support character conditioning")
-            self.conditioning.require(request, self.digest)
+            cast(VerifiedConditioning | VerifiedS2V, self.conditioning).require(request, self.digest)
         graph = strict_object(self.graph_json)
         graph[self.prompt.node_id]["inputs"][self.prompt.input_name] = request.shot.prompt
         graph[self.seed.node_id]["inputs"][self.seed.input_name] = request.shot.seed
@@ -166,6 +183,9 @@ class WorkflowTemplate:
     def require_submission(self, request: ExecutionRequest, worker_id: str | None) -> None:
         if self._requires_conditioning(request):
             from cineforge.conditioning import VerifiedConditioning
-            if type(self.conditioning) is not VerifiedConditioning:
+            from cineforge.s2v import VerifiedS2V
+            if (type(self.conditioning) not in (VerifiedConditioning, VerifiedS2V)
+                    or audio_reference_inputs(strict_object(self.graph_json))
+                    and type(self.conditioning) is not VerifiedS2V):
                 raise ProviderError("workflow does not support verified reference submission")
-            self.conditioning.require_submission(request, worker_id)
+            cast(VerifiedConditioning | VerifiedS2V, self.conditioning).require_submission(request, worker_id)

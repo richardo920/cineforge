@@ -8,7 +8,7 @@ from pathlib import Path
 
 from cineforge.private_store import read_private_input
 
-_PROFILE_IMPORT = b"from cineforge.worker_profiles import I2V_WORKER, T2V_WORKER, WorkerProfile\n"
+_PROFILE_IMPORT = b"from cineforge.worker_profiles import I2V_WORKER, S2V_WORKER, T2V_WORKER, WorkerProfile\n"
 _FUTURE = b"from __future__ import annotations\n"
 _MAIN = b'\nif __name__ == "__main__":\n    raise SystemExit(main())\n'
 MAX_SOURCE_BYTES = 128 * 1024
@@ -35,10 +35,30 @@ def worker_source() -> bytes:
         assignments = {target.id for node in definitions if isinstance(node, ast.Assign)
                        for target in node.targets if isinstance(target, ast.Name)}
         if (not {"ReferenceRuntime", "WorkerProfile"} <= classes
-                or not {"T2V_WORKER", "I2V_WORKER"} <= assignments):
+                or not {"T2V_WORKER", "I2V_WORKER", "S2V_WORKER"} <= assignments):
             raise ValueError
-        result = (_FUTURE + profiles + b"\n"
-                  + bootstrap.replace(_FUTURE, b"").replace(_PROFILE_IMPORT, b""))
+        helpers = b""
+        for name, imports in (
+            ("audio_pcm.py", ()),
+            ("paired_media.py", (b"from cineforge.audio_pcm import inspect_pcm16_wav\n",)),
+            ("s2v_stage.py", (
+                b"from cineforge.paired_media import PNG_MAX_BYTES, SPEECH_MAX_BYTES, image_metadata, speech_metadata\n",
+                b"from cineforge.worker_bootstrap import BootstrapError, encode, private_write\n")),
+        ):
+            helper = read_private_input(root / name, max_bytes=MAX_SOURCE_BYTES)
+            if helper.count(_FUTURE) != 1:
+                raise ValueError
+            for dependency in imports:
+                if helper.count(dependency) != 1:
+                    raise ValueError
+                helper = helper.replace(dependency, b"")
+            helpers += helper.replace(_FUTURE, b"") + b"\n"
+        staging_import = b"        from cineforge.s2v_stage import paired_transfer\n"
+        if bootstrap.count(staging_import) != 1:
+            raise ValueError
+        result = (_FUTURE + profiles + b"\n" + helpers
+                  + bootstrap.replace(_FUTURE, b"").replace(_PROFILE_IMPORT, b"")
+                    .replace(staging_import, b""))
         if len(result) > MAX_SOURCE_BYTES:
             raise ValueError
         tree = ast.parse(result)

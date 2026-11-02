@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import ipaddress
 import math
 import os
@@ -13,22 +14,34 @@ import stat
 import subprocess
 import tempfile
 import time
+import uuid
 from pathlib import Path
 from threading import Event, Lock, RLock, Thread
 from types import TracebackType
-from typing import Any, Callable
+from typing import Any, Callable, Protocol
 
 from cineforge import worker_bootstrap, worker_guard
 from cineforge.cloud_budget import CloudBudgetSession
 from cineforge.comfy_policy import ApprovedComfySelection, WorkerVerification
-from cineforge.comfy_transport import ComfyHTTPTransport
+from cineforge.comfy_transport import (
+    ComfyHTTPTransport,
+    request_capped,
+    request_deadline,
+    require_time,
+)
 from cineforge.devices import Backend, GPUDevice
 from cineforge.private_store import PrivateRunDirectory, read_private_input
 from cineforge.runpod import LeaseSnapshot, RunpodPodSpec, WorkerObservation
 from cineforge.runpod_transport import CloudTransport
+from cineforge.s2v import S2VSelection, StagedS2VPair
+from cineforge.s2v_service import S2VServiceContext
 from cineforge.worker_bundle import worker_source
 from cineforge.worker_guard import GuardReceipt, WorkerGuardPlan, worker_guard_source_sha256
 from cineforge.workflows import canonical, strict_object
+
+
+class NativeInvoker(Protocol):
+    def __call__(self, timeout: float, *, absolute_deadline: float) -> Any: ...
 
 
 class WorkerError(ValueError):
@@ -112,11 +125,13 @@ def ssh_public_key(private_key: str | Path) -> str:
 class SSHWorker:
     """One lease/driver; isolated TOFU and bounded retained control namespaces."""
 
-    def __init__(self, spec: RunpodPodSpec, selection: ApprovedComfySelection,
+    def __init__(self, spec: RunpodPodSpec, selection: ApprovedComfySelection | S2VServiceContext,
                  budget: CloudBudgetSession, transport: CloudTransport, private_key: str | Path,
                  state_dir: str | Path, *, allow_live: bool = False) -> None:
         if allow_live is not True:
             raise WorkerError("SSH worker needs explicit live opt-in")
+        if type(selection) is S2VSelection:
+            raise WorkerError("M5 worker acquisition requires its static service context")
         private_file(private_key, max_bytes=16384, read=False)
         self.spec, self.selection, self.budget, self.transport = spec, selection, budget, transport
         self.private_key, self.state_dir = Path(private_key).absolute(), Path(state_dir)
@@ -140,7 +155,25 @@ class SSHWorker:
         self._enforce: Callable[[], tuple[str, ...]] | None = None
         self._source = worker_source()
         from cineforge.conditioning import ConditioningSelection
-        self._profile = selection.worker_profile if type(selection) is ConditioningSelection else None
+        self._profile: dict[str, Any] | None = None
+        if type(selection) is ConditioningSelection:
+            self._profile = selection.worker_profile
+        elif type(selection) is S2VServiceContext:
+            selection.preflight()
+            if (getattr(budget, "approval", None) != selection.approval
+                    or (spec.image, spec.gpu_id, spec.data_center_id, spec.min_ram_per_gpu_gb,
+                        spec.disk_gb, spec.min_cuda_version)
+                    != (selection.approval.image, selection.approval.gpu_id,
+                        selection.approval.region, selection.approval.min_ram_per_gpu_gb,
+                        selection.approval.disk_gb, selection.approval.min_cuda)
+                    or spec.registry_id is not None
+                    or spec.max_hourly_usd > selection.approval.hourly_ceiling_usd):
+                raise WorkerError("M5 service and owned budget scope differ")
+            self._profile = selection.worker_profile
+        self._s2v_lock = Lock()
+        self._s2v_consumed: set[str] = set()
+        self._s2v_setup_attempted = False
+        self._prepared_s2v: WorkerVerification | None = None
         self.runtime_evidence: dict[str, Any] | None = None
         self.setup_failure: dict[str, Any] | None = None
         self._reference_staged = False
@@ -229,6 +262,8 @@ class SSHWorker:
 
     def _request(self, request: dict[str, Any], timeout: float, *, supervise: bool = True) \
             -> dict[str, Any]:
+        if type(self.selection) is S2VServiceContext:
+            self.selection.preflight()
         request = dict(request, allow_live=True, timeout_seconds=timeout,
                        guard_sha256=worker_guard_source_sha256())
         if self._profile is not None:
@@ -281,7 +316,8 @@ class SSHWorker:
         self.budget.arm_guard(snapshot.key, receipt)
         runtime = reply["runtime"]
         if self._profile is not None:
-            self.runtime_evidence = self._runtime_evidence(runtime)
+            self.runtime_evidence = self._runtime_evidence(runtime,
+                s2v=type(self.selection) is S2VServiceContext)
         self.observation = WorkerObservation(GPUDevice(str(snapshot.resource_id), Backend.CUDA,
             runtime["gpu_memory_mib"], frozenset({self.selection.model.required_precision})),
             runtime["gpu_raw_name"])
@@ -344,35 +380,174 @@ class SSHWorker:
             self._remote_suspended.set()
         return self.plan
 
-    def prepare(self) -> WorkerVerification:
+    def prepare(self, selection: S2VSelection | None = None) -> WorkerVerification:
         self.check()
         if self.plan is None:
             raise WorkerError("worker guard not armed")
         timeout = min(1200, self.budget.remaining_seconds(self._key) - 120)
         if timeout <= 0:
             raise WorkerError("insufficient lease time for setup and shot retrieval")
+        declarations = self.selection.declarations
+        if type(self.selection) is S2VServiceContext:
+            if self._s2v_setup_attempted:
+                raise WorkerError("M5 service setup already attempted; inspect owned worker state")
+            self._require_s2v(selection)
+            assert selection is not None
+            declarations = selection.declarations
+            # Consume before any model setup/download request; a lost ACK is uncertain.
+            self._s2v_setup_attempted = True
         reply = self._request({"operation": "setup", "plan": self.plan.to_dict(),
-            "selection": self.selection.declarations, "image_digest": self.spec.image.split("@", 1)[1]},
+            "selection": declarations, "image_digest": self.spec.image.split("@", 1)[1]},
             timeout)
         result = WorkerVerification.from_dict(reply["verification"])
         result.require_matches(self.selection)
         if self._profile is not None:
-            self.runtime_evidence = self._runtime_evidence(reply["runtime"])
+            self.runtime_evidence = self._runtime_evidence(reply["runtime"],
+                s2v=type(self.selection) is S2VServiceContext)
         if (result.record["worker_id"] != self.plan.pod_id
                 or result.record["image_digest"] != self.spec.image.split("@", 1)[1]):
             raise WorkerError("worker verification identity differs")
+        if type(self.selection) is S2VServiceContext:
+            self._require_s2v(selection)
+            self._prepared_s2v = result
         return result
 
     @staticmethod
-    def _runtime_evidence(runtime: dict[str, Any]) -> dict[str, Any]:
+    def _runtime_evidence(runtime: dict[str, Any], *, s2v: bool = False) -> dict[str, Any]:
         fields = {"python_version", "torch_version", "torchvision_version", "cuda_version",
                   "gpu_raw_name", "gpu_memory_mib", "cuda_available", "arch_list", "capability",
                   "cuda_kernel_ok", "device_count", "nvml_total_mib",
                   "nvml_reserved_mib", "driver_version"} | worker_bootstrap.M4_RESOURCE_FIELDS
+        if s2v:
+            fields |= {"compute_precision"}
         if set(runtime) != fields or len(canonical(runtime)) > 4096:
             raise WorkerError("invalid bounded M4 runtime evidence")
-        worker_bootstrap.validate_m4_runtime(runtime)
+        if s2v:
+            worker_bootstrap.validate_s2v_runtime(runtime)
+        else:
+            worker_bootstrap.validate_m4_runtime(runtime)
         return strict_object(canonical(runtime))
+
+    def _require_s2v(self, selection: S2VSelection | None) -> None:
+        failed = False
+        try:
+            if (type(self.selection) is not S2VServiceContext or type(selection) is not S2VSelection
+                    or selection.gate.service != self.selection or self.plan is None
+                    or self.runtime_evidence is None):
+                raise ValueError
+            worker_bootstrap.validate_s2v_runtime(self.runtime_evidence)
+            trace = selection.gate.preflight()
+            selection.request(selection.gate.shot)
+            if trace["speech_native_proof"]["worker_id"] != self.plan.pod_id:
+                raise ValueError
+        except (Exception, KeyboardInterrupt):
+            failed = True
+        if failed:
+            raise WorkerError("current S2V request differs from guarded native worker scope")
+
+    def run_guarded_native(self, invoke: NativeInvoker, *, allow_live: bool = False) -> Any:
+        """Invoke trusted controller-local code once under the current M5 guard.
+
+        The callback must forward the original same-host absolute deadline to
+        native103 or the separately reviewed remote108 controller. Remote code
+        derives its own local cap; this method does not transport execution.
+        No code/command comes from JSON. The callback owns bounded work/cleanup;
+        admission and the current guard are checked before and after return.
+        """
+        if (allow_live is not True or type(self.selection) is not S2VServiceContext
+                or self.plan is None or self.runtime_evidence is None or not callable(invoke)):
+            raise WorkerError("native speech needs explicit guarded M5 service opt-in")
+        worker_bootstrap.validate_s2v_runtime(self.runtime_evidence)
+        self.selection.preflight()
+        self.check()
+        timeout = min(1200, self.budget.remaining_seconds(self._key) - 120)
+        if timeout <= 0:
+            raise WorkerError("insufficient owned lease for native speech")
+        deadline = time.monotonic() + timeout
+        failed = False
+        result = None
+        try:
+            result = invoke(timeout, absolute_deadline=deadline)
+            self.check()
+            if time.monotonic() >= deadline:
+                raise ValueError
+        except (Exception, KeyboardInterrupt):
+            failed = True
+        if failed:
+            raise WorkerError("guarded native speech incomplete or unconfirmed")
+        return result
+
+    @property
+    def s2v_verification(self) -> WorkerVerification | None:
+        """Observed preparation snapshot only; not a materialized graph authorization."""
+        return self._prepared_s2v
+
+    def stage_s2v(self, selection: S2VSelection) -> StagedS2VPair:
+        """One consumed begin/chunk/finish transfer, never retries a lost acknowledgement."""
+        with self._s2v_lock:
+            self.check()
+            self._require_s2v(selection)
+            if self._prepared_s2v is None or self.plan is None:
+                raise WorkerError("S2V service model/worker preparation is required before staging")
+            self._prepared_s2v.require_matches(selection)
+            media = selection.gate.media
+            scope = selection.gate.service.approval.subject_sha256
+            subject = selection.approved_subject_sha256
+            pair = hashlib.sha256(canonical({"scope_sha256": scope, "subject_sha256": subject,
+                                             "media": media})).hexdigest()
+            if pair in self._s2v_consumed or len(self._s2v_consumed) >= 4:
+                raise WorkerError("S2V pair transfer already consumed or limit exceeded")
+            remaining = self.budget.remaining_seconds(self._key) - 120
+            if remaining <= 0:
+                raise WorkerError("insufficient owned lease for private paired transfer")
+            deadline = time.monotonic() + min(90, remaining)
+            self._s2v_consumed.add(pair)
+            stage_id = uuid.uuid4().hex
+            common = {"plan": self.plan.to_dict(), "stage_id": stage_id,
+                      "subject_sha256": subject, "media": media}
+            failed = False
+            result = None
+            try:
+                def call(operation: str, **fields: Any) -> dict[str, Any]:
+                    self.check()
+                    self._require_s2v(selection)
+                    timeout = min(10, deadline - time.monotonic(),
+                                  self.budget.remaining_seconds(self._key) - 120)
+                    if timeout <= 0:
+                        raise ValueError
+                    reply = self._request(dict(common, operation=operation, **fields), timeout)
+                    self.check()
+                    if time.monotonic() >= deadline:
+                        raise ValueError
+                    return reply
+                beginning = call("s2v_pair_begin")
+                if (set(beginning) != {"stage_id", "pair_sha256", "reused"}
+                        or beginning["stage_id"] != stage_id or beginning["pair_sha256"] != pair
+                        or set(beginning["reused"]) != {"image", "audio"}
+                        or any(type(value) is not bool for value in beginning["reused"].values())):
+                    raise ValueError
+                for kind, payload in (("image", selection.gate.actor.read()),
+                                      ("audio", selection.gate.speech.payload)):
+                    if beginning["reused"][kind]:
+                        continue
+                    for offset in range(0, len(payload), 65536):
+                        chunk = payload[offset:offset + 65536]
+                        reply = call("s2v_pair_chunk", kind=kind, offset=offset,
+                                     chunk=base64.b64encode(chunk).decode())
+                        if reply != {"stage_id": stage_id, "pair_sha256": pair, "kind": kind,
+                                     "offset": offset + len(chunk)}:
+                            raise ValueError
+                answer = call("s2v_pair_finish")
+                if answer != {"stage_id": stage_id, "pair_sha256": pair, "scope_sha256": scope,
+                        "subject_sha256": subject, "media": media, "worker_id": self.plan.pod_id}:
+                    raise ValueError
+                self._require_s2v(selection)
+                result = StagedS2VPair(self.plan.pod_id, scope, subject, canonical(media).decode())
+            except (Exception, KeyboardInterrupt):
+                failed = True
+            if failed or result is None:
+                raise WorkerError("private paired transfer incomplete or unconfirmed; never replay")
+            return result
 
     def stage_reference(self) -> dict[str, Any]:
         from cineforge.conditioning import ConditioningSelection
@@ -593,9 +768,21 @@ class SupervisedComfyTransport:
         self.worker, self.transport = worker, transport
 
     def request(self, method: str, path: str, body: dict[str, object] | None = None,
-                *, timeout_seconds: float, max_bytes: int) -> bytes:
+                *, timeout_seconds: float, max_bytes: int,
+                absolute_deadline: float | None = None,
+                clock: Callable[[], float] | None = None) -> bytes:
+        clock = time.monotonic if clock is None else clock
+        deadline = request_deadline(timeout_seconds, absolute_deadline, clock)
         self.worker.check()
-        value = self.transport.request(method, path, body, timeout_seconds=min(timeout_seconds,
-            self.worker.budget.remaining_seconds(self.worker._key)), max_bytes=max_bytes)
+        reserve = 120 if type(self.worker.selection) is S2VServiceContext else 0
+        remaining = min(require_time(deadline, clock),
+                        self.worker.budget.remaining_seconds(self.worker._key) - reserve)
+        deadline = min(deadline, clock() + remaining)
+        require_time(deadline, clock)
+        value = request_capped(self.transport, method, path, body,
+            timeout_seconds=remaining, max_bytes=max_bytes, absolute_deadline=deadline, clock=clock)
         self.worker.check()
+        require_time(deadline, clock)
+        if self.worker.budget.remaining_seconds(self.worker._key) <= reserve:
+            raise WorkerError("ComfyUI response exceeded the owned lease reserve")
         return value

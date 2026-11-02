@@ -56,4 +56,24 @@ I2V_WORKER = WorkerProfile(
                                        64_000_000_000, 32 * 1024**3, 30 * 1024**3),
 )
 
+S2V_WORKER = WorkerProfile(
+    profile_id="m5-wan22-s2v14b-5090-v1",
+    runner_revision="6d352802d8f8b9133f664a1757d6c6d26390c335",  # pragma: allowlist secret - public source revision
+    model_revision="ee6f4a40737a995bf5818954cfce6d59443b0f04",  # pragma: allowlist secret - public model revision
+    distribution="Wan_2.2_ComfyUI_Repackaged", gpu="NVIDIA GeForce RTX 5090",
+    minimum_memory_mib=30720, cuda_version="12.8", maximum_asset_bytes=17_000_000_000,
+    files=(
+    ("split_files/diffusion_models/wan2.2_s2v_14B_fp8_scaled.safetensors", 16394832474,
+     "140e75af5534ac3d91e710d9df756f7032addd64b341ba2c1c70e3e6da9aa216"),  # pragma: allowlist secret - public weight digest
+    ("split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors", 6735906897,
+     "c3355d30191f1f066b26d93fba017ae9809dce6c627dda5f6a66eaa651204f68"),  # pragma: allowlist secret - public weight digest
+    ("split_files/audio_encoders/wav2vec2_large_english_fp16.safetensors", 630997322,
+     "f0017a43ea57ef6b3d4866be607844bbd8cada6d30966f7d70044ed0d63d3f9e"),  # pragma: allowlist secret - public weight digest
+    ("split_files/vae/wan_2.1_vae.safetensors", 253815318,
+     "2fc39d31359a4b0a64f55876d8ff7fa8d780956ae2cb13463b0223e15148976b"),  # pragma: allowlist secret - public weight digest
+),
+    reference_runtime=ReferenceRuntime("2.8.0+cu128", 32768, (12, 0), "sm_120",
+                                       64_000_000_000, 32 * 1024**3, 30 * 1024**3),
+)
+
 # END_REVIEWED_WORKER_PROFILES
