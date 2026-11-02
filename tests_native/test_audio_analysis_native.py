@@ -75,6 +75,18 @@ class NativeAudioAnalysisTests(unittest.TestCase):
         _, reference_peak = self.reference(data)
         self.assertAlmostEqual(report.true_peak_dbtp.value, reference_peak, delta=.5)
 
+    def test_positive_intersample_peak_is_reported_without_pcm_sample_risk(self):
+        data = wav_bytes(amplitude=.99, frequency=12000, phase=.7853981633974483)
+        report = self.measure("positive-intersample-overload", data)
+        self.assertGreater(report.true_peak_dbtp.value, 0)
+        self.assertLess(report.sample_peak_dbfs, -3)
+        self.assertEqual(report.clipping_risk_samples, 0)
+        self.assertNotIn("clipping_risk", report.issues)
+        self.assertIn("true_peak_overload", report.issues)
+        _, reference_peak = self.reference(data)
+        self.assertGreater(reference_peak, 0)
+        self.assertAlmostEqual(report.true_peak_dbtp.value, reference_peak, delta=.15)
+
     def test_saturated_samples_trigger_clipping_risk(self):
         report = self.measure("saturated-PCM-risk", wav_bytes(saturated=True))
         self.assertEqual(report.clipping_risk_samples, 48000)

@@ -21,7 +21,7 @@ from typing import Callable, ClassVar, Protocol
 
 from cineforge.audio import AudioTimebase, RevisionPin, _AudioContract
 from cineforge.audio_pcm import PCMError, inspect_pcm16_wav
-from cineforge.audio_process import run_audio_process
+from cineforge.audio_process import AudioProcessError, run_audio_process
 from cineforge.contracts import Contract, ContractError, _digest, _integer, _tuple, _unique
 from cineforge.json_codec import strict_loads
 
@@ -29,9 +29,10 @@ _MAX_BYTES = 16 * 1024 * 1024
 _FILTER = "loudnorm=I=-24:LRA=7:TP=-2:print_format=json"
 _LOUDNORM_KEYS = frozenset({"input_i", "input_tp", "input_lra", "input_thresh", "output_i",
     "output_tp", "output_lra", "output_thresh", "normalization_type", "target_offset"})
-_ISSUES = frozenset({"clipping_risk", "silent_audio", "duration_mismatch",
+_ISSUES = frozenset({"clipping_risk", "true_peak_overload", "silent_audio", "duration_mismatch",
     "audio_exceeds_picture", "missing_expected_energy", "energy_outside_expected_windows",
-    "integrated_loudness_undefined", "true_peak_undefined", "measurement_unavailable"})
+    "integrated_loudness_undefined", "true_peak_undefined", "measurement_unavailable",
+    "tool_cleanup_uncertain"})
 
 
 class AudioAnalysisError(ContractError):
@@ -152,12 +153,14 @@ class Measurement(_AudioContract):
         if self.status not in ("measured", "undefined", "unavailable"):
             raise AudioAnalysisError("invalid measurement status")
         if self.reason not in ("none", "silence", "insufficient_duration", "below_gate_or_undefined",
-                                "tool_unavailable", "tool_failed", "invalid_tool_output"):
+                                "tool_unavailable", "tool_failed", "invalid_tool_output",
+                                "tool_cleanup_uncertain"):
             raise AudioAnalysisError("invalid measurement reason")
         if ((self.status == "undefined" and self.reason not in (
                 "silence", "insufficient_duration", "below_gate_or_undefined"))
                 or (self.status == "unavailable" and self.reason not in (
-                    "tool_unavailable", "tool_failed", "invalid_tool_output"))):
+                    "tool_unavailable", "tool_failed", "invalid_tool_output",
+                    "tool_cleanup_uncertain"))):
             raise AudioAnalysisError("measurement reason does not match its status")
         if self.status == "measured":
             object.__setattr__(self, "value", _finite(self.value, -200, 100))
@@ -374,6 +377,9 @@ def _analysis_issues(settings: AnalysisSettings, timing: DeclaredTiming, frames:
     issues: set[str] = set()
     if risk:
         issues.add("clipping_risk")
+    # Objective full-scale overload, separate from delivery-specific M5.4 targets.
+    if true_peak.status == "measured" and true_peak.value is not None and true_peak.value > 0:
+        issues.add("true_peak_overload")
     if silence:
         issues.add("silent_audio")
     exact_ticks = Fraction(frames * settings.timebase.ticks_per_second, rate)
@@ -409,6 +415,8 @@ def _analysis_issues(settings: AnalysisSettings, timing: DeclaredTiming, frames:
         issues.add("integrated_loudness_undefined")
     if true_peak.status == "undefined":
         issues.add("true_peak_undefined")
+    if "tool_cleanup_uncertain" in (integrated.reason, true_peak.reason):
+        issues.add("tool_cleanup_uncertain")
     return issues
 
 
@@ -478,6 +486,10 @@ def analyze_wav(payload: bytes, pin: RevisionPin, settings: AnalysisSettings,
             if (not isinstance(output, bytes) or len(output) > settings.max_output_bytes
                     or time.monotonic() > deadline):
                 raise AudioAnalysisError("audio analysis tool bounds exceeded")
+        except AudioProcessError as error:
+            reason = "tool_cleanup_uncertain" if error.cleanup_uncertain else (
+                "tool_failed" if identity else "tool_unavailable")
+            integrated = true_peak = Measurement(None, "unavailable", reason)
         except Exception:
             integrated = true_peak = Measurement(None, "unavailable",
                                                   "tool_failed" if identity else "tool_unavailable")

@@ -12,6 +12,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import traceback
 import unittest
 import wave
 from dataclasses import replace
@@ -159,6 +160,29 @@ class AudioAnalysisTests(unittest.TestCase):
         self.assertEqual(report.measurement_status, "unavailable")
         self.assertIsNone(report.tool)
 
+    def test_cleanup_uncertainty_stays_explicit_in_unavailable_analysis(self) -> None:
+        for failed_stage in ("identify", "measure"):
+            class UncertainTool(FakeTool):
+                def identify(self, **limits):
+                    if failed_stage == "identify":
+                        raise AudioProcessError("audio process cleanup incomplete or unconfirmed",
+                                                cleanup_uncertain=True)
+                    return super().identify(**limits)
+                def measure(self, payload, **limits):
+                    raise AudioProcessError("audio process cleanup incomplete or unconfirmed",
+                                            cleanup_uncertain=True)
+            report = self.analyze(tool=UncertainTool())
+            self.assertEqual(report.measurement_status, "unavailable")
+            self.assertEqual(report.integrated_lufs.reason, "tool_cleanup_uncertain")
+            self.assertIn("tool_cleanup_uncertain", report.issues)
+            self.assertIn("measurement_unavailable", report.issues)
+            self.assertIsNone(report.integrated_lufs.value)
+            self.assertIsNone(report.true_peak_dbtp.value)
+            self.assertEqual(AudioAnalysisReport.from_json(report.to_json()), report)
+            with self.assertRaises(ContractError):
+                replace(report, issues=tuple(item for item in report.issues
+                                             if item != "tool_cleanup_uncertain"))
+
     def test_silence_short_and_gated_undefined_are_distinct_without_json_infinity(self) -> None:
         for payload, reason in ((wav_bytes(amplitude=0), "silence"),
                                 (wav_bytes(seconds=.1), "insufficient_duration"),
@@ -192,6 +216,22 @@ class AudioAnalysisTests(unittest.TestCase):
         stereo = wav_bytes(channels=2, active=(.3, .7))
         other = self.analyze(payload=stereo, pin=pin_for(stereo))
         self.assertEqual(mono.energy_windows, other.energy_windows)
+
+    def test_positive_true_peak_has_separate_risk_and_strict_report_consistency(self) -> None:
+        for value in ("0.51", "0.01", "0.00", "-0.01", "-inf"):
+            report = self.analyze(tool=FakeTool(meter_output(true_peak=value)))
+            positive = value not in ("0.00", "-0.01", "-inf")
+            self.assertEqual("true_peak_overload" in report.issues, positive)
+            self.assertEqual(report.clipping_risk_samples, 0)
+            self.assertNotIn("clipping_risk", report.issues)
+            changed = set(report.issues)
+            if positive:
+                changed.remove("true_peak_overload")
+            else:
+                changed.add("true_peak_overload")
+            with self.assertRaises(ContractError):
+                replace(report, issues=tuple(sorted(changed)))
+        self.assertNotIn("true_peak_overload", self.analyze(tool=None).issues)
 
     def test_declared_duration_picture_and_speech_window_issues(self) -> None:
         report = self.analyze(timing=timing(900, speech=(TickSpan(100, 100),)))
@@ -375,6 +415,106 @@ class AudioProcessTests(unittest.TestCase):
                 self.run_python("import os,time; child=os.fork(); "
                                 "time.sleep(5) if child==0 else None", timeout=.2)
         self.assertEqual(kill.call_args.args[1], signal.SIGKILL)
+
+    def test_cleanup_failure_matrix_attempts_all_steps_and_has_no_private_context(self) -> None:
+        for failures in ({"killpg"}, {"killpg", "kill"}, {"wait"}, {"selector"}, {"stdin"},
+                         {"stdout"}, {"killpg", "kill", "wait", "selector", "stdin", "stdout"}):
+            with self.subTest(failures=failures):
+                calls = []
+                def step(name):
+                    calls.append(name)
+                    if name in failures:
+                        raise PermissionError("private-cleanup-canary")
+                class Pipe:
+                    def __init__(self, name):
+                        self.name = name
+                    def fileno(self):
+                        return 10
+                    def close(self):
+                        step(self.name)
+                class Process:
+                    pid = 123
+                    stdin = Pipe("stdin")
+                    stdout = Pipe("stdout")
+                    def kill(self):
+                        step("kill")
+                    def wait(self, *, timeout):
+                        self.wait_timeout = timeout
+                        step("wait")
+                class Selector:
+                    def register(self, *args):
+                        raise RuntimeError("private-primary-canary")
+                    def close(self):
+                        step("selector")
+                process = Process()
+                with patch.object(audio_process.subprocess, "Popen", return_value=process), \
+                     patch.object(audio_process.os, "set_blocking"), \
+                     patch.object(audio_process.selectors, "DefaultSelector", return_value=Selector()), \
+                     patch.object(audio_process.os, "killpg", side_effect=lambda *args: step("killpg")):
+                    try:
+                        self.run_python("pass")
+                    except AudioProcessError as exc:
+                        self.assertTrue(exc.cleanup_uncertain)
+                        self.assertIsNone(exc.__context__)
+                        self.assertIsNone(exc.__cause__)
+                        self.assertNotIn("private-", str(exc))
+                        self.assertNotIn("private-cleanup-canary", traceback.format_exc())
+                        self.assertNotIn("private-primary-canary", traceback.format_exc())
+                    else:
+                        self.fail("cleanup uncertainty was not reported")
+                expected = ["killpg"] + (["kill"] if "killpg" in failures else [])
+                self.assertEqual(calls, expected + ["wait", "selector", "stdin", "stdout"])
+                self.assertEqual(process.wait_timeout, 2)
+
+    def test_group_kill_refusal_falls_back_to_owned_child_and_reports_uncertainty(self) -> None:
+        original = subprocess.Popen
+        for code, timeout in (("pass", 2), ("import time;time.sleep(5)", .1)):
+            spawned = []
+            def launch(*args, **kwargs):
+                process = original(*args, **kwargs)
+                spawned.append(process)
+                return process
+            try:
+                with patch.object(audio_process.subprocess, "Popen", side_effect=launch), \
+                     patch.object(audio_process.os, "killpg", side_effect=PermissionError("private-cleanup-canary")):
+                    try:
+                        self.run_python(code, timeout=timeout)
+                    except AudioProcessError as exc:
+                        self.assertTrue(exc.cleanup_uncertain)
+                        self.assertIsNone(exc.__context__)
+                        self.assertNotIn("private-cleanup-canary", traceback.format_exc())
+                    else:
+                        self.fail("group cleanup refusal was not reported")
+                self.assertIsNotNone(spawned[0].poll())
+                self.assertTrue(spawned[0].stdin.closed)
+                self.assertTrue(spawned[0].stdout.closed)
+            finally:
+                # Keep this regression safe even when exercised against the unfixed helper.
+                for process in spawned:
+                    if process.poll() is None:
+                        process.kill()
+                    process.wait(timeout=2)
+                    process.stdin.close()
+                    process.stdout.close()
+
+    def test_keyboard_interrupt_reaps_before_preserving_cancellation(self) -> None:
+        spawned = []
+        original = subprocess.Popen
+        def launch(*args, **kwargs):
+            process = original(*args, **kwargs)
+            spawned.append(process)
+            return process
+        with patch.object(audio_process.subprocess, "Popen", side_effect=launch), \
+             patch.object(audio_process.time, "monotonic", side_effect=[0, KeyboardInterrupt]):
+            try:
+                self.run_python("import time;time.sleep(5)")
+            except KeyboardInterrupt as exc:
+                self.assertIsNone(exc.__context__)
+            else:
+                self.fail("cancellation was lost")
+        self.assertIsNotNone(spawned[0].poll())
+        self.assertTrue(spawned[0].stdin.closed)
+        self.assertTrue(spawned[0].stdout.closed)
 
 
 if __name__ == "__main__":

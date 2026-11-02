@@ -22,4 +22,6 @@ Analyze speech alignment, loudness, true peak, clipping, silence and sync; optio
 
 Energy checks use frame-aligned windows and declared tick tolerances; partial ends round outward by less than one tick, while duration comparisons stay exact. They recognize no words or visible lip sync; qualitative review remains unavailable, and the default unit suite uses fake tools (`tests_native/` requires an explicitly available FFmpeg and generated synthetic fixtures).
 
+Measured true peak strictly above `0 dBTP` adds `true_peak_overload`, separately from PCM sample-risk counts; exactly zero is not overload, and delivery targets remain M5.4. Process finalization attempts group termination, bounded reap and every descriptor close independently; OS refusal or cleanup failure raises a sanitized error with `cleanup_uncertain=True` and leaves analysis explicitly unavailable, without claiming all descendants were killed/reaped.
+
 Reuse reviewed upstream models/workflows only after pinned model/weights/dependencies, rights/voice consent, hardware and budget approval, before any download, upload, paid test or voice cloning. No model is selected or execution authorized by this proposal; default CI stays offline, and generation, lip sync and mixing remain planned.
