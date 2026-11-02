@@ -526,9 +526,46 @@ class SSHWorker:
         """Observed preparation snapshot only; not a materialized graph authorization."""
         return self._prepared_s2v
 
-    def stage_s2v(self, selection: S2VSelection) -> StagedS2VPair:
-        """One consumed begin/chunk/finish transfer, never retries a lost acknowledgement."""
+    def stage_s2v(self, selection: S2VSelection, *,
+                  absolute_deadline: float | None = None) -> StagedS2VPair:
+        """One consumed transfer under a trusted same-host cap; never replay lost ACKs.
+
+        Capture before lock wait or foreign admission. Remote workers receive only
+        remaining durations, never this controller's monotonic timestamp.
+        """
+        deadline = None
+        try:
+            candidate = request_deadline(90, absolute_deadline, time.monotonic)
+            sampled = time.monotonic()
+            remaining = self.budget.remaining_seconds(self._key)
+            if (type(remaining) not in (int, float) or not math.isfinite(remaining)
+                    or remaining <= 120):
+                raise ValueError
+            candidate = min(candidate, sampled + remaining - 120)
+            require_time(candidate, time.monotonic)
+            deadline = candidate
+        except (Exception, KeyboardInterrupt):
+            pass
+        if deadline is None:
+            raise WorkerError("invalid or expired private paired-transfer deadline")
+
+        def window() -> None:
+            valid = False
+            try:
+                require_time(deadline, time.monotonic)
+                remaining = self.budget.remaining_seconds(self._key)
+                if (type(remaining) not in (int, float) or not math.isfinite(remaining)
+                        or remaining <= 120):
+                    raise ValueError
+                require_time(deadline, time.monotonic)
+                valid = True
+            except (Exception, KeyboardInterrupt):
+                pass
+            if not valid:
+                raise WorkerError("private paired transfer reached its deadline or cleanup reserve")
+
         with self._s2v_lock:
+            window()
             self.check()
             self._require_s2v(selection)
             if self._prepared_s2v is None or self.plan is None:
@@ -541,10 +578,7 @@ class SSHWorker:
                                              "media": media})).hexdigest()
             if pair in self._s2v_consumed or len(self._s2v_consumed) >= 4:
                 raise WorkerError("S2V pair transfer already consumed or limit exceeded")
-            remaining = self.budget.remaining_seconds(self._key) - 120
-            if remaining <= 0:
-                raise WorkerError("insufficient owned lease for private paired transfer")
-            deadline = time.monotonic() + min(90, remaining)
+            window()
             self._s2v_consumed.add(pair)
             stage_id = uuid.uuid4().hex
             common = {"plan": self.plan.to_dict(), "stage_id": stage_id,
@@ -559,10 +593,11 @@ class SSHWorker:
                                   self.budget.remaining_seconds(self._key) - 120)
                     if timeout <= 0:
                         raise ValueError
-                    reply = self._request(dict(common, operation=operation, **fields), timeout)
+                    window()
+                    reply = self._request(dict(common, operation=operation, **fields), timeout,
+                                          absolute_deadline=deadline)
                     self.check()
-                    if time.monotonic() >= deadline:
-                        raise ValueError
+                    window()
                     return reply
                 beginning = call("s2v_pair_begin")
                 if (set(beginning) != {"stage_id", "pair_sha256", "reused"}
@@ -591,7 +626,11 @@ class SSHWorker:
                 failed = True
             if failed or result is None:
                 raise WorkerError("private paired transfer incomplete or unconfirmed; never replay")
-            return result
+        # Lock release and every owned finalizer precede the last admission.
+        self.check()
+        self._require_s2v(selection)
+        window()
+        return result
 
     def stage_reference(self) -> dict[str, Any]:
         from cineforge.conditioning import ConditioningSelection
@@ -678,7 +717,9 @@ class SSHWorker:
 
     def _tunnel_remaining(self, deadline: float) -> float:
         self.check()
-        remaining = min(deadline - time.monotonic(), self.budget.remaining_seconds(self._key))
+        reserve = 120 if type(self.selection) is S2VServiceContext else 0
+        lease = self.budget.remaining_seconds(self._key) - reserve
+        remaining = min(deadline - time.monotonic(), lease)
         if not math.isfinite(remaining) or remaining <= 0:
             raise WorkerError("private tunnel readiness deadline exceeded")
         return remaining
@@ -700,27 +741,60 @@ class SSHWorker:
         def check() -> None:
             self._tunnel_remaining(deadline)
         run_process(command, timeout=min(1, self._tunnel_remaining(deadline)), max_output=1024,
-                    check=check)
+                    check=check, absolute_deadline=deadline)
         self._tunnel_remaining(deadline)
         if not self._control_ready():
             raise WorkerError("owned SSH control socket disappeared")
 
-    def endpoint(self) -> str:
+    def endpoint(self, *, absolute_deadline: float | None = None) -> str:
+        """Bound tunnel setup to a same-host parent cap, including owned finalizers."""
+        deadline = None
+        try:
+            candidate = request_deadline(10, absolute_deadline, time.monotonic)
+            sampled = time.monotonic()
+            reserve = 120 if type(self.selection) is S2VServiceContext else 0
+            remaining = self.budget.remaining_seconds(self._key)
+            if (type(remaining) not in (int, float) or not math.isfinite(remaining)
+                    or remaining <= reserve):
+                raise ValueError
+            candidate = min(candidate, sampled + remaining - reserve)
+            require_time(candidate, time.monotonic)
+            deadline = candidate
+        except (Exception, KeyboardInterrupt):
+            pass
+        if deadline is None:
+            raise WorkerError("invalid or expired private tunnel deadline")
+        endpoint = None
+        try:
+            endpoint = self._endpoint_with_deadline(deadline)
+            self._tunnel_remaining(deadline)
+        except (Exception, KeyboardInterrupt):
+            endpoint = None
+        if endpoint is None or time.monotonic() >= deadline:
+            cleanup_failed = False
+            try:
+                self._close_tunnel()
+            except WorkerError:
+                cleanup_failed = True
+            if cleanup_failed:
+                raise WorkerError("private tunnel failed with unconfirmed cleanup")
+            raise WorkerError("private owned tunnel readiness failed")
+        return endpoint
+
+    def _endpoint_with_deadline(self, deadline: float) -> str:
         with self._endpoint_lock:
             failed = cleanup_failed = False
             try:
-                self.check()
+                self._tunnel_remaining(deadline)
                 if self._endpoint:
                     return self._endpoint
                 if self.plan is None:
                     raise ValueError
                 # A failed prior teardown must never be overwritten by another child.
                 self._close_tunnel()
-                remaining = self.budget.remaining_seconds(self._key)
-                if not math.isfinite(remaining) or remaining <= 0:
-                    raise ValueError
-                deadline = time.monotonic() + min(10, remaining)
+                self._tunnel_remaining(deadline)
                 with self._tunnel_lock:
+                    require_time(deadline, time.monotonic)
                     if len(self._retired_controls) >= MAX_CONTROL_NAMESPACES:
                         raise ValueError
                     self._control_dir = Path(tempfile.mkdtemp(
@@ -732,8 +806,10 @@ class SSHWorker:
                         raise ValueError
                     command = self._command() + ["-M", "-S", str(control),
                         "-o", "ControlPersist=no", "-N", self._host]
+                    environment = ssh_environment()
+                    require_time(deadline, time.monotonic)
                     self._tunnel = subprocess.Popen(command, stdin=subprocess.DEVNULL,
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=ssh_environment(),
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=environment,
                         start_new_session=True)
                 for _ in range(101):
                     self._tunnel_remaining(deadline)
@@ -757,8 +833,9 @@ class SSHWorker:
                 for _ in range(101):
                     timeout = min(1, self._tunnel_remaining(deadline))
                     try:
-                        raw = health.request("GET", "/system_stats", timeout_seconds=timeout,
-                                             max_bytes=65536)
+                        raw = request_capped(health, "GET", "/system_stats", None,
+                            timeout_seconds=timeout, max_bytes=65536,
+                            absolute_deadline=deadline, clock=time.monotonic)
                     except Exception:
                         time.sleep(min(.1, self._tunnel_remaining(deadline)))
                         continue
@@ -773,6 +850,7 @@ class SSHWorker:
                                 or self._tunnel.poll() is not None or self._stop.is_set()
                                 or self._failed.is_set()):
                             raise ValueError
+                        require_time(deadline, time.monotonic)
                         self._endpoint = endpoint
                         return endpoint
                 raise ValueError
@@ -788,8 +866,9 @@ class SSHWorker:
                 raise WorkerError("private tunnel failed with unconfirmed cleanup")
             raise WorkerError("private owned tunnel readiness failed")
 
-    def execution_transport(self) -> SupervisedComfyTransport:
-        return SupervisedComfyTransport(self, ComfyHTTPTransport(self.endpoint(), allow_live=True))
+    def execution_transport(self, *, absolute_deadline: float | None = None) -> SupervisedComfyTransport:
+        return SupervisedComfyTransport(self, ComfyHTTPTransport(
+            self.endpoint(absolute_deadline=absolute_deadline), allow_live=True))
 
     def close(self) -> None:
         self._stop.set()
