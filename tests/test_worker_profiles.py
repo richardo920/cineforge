@@ -168,7 +168,8 @@ class BundleTests(unittest.TestCase):
             with self.subTest(lengths=[len(p) for p in parts]):
                 fixtures = {"worker_profiles.py": parts[0], "worker_bootstrap.py": parts[1],
                             **{name: (root / name).read_bytes() for name in
-                               ("audio_pcm.py", "paired_media.py", "s2v_stage.py")}}
+                               ("audio_pcm.py", "paired_media.py", "s2v_stage.py", "native_speech_pins.py",
+                                "native_remote_plan.py", "native_remote_bootstrap.py")}}
                 with patch("cineforge.worker_bundle.read_private_input",
                            side_effect=lambda path, **kw: fixtures[path.name]):
                     with self.assertRaisesRegex(WorkerBundleError, "fixed reviewed worker"):

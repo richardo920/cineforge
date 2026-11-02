@@ -49,3 +49,9 @@ Reuse reviewed upstream models/workflows only after pinned model/weights/depende
 `audio_review.snapshot_for_review()` hashes supplied delivery/mix bytes and paired `en`/`zh` clips, binding script, cue, character, voice/reference and recipe identities. `assess_review()` requires separate current owner decisions plus an injected trusted technical verifier; metadata authenticates no person and grants no export authority.
 
 Checklist: English/Mandarin intelligibility and visible lip sync, shared actor/voice identity, music, artifacts, transitions and balance. Actual owner listening/visual review remains pending until exact M5.6 media exists.
+
+`native_remote.RemoteNativeSpeechRuntime` stages only a complete reviewed 108-wheel runtime, separate curated SDK tree, pinned models and verified first-party package on an already guarded M5 worker; selection requires separately reviewed actual installed manifests. The full runtime tree retains exact SymPy/Numba/Ruff data paths as `0600` bytes, vendored metadata/records and `.pth` bytes; only root dist-info counts toward exact 108-distribution identity, and `-I -B -S` never processes `.pth` startup. Every transfer/invocation shares the original controller cap and a fixed worker-local cap with the lease cleanup reserve; lost acknowledgements consume the attempt, retain uncertainty and require owned Pod cleanup.
+
+Bridge-owned provisional proofs bind completed request/reference/output bytes and native cleanup facts; they remain inspectable offline after Pod deletion and grant no new work, rights, human review or export authority. Staging uses the existing five-second clock bound conservatively; network socket denial allows local UNIX IPC and does not claim a hostile-code sandbox or all-descendant termination proof.
+
+Only the seven pinned Base/Design configuration paths receive strict model JSON checks through an explicit matching model role; runtime/SDK/source resources remain fully hashed opaque data.

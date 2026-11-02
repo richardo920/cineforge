@@ -349,34 +349,42 @@ class NativeSpeechTests(unittest.TestCase):
                                 **self.arguments)
 
     def test_worker_policy_and_integrity_precede_sdk_calls(self):
-        request = self.request.to_dict()
-        header = {"version": 1, "operation": "base", "request": request,
-            "selection": asdict(self.selection), "seed": 0, "deadline": time.monotonic() + 20,
-            "input_sha256": digest({"operation": "base", "request": request, "seed": 0,
-                "selection": self.selection.subject_sha256(),
-                "reference_pcm_sha256": hashlib.sha256(self.reference.pcm).hexdigest()})}
-        header, _ = unpack(pack(header, b""))
-        order = []
-        def policy(*args):
-            order.append("deny")
-            return NETWORK_POLICY
-        def verified(*args, **kwargs):
-            self.assertEqual(order[0], "deny")
-            order.append("verify")
-            return HASH
-        def generate(*args):
-            self.assertEqual(order, ["deny", "verify", "verify", "verify"])
-            order.append("sdk")
-            return (*float_pcm([.1] * 2400, 24000), response(header)[0]["hardware"])
-        with patch.object(worker, "deny_network", policy), patch.object(worker, "verify_tree", verified), \
-                patch.object(worker, "_generate", generate):
-            meta, _ = worker.handle(header, self.reference.pcm)
-        self.assertEqual(meta["provenance"], "unreviewed-native-speech")
-        with patch.object(worker, "deny_network", side_effect=NativeSpeechError("unavailable")), \
-                patch.object(worker, "_generate") as sdk:
-            with self.assertRaises(NativeSpeechError):
-                worker.handle(header, self.reference.pcm)
-            sdk.assert_not_called()
+        design = OriginalVoiceDesign("Synthetic text", "English", "Original timbre", HASH)
+        for operation, request, reference in (
+            ("base", self.request.to_dict(), self.reference.pcm),
+            ("design", asdict(design), b""),
+        ):
+            with self.subTest(operation=operation):
+                header = {"version": 1, "operation": operation, "request": request,
+                    "selection": asdict(self.selection), "seed": 0, "deadline": time.monotonic()+20,
+                    "input_sha256": digest({"operation": operation, "request": request, "seed": 0,
+                        "selection": self.selection.subject_sha256(),
+                        "reference_pcm_sha256": hashlib.sha256(reference).hexdigest()})}
+                header, _ = unpack(pack(header, b""))
+                order, checks = [], []
+                def policy(*args):
+                    order.append("deny")
+                    return NETWORK_POLICY
+                def verified(*args, **kwargs):
+                    self.assertEqual(order[0], "deny")
+                    order.append("verify")
+                    checks.append(kwargs)
+                    return HASH
+                def generate(*args):
+                    self.assertEqual(order, ["deny", "verify", "verify", "verify"])
+                    order.append("sdk")
+                    return (*float_pcm([.1]*2400, 24000), response(header)[0]["hardware"])
+                with patch.object(worker, "deny_network", policy), \
+                        patch.object(worker, "verify_tree", verified), \
+                        patch.object(worker, "_generate", generate):
+                    meta, _ = worker.handle(header, reference)
+                self.assertEqual(meta["provenance"], "unreviewed-native-speech")
+                self.assertEqual(checks, [{}, {"distributions": True}, {"model_role": operation}])
+                with patch.object(worker, "deny_network", side_effect=NativeSpeechError("unavailable")), \
+                        patch.object(worker, "_generate") as sdk:
+                    with self.assertRaises(NativeSpeechError):
+                        worker.handle(header, reference)
+                    sdk.assert_not_called()
 
 
 class NativeIntegrityTests(unittest.TestCase):
@@ -415,11 +423,11 @@ class NativeIntegrityTests(unittest.TestCase):
 
     def test_runtime_metadata_closure_and_remote_config_are_not_authority(self):
         self.path.unlink()
-        directory = self.root / "fixture.dist-info"
+        directory = self.root / "fixture-1.dist-info"
         directory.mkdir(mode=0o700)
         payload = b"Name: fixture\nVersion: 1\n"
         (directory / "METADATA").write_bytes(payload)
-        self.tree = NativeTree(str(self.root), (pin("fixture.dist-info/METADATA", payload),))
+        self.tree = NativeTree(str(self.root), (pin("fixture-1.dist-info/METADATA", payload),))
         with patch("cineforge.native_speech_integrity.RUNTIME_DISTRIBUTIONS", (("fixture", "1"),)):
             self.assertEqual(len(verify_tree(self.tree, time.monotonic() + 5, distributions=True)), 64)
         with self.assertRaises(NativeSpeechError):
@@ -430,8 +438,9 @@ class NativeIntegrityTests(unittest.TestCase):
             value = json.dumps({"nested": {name: "remote/repo"}}).encode()
             self.path.write_bytes(value)
             self.tree = NativeTree(str(self.root), (pin("config.json", value),))
-            with self.assertRaises(NativeSpeechError):
-                self.verify()
+            # Resource JSON is hashed data; only explicit pinned model roles
+            # interpret autoload configuration (covered by model-role tests).
+            self.assertEqual(len(self.verify()), 64)
 
     def test_hashing_observes_original_deadline_and_private_directory(self):
         with self.assertRaises(NativeSpeechError):
