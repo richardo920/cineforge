@@ -292,15 +292,24 @@ class RunpodPodProvisioner:
             return self._leases[key].intent
 
     def _emit(self, lease: _Lease, **changes: Any) -> None:
-        lease.snapshot = replace(lease.snapshot, **changes)
+        candidate = replace(lease.snapshot, **changes)
+        ready = candidate.state == "ready"
+        # Retain discovered/created identities even if their checkpoint fails.
+        # READY alone grants work admission and must wait for the policy sink.
+        if not ready:
+            lease.snapshot = candidate
         failed = False
         try:
-            if self._sink(lease.intent, lease.snapshot) is not None:
+            if self._sink(lease.intent, candidate) is not None:
                 raise ValueError
         except (Exception, KeyboardInterrupt):
             failed = True
         if failed:
+            if ready:
+                lease.observation = None
             raise ProvisioningError("cloud lease persistence failed", lease.snapshot)
+        if ready:
+            lease.snapshot = candidate
 
     def _call(self, method: str, path: str, deadline: float,
               body: dict[str, object] | None = None) -> CloudResponse:
@@ -496,14 +505,15 @@ class RunpodPodProvisioner:
     def inspect(self, device_id: str) -> GPUDevice:
         with self._lock:
             lease = self._known(device_id)
+            lease.observation = None
             deadline = self._clock() + self._request
             pod = self._get(lease, deadline)
             rate = self._ready_rate(lease, pod)
             observation = self._measurement(lease, max(0, deadline - self._clock()))
             if observation is None or self._clock() >= deadline:
                 raise ProvisioningError("worker measurement did not complete", lease.snapshot)
-            lease.observation = observation
             self._emit(lease, state="ready", hourly_usd=float(rate))
+            lease.observation = observation
             return observation.device
 
     def acquire(self, requirements: ModelSpec, *, max_cost_usd: float,
@@ -523,7 +533,9 @@ class RunpodPodProvisioner:
                         or old.intent.max_cost_usd != max_cost_usd):
                     raise ProvisioningError("cloud idempotency key has a different request")
                 if old.snapshot.state == "ready" and old.observation is not None:
-                    return old.observation.device
+                    cached_observation = old.observation
+                    self._emit(old, state="ready")  # Guard source/deadline may have changed.
+                    return cached_observation.device
                 raise AcquisitionUncertainError("cloud acquisition key cannot be replayed",
                                                 old.snapshot)
             if any(item.snapshot.state not in {"rejected", "released", "not_created"}
@@ -595,8 +607,8 @@ class RunpodPodProvisioner:
                             if cancel_now or self._clock() >= deadline:
                                 reason = "cancelled" if cancel_now else "startup_timeout"
                                 raise ValueError
-                            lease.observation = observation
                             self._emit(lease, state="ready")
+                            lease.observation = observation
                             return observation.device
                     reason = "startup_timeout"
                     self._sleep(min(self._interval, max(0, deadline - self._clock())))

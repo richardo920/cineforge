@@ -452,6 +452,7 @@ class CloudBudgetSession:
                     or snapshot.state not in _TRANSITIONS[previous.state]
                     or snapshot.resource_id is not None and not record["authorized"]
                     or snapshot.state == "ready" and (record["guard"] is None
+                        or record["guard"]["source_sha256"] != worker_guard_source_sha256()
                         or self._now() >= record["guard"]["plan"]["stop_at_unix"])):
                 raise CloudBudgetError("invalid or unguarded journal lifecycle transition")
             record["snapshot"] = snapshot.to_dict()
