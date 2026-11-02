@@ -9,6 +9,7 @@ import hashlib
 import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from threading import Lock
 from typing import Any, Callable
 
 from cineforge import s2v_profile as profile
@@ -126,6 +127,19 @@ SpeechVerifier = Callable[[SpeechArtifact, S2VServiceContext], NativeSpeechProof
 SubjectVerifier = Callable[[dict[str, Any]], object]
 
 
+class S2VAttempt:
+    """In-memory once-only intent; ambiguous outcomes are never silently replayed."""
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._consumed = False
+
+    def consume(self) -> None:
+        with self._lock:
+            if self._consumed:
+                raise S2VError("S2V execution intent already consumed; inspect private state")
+            self._consumed = True
+
+
 @dataclass(frozen=True)
 class StagedS2VPair:
     """Checked owned-worker attestation created after both transfers and decoded metadata."""
@@ -171,6 +185,7 @@ class VerifiedS2V:
     verify_speech: SpeechVerifier = field(repr=False, compare=False)
     authorize: SubjectVerifier = field(repr=False, compare=False)
     staging: StagedS2VPair | None = field(default=None, repr=False)
+    attempt: S2VAttempt = field(default_factory=S2VAttempt, repr=False, compare=False)
 
     @property
     def utterance(self) -> Utterance:
@@ -212,6 +227,8 @@ class VerifiedS2V:
                 (self.binding, ShotSkills), (self.descriptor, ActorDescriptor)):
             if type(value) is not kind:
                 raise ValueError
+        if type(self.attempt) is not S2VAttempt:
+            raise ValueError
         self.service.preflight()
         self.descriptor.__post_init__()
         if (not callable(self.verify_actor) or not callable(self.verify_speech)

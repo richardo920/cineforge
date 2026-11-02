@@ -28,4 +28,10 @@ Measured true peak strictly above `0 dBTP` adds `true_peak_overload`, separately
 
 `stem_import.import_original_stem` validates and returns original non-dialogue PCM16 WAV bytes unchanged, with exact rational cue timing and current reference/copy rights. Trusted calling code must select the exact existing rights-review evidence as its original-source assertion; matching metadata cannot prove original/synthetic origin or grant human review/export approval.
 
+`s2v_service.S2VServiceContext` binds a separately checked one-lease RTX 5090 scope (150 GB ephemeral disk, USD 5 ceiling, 120-second cleanup reserve) before speech exists; it grants no graph execution. After guarded hardware/native-speech verification, `s2v.VerifiedS2V` requires current EN/ZH script, character/voice/picture/rights, original RGB PNG and mono PCM16 speech bytes, plus trusted operator proof callbacks; descriptors and JSON flags cannot prove likeness or native execution.
+
+The exact 14-node Wan2.2 core recipe uses four pinned assets (FP8-scaled diffusion storage; BF16 compute), 832×480, 77 frames at 16 fps, one front-facing fictional adult and one language per clip. Hash-named PNG/WAV pairs transfer through a guarded, bounded once-only protocol; uncertain setup, transfer or submission requires inspecting retained private state before a new request, with no blind retry.
+
+`s2v_run.run_s2v` uses an already prepared/staged owned worker and records original speech timing, lineage, actual output bytes and restricted local VP9 decoding; the silent video stays paired with unmodified speech for later mixing. Offline fixtures and native synthetic-video decoding do not prove model quality, intelligibility, identity or visible lip sync; exact-media human review and export authority remain separate.
+
 Reuse reviewed upstream models/workflows only after pinned model/weights/dependencies, rights/voice consent, hardware and budget approval, before any download, upload, paid test or voice cloning. No model is selected or execution authorized by this proposal; default CI stays offline, and generation, lip sync and mixing remain planned.

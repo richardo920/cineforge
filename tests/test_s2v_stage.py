@@ -52,7 +52,7 @@ class PairTransferTests(unittest.TestCase):
         self.key.write_bytes(b"synthetic fixture, not real credential")
         self.key.chmod(0o600)
         self.spec = RunpodPodSpec("s2v-synthetic", profile.IMAGE, profile.GPU_ID, "EU-RO-1",
-            legacy_spec().ssh_public_key, max_hourly_usd=1.25, min_ram_per_gpu_gb=64)
+            legacy_spec().ssh_public_key, max_hourly_usd=1.25, min_ram_per_gpu_gb=64, disk_gb=150)
         self.remaining = 600
         self.plan = WorkerGuardPlan("owned-worker", self.spec.session_id, "a" * 32,
                                     time.time() + 1000, 30)
@@ -92,6 +92,45 @@ class PairTransferTests(unittest.TestCase):
         self.assertNotIn("CANARY", "".join(traceback.format_exception(caught.exception)))
         self.assertIsNone(caught.exception.__context__)
         self.assertIsNone(caught.exception.__cause__)
+
+    def test_worker_constructor_requires_all_exact_scope_resources(self):
+        for change in (dict(disk_gb=80), dict(min_cuda_version="12.9"),
+                       dict(max_hourly_usd=2), dict(min_ram_per_gpu_gb=32)):
+            with self.subTest(change=change), self.assertRaises(WorkerError):
+                SSHWorker(replace(self.spec, **change), self.gate.service, self.budget,
+                    None, self.key, self.root / "rejected-state", allow_live=True)
+        self.assertFalse((self.root / "rejected-state").exists())
+
+    def test_materialized_setup_requires_arm_runtime_rights_and_consumes_lost_ack(self):
+        self.driver._prepared_s2v = None
+        self.driver._request = lambda *args, **kw: self.fail("unapproved setup RPC")
+        self.static_failure(lambda: self.driver.prepare())
+        self.driver.runtime_evidence = None
+        self.static_failure(lambda: self.driver.prepare(self.selection))
+        self.driver.runtime_evidence = self.runtime
+        self.assertFalse(self.driver._s2v_setup_attempted)
+        requests = []
+        def lost(request, timeout):
+            requests.append(request)
+            raise WorkerError("synthetic setup lost ACK")
+        self.driver._request = lost
+        self.static_failure(lambda: self.driver.prepare(self.selection))
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(requests[0]["operation"], "setup")
+        self.assertEqual(requests[0]["selection"], self.selection.declarations)
+        self.assertIsNone(self.driver.s2v_verification)
+        self.static_failure(lambda: self.driver.prepare(self.selection))
+        self.assertEqual(len(requests), 1)
+
+    def test_setup_rechecks_rights_after_reply_before_committing_prepared_worker(self):
+        self.driver._prepared_s2v = None
+        def reply(request, timeout):
+            self.gate.ledger.revoke(self.gate.model_rights, reason="CANARY")
+            return {"verification": worker(self.gate).record, "runtime": self.runtime}
+        self.driver._request = reply
+        self.static_failure(lambda: self.driver.prepare(self.selection))
+        self.assertIsNone(self.driver.s2v_verification)
+        self.assertTrue(self.driver._s2v_setup_attempted)
 
     def test_complete_pair_exact_bytes_metadata_and_consumed_repeated_request(self):
         proof = self.driver.stage_s2v(self.selection)

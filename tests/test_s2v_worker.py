@@ -9,12 +9,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 from test_conditioning import runtime_fixture
+from test_s2v import context
 from test_speech import EVIDENCE
 
 from cineforge import s2v_profile as profile
 from cineforge import worker_bootstrap as bootstrap
 from cineforge.cloud_budget import CloudBudgetError, CloudBudgetSession
 from cineforge.cloud_journal import CloudJournalError
+from cineforge.s2v import select_s2v
 from cineforge.s2v_service import S2VBudgetApproval, S2VServiceContext, prepare_service_journal
 from cineforge.worker_bundle import worker_source
 from cineforge.worker_profiles import I2V_WORKER, S2V_WORKER
@@ -75,6 +77,26 @@ class S2VWorkerTests(unittest.TestCase):
                 bootstrap.download(self.root, audio, time.monotonic() + 5, profile=data)
             self.assertEqual(opener.call_count, 1)
 
+    def test_setup_consumes_before_hardware_failure_and_never_installs_or_downloads(self):
+        gate, _ = context(self.root)
+        request = {"profile": gate.service.worker_profile,
+            "plan": {"session_id": "fixture"}, "selection": select_s2v(gate).declarations,
+            "image_digest": profile.IMAGE.split("@", 1)[1]}
+        with patch.object(bootstrap, "worker_root", return_value=self.root), \
+                patch.object(bootstrap, "runtime_probe", side_effect=bootstrap.BootstrapError(
+                    "synthetic incompatible GPU")) as probe, \
+                patch.object(bootstrap, "bounded_process") as process, \
+                patch.object(bootstrap, "download") as download:
+            with self.assertRaises(bootstrap.SetupFailure):
+                bootstrap.setup(request, time.monotonic() + 30)
+            self.assertTrue((self.root / "s2v-setup-consumed.json").is_file())
+            self.assertEqual(probe.call_count, 1)
+            with self.assertRaises(bootstrap.SetupFailure):
+                bootstrap.setup(request, time.monotonic() + 30)
+            self.assertEqual(probe.call_count, 1)
+            process.assert_not_called()
+            download.assert_not_called()
+
     def test_bf16_hardware_kernel_is_required_and_runtime_fields_remain_closed(self):
         runtime = dict(runtime_fixture(), compute_precision="bf16")
         bootstrap.validate_s2v_runtime(runtime)
@@ -115,7 +137,7 @@ class S2VWorkerTests(unittest.TestCase):
                 "asset": "audio_encoder", "reason": "integrity_failed"}
         self.assertEqual(bootstrap.checked_setup_failure(data), data)
         self.assertIsNone(bootstrap.checked_setup_failure(dict(data, schema="m4-setup-failure-v1")))
-        self.assertIsNone(bootstrap.checked_setup_failure(dict(data, secret="CANARY")))
+        self.assertIsNone(bootstrap.checked_setup_failure(dict(data, unknown_field="CANARY")))
 
 
 if __name__ == "__main__":

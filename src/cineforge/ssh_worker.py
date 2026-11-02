@@ -152,9 +152,13 @@ class SSHWorker:
         elif type(selection) is S2VServiceContext:
             selection.preflight()
             if (getattr(budget, "approval", None) != selection.approval
-                    or (spec.image, spec.gpu_id, spec.data_center_id, spec.min_ram_per_gpu_gb)
+                    or (spec.image, spec.gpu_id, spec.data_center_id, spec.min_ram_per_gpu_gb,
+                        spec.disk_gb, spec.min_cuda_version)
                     != (selection.approval.image, selection.approval.gpu_id,
-                        selection.approval.region, selection.approval.min_ram_per_gpu_gb)):
+                        selection.approval.region, selection.approval.min_ram_per_gpu_gb,
+                        selection.approval.disk_gb, selection.approval.min_cuda)
+                    or spec.registry_id is not None
+                    or spec.max_hourly_usd > selection.approval.hourly_ceiling_usd):
                 raise WorkerError("M5 service and owned budget scope differ")
             self._profile = selection.worker_profile
         self._s2v_lock = Lock()
@@ -460,6 +464,11 @@ class SSHWorker:
         if failed:
             raise WorkerError("guarded native speech incomplete or unconfirmed")
         return result
+
+    @property
+    def s2v_verification(self) -> WorkerVerification | None:
+        """Observed preparation snapshot only; not a materialized graph authorization."""
+        return self._prepared_s2v
 
     def stage_s2v(self, selection: S2VSelection) -> StagedS2VPair:
         """One consumed begin/chunk/finish transfer, never retries a lost acknowledgement."""

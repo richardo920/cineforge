@@ -32,7 +32,7 @@ def _scope_fields(directory: str, region: str, receipt: EvidenceRef, aggregate: 
         "image": profile.IMAGE, "gpu_id": profile.GPU_ID, "region": region,
         "journal_directory": directory, "min_ram_per_gpu_gb": 64,
         "aggregate_usd": aggregate, "max_attempts": 1, "max_concurrent": 1,
-        "lifetime_seconds": lifetime, "hourly_ceiling_usd": hourly, "disk_gb": 80,
+        "lifetime_seconds": lifetime, "hourly_ceiling_usd": hourly, "disk_gb": 150,
         "min_cuda": "12.8", "ports": ["22/tcp"], "volumes": [], "region_fallback": False,
         "native_speech": "separately reviewed installed-source/weight/receipt gate under same guard"}
 
@@ -58,7 +58,7 @@ class S2VBudgetApproval(BudgetApproval):
                 or type(self.hourly_ceiling_usd) not in (int, float)
                 or not 0 < self.hourly_ceiling_usd <= 1.25
                 or self.image != profile.IMAGE or self.gpu_id != profile.GPU_ID
-                or self.min_cuda != "12.8" or type(self.disk_gb) is not int or self.disk_gb != 80
+                or self.min_cuda != "12.8" or type(self.disk_gb) is not int or self.disk_gb != 150
                 or type(self.max_attempts) is not int or self.max_attempts != 1
                 or type(self.max_concurrent) is not int or self.max_concurrent != 1
                 or self.model != profile.model()
@@ -82,7 +82,7 @@ class S2VBudgetApproval(BudgetApproval):
         if digest is None:
             raise CloudBudgetError("invalid M5 scope declarations")
         return cls(digest, profile.recipe_sha256(), profile.model(), profile.IMAGE, profile.GPU_ID,
-            region, "12.8", aggregate_usd, 1, 1, lifetime_seconds, hourly_ceiling_usd, 80,
+            region, "12.8", aggregate_usd, 1, 1, lifetime_seconds, hourly_ceiling_usd, 150,
             journal_directory, operator_receipt)
 
     @property

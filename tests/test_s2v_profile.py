@@ -54,6 +54,7 @@ class S2VRecipeTests(unittest.TestCase):
         service.preflight()
         self.assertEqual(service.worker_profile,
                          {"id": profile.PROFILE_ID, "scope_sha256": approval.subject_sha256})
+        self.assertEqual(approval.disk_gb, 150)
         self.assertFalse(hasattr(service, "workflow"))
         self.assertFalse(hasattr(service, "speech"))
         self.assertFalse(hasattr(service, "live_ready"))
@@ -63,7 +64,7 @@ class S2VRecipeTests(unittest.TestCase):
                 approval.model, approval.image, approval.gpu_id, approval.region, "12.8",
                 1, 1, 1, 1800, 1.25, 80)
         for changes in (dict(aggregate_usd=True), dict(aggregate_usd=6), dict(max_attempts=2),
-                        dict(model_workflow_sha256="a" * 64), dict(image="mutable"),
+                        dict(disk_gb=80), dict(model_workflow_sha256="a" * 64), dict(image="mutable"),
                         dict(journal_directory="/private/tmp/../CANARY")):
             with self.subTest(changes=list(changes)), self.assertRaises(CloudBudgetError):
                 replace(approval, **changes)

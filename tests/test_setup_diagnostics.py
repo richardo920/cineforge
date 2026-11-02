@@ -173,6 +173,7 @@ class DiagnosticTests(Fixture):
     def test_only_m4_setup_ssh_opts_into_decode_and_retains_first_safe_failure(self):
         worker = object.__new__(SSHWorker)
         worker._source, worker._host = b"synthetic", "fixture.invalid"
+        worker.selection = object()  # Legacy diagnostic-only driver fixture.
         worker._command = lambda: ["synthetic"]
         worker.check = lambda: None
         worker.setup_failure = None
