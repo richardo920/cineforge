@@ -394,17 +394,81 @@ class RunpodLifecycleTests(unittest.TestCase):
                       max_cost_usd=1)
         self.assertFalse(self.cloud.calls)
 
-    def test_foreign_or_configuration_drift_never_authorizes_deletion(self):
-        for field, value in [("env", {}), ("mounts", {"persistent": {"size": 20}}),
-                             ("image", "foreign-image"), ("dataCenterId", "EU-OTHER")]:
+    def test_owned_cleanup_ignores_unrelated_configuration_and_api_drift(self):
+        changes = [lambda pod: {**pod, "actions": ["stop", "terminate", "new-action"]},
+                   lambda pod: {**pod, "status": "NEW_PROVIDER_STATE"},
+                   lambda pod: {**pod, "locked": True, "actions": []},
+                   lambda pod: {"id": pod["id"], "name": pod["name"], "env": pod["env"]},
+                   lambda pod: {**pod, "image": "changed", "cloud": "COMMUNITY",
+                                "gpu": {}, "disk": None, "mounts": {"other": {}},
+                                "ports": [], "dataCenterId": "EU-OTHER", "registry": "other"},
+                   lambda pod: {**pod, "env": {key: value for key, value in pod["env"].items()
+                                              if key != "PUBLIC_KEY"}}]
+        for change in changes:
+            with self.subTest(change=change):
+                self.cloud = FakeCloud()
+                p = self.provider()
+                self.acquire(p)
+                self.cloud.get_change = change
+                self.cloud.calls.clear()
+                p.release("pod_1")
+                self.assertEqual(p.snapshots[0].state, "released")
+                self.assertEqual([c[:2] for c in self.cloud.calls], [
+                    ("GET", "/v2/pods/pod_1"), ("DELETE", "/v2/pods/pod_1"),
+                    ("GET", "/v2/pods/pod_1")])
+                self.assertFalse(self.cloud.pods)
+
+    def test_cleanup_refuses_every_foreign_or_missing_ownership_component(self):
+        changes = [lambda pod: {**pod, "id": "foreign"},
+                   lambda pod: {**pod, "name": "foreign"},
+                   lambda pod: {**pod, "env": {**pod["env"], "CINEFORGE_SESSION": "foreign"}},
+                   lambda pod: {**pod, "env": {**pod["env"], "CINEFORGE_LEASE": "f" * 32}},
+                   lambda pod: {**pod, "env": {}},
+                   lambda pod: {key: value for key, value in pod.items() if key != "id"}]
+        for change in changes:
+            with self.subTest(change=change):
+                self.cloud = FakeCloud()
+                p = self.provider()
+                self.acquire(p)
+                self.cloud.get_change = change
+                self.cloud.calls.clear()
+                with self.assertRaises(CleanupUncertainError) as cm:
+                    p.release("pod_1")
+                self.assertEqual(cm.exception.snapshot.state, "cleanup_uncertain")
+                self.assertEqual(cm.exception.snapshot.resource_id, "pod_1")
+                self.assertFalse(any(c[0] == "DELETE" for c in self.cloud.calls))
+                self.assertIn("pod_1", self.cloud.pods)
+
+    def test_configuration_drift_still_blocks_execution_but_not_owned_cleanup(self):
+        for field, value in [("mounts", {"persistent": {"size": 20}}),
+                             ("image", "foreign-image"), ("dataCenterId", "EU-OTHER"),
+                             ("actions", ["terminate", "future-action"]),
+                             ("status", "NEW_PROVIDER_STATE")]:
             with self.subTest(field=field):
                 self.cloud = FakeCloud()
-                self.cloud.get_change = lambda p: {**p, field: value}
+                self.cloud.get_change = lambda pod: {**pod, field: value}
                 p = self.provider()
-                with self.assertRaises(CleanupUncertainError) as cm:
+                with self.assertRaises(ProvisioningError) as cm:
                     self.acquire(p)
-                self.assertEqual(cm.exception.snapshot.state, "cleanup_uncertain")
-                self.assertEqual(sum(c[0] == "DELETE" for c in self.cloud.calls), 0)
+                self.assertEqual(cm.exception.snapshot.state, "released")
+                self.assertEqual(sum(c[0] == "DELETE" for c in self.cloud.calls), 1)
+                self.assertFalse(self.cloud.pods)
+                self.assertFalse(self.probes)
+
+    def test_terminated_status_requires_delete_and_fresh_absence(self):
+        p = self.provider()
+        self.acquire(p)
+        self.cloud.pods["pod_1"]["status"] = "TERMINATED"
+        self.cloud.delete_effect = False
+        with self.assertRaises(CleanupUncertainError):
+            p.release("pod_1")
+        self.assertEqual(p.snapshots[0].state, "cleanup_uncertain")
+        self.assertEqual(sum(c[0] == "DELETE" for c in self.cloud.calls), 1)
+        self.cloud.delete_effect = True
+        p.release("pod_1")
+        self.assertEqual(p.snapshots[0].state, "released")
+        self.assertEqual(sum(c[0] == "DELETE" for c in self.cloud.calls), 2)
+        self.assertEqual(self.cloud.calls[-1][:2], ("GET", "/v2/pods/pod_1"))
 
     def test_unowned_identity_never_reaches_transport(self):
         p = self.provider()
