@@ -80,7 +80,11 @@ def _verify_nodes(transport: ComfyTransport, selection: ApprovedComfySelection,
                 target = schemas[graph[value[0]]["class_type"]]
                 if value[1] >= len(target["output"]):
                     raise ComfyRunError("worker node output slot is missing")
-            if field in ("unet_name", "clip_name", "vae_name") or (
+            from cineforge.s2v import S2VSelection
+            paired_file = (type(selection) is S2VSelection and (
+                node["class_type"] == "LoadAudio" and field == "audio"
+                or node["class_type"] == "AudioEncoderLoader" and field == "audio_encoder_name"))
+            if field in ("unet_name", "clip_name", "vae_name") or paired_file or (
                     node["class_type"] == "LoadImage" and field == "image"):
                 spec = (required | optional)[field]
                 if (not isinstance(spec, list) or not spec or not isinstance(spec[0], list)
@@ -125,7 +129,10 @@ def execute_comfy(
             raise ComfyRunError("explicit opt-in and one approved shot are required")
         worker.require_matches(selection)
         from cineforge.conditioning import ConditioningSelection
+        from cineforge.s2v import S2VSelection
         if type(selection) is ConditioningSelection:
+            selection.require_execution_worker(worker)
+        elif type(selection) is S2VSelection:
             selection.require_execution_worker(worker)
         request = selection.request(plan.shots[0])
         timeout_seconds = positive_seconds(timeout_seconds)

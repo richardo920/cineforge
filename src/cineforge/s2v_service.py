@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -113,3 +114,19 @@ class S2VServiceContext:
     def worker_profile(self) -> dict[str, str]:
         self.preflight()
         return {"id": profile.PROFILE_ID, "scope_sha256": self.approval.subject_sha256}
+
+
+def prepare_service_journal(context: S2VServiceContext) -> None:
+    """Offline initialization only; a retained journal is never reset or refunded."""
+    from cineforge.cloud_journal import CloudJournal
+    from cineforge.workflows import strict_object
+    if type(context) is not S2VServiceContext:
+        raise CloudBudgetError("M5 journal requires its checked service scope")
+    context.preflight()
+    with CloudJournal(context.approval.journal_directory) as journal:
+        if journal.initial is None:
+            journal.checkpoint(canonical({"schema_version": 1,
+                "approval_sha256": context.approval.subject_sha256,
+                "last_wall": time.time(), "records": {}}))
+        elif strict_object(journal.initial).get("approval_sha256") != context.approval.subject_sha256:
+            raise CloudBudgetError("existing M5 journal belongs to a different scope")

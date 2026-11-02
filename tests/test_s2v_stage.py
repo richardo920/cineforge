@@ -1,0 +1,241 @@
+"""Local fake owned SSH RPC plus real private files; never SSH/cloud/model execution."""
+from __future__ import annotations
+
+import base64
+import hashlib
+import os
+import tempfile
+import time
+import traceback
+import unittest
+from dataclasses import replace
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from test_conditioning import runtime_fixture
+from test_runpod import spec as legacy_spec
+from test_s2v import context, worker
+from test_s2v_profile import png
+
+from cineforge import s2v_profile as profile
+from cineforge import worker_bootstrap as bootstrap
+from cineforge.runpod import RunpodPodSpec
+from cineforge.s2v import S2VError, digest, select_s2v
+from cineforge.s2v_stage import paired_transfer
+from cineforge.skills import bind_shot
+from cineforge.ssh_worker import SSHWorker, WorkerError
+from cineforge.worker_guard import WorkerGuardPlan
+from cineforge.workflows import canonical
+
+
+def reapprove(gate, **changes):
+    gate = replace(gate, authorize=lambda _: None, **changes)
+    gate = replace(gate, binding=bind_shot(gate.shot, gate.binding.skills))
+    approved = digest(gate.subject)
+    def authorize(subject):
+        if digest(subject) != approved:
+            raise RuntimeError("CANARY stale authorization")
+    return replace(gate, authorize=authorize)
+
+
+class PairTransferTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="cf-s2v-stage-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+        self.gate, self.calls = context(self.root)
+        self.selection = select_s2v(self.gate)
+        self.remote = self.root / "worker"
+        (self.remote / "ComfyUI" / "input").mkdir(parents=True, mode=0o700)
+        self.key = self.root / "synthetic-key"
+        self.key.write_bytes(b"synthetic fixture, not real credential")
+        self.key.chmod(0o600)
+        self.spec = RunpodPodSpec("s2v-synthetic", profile.IMAGE, profile.GPU_ID, "EU-RO-1",
+            legacy_spec().ssh_public_key, max_hourly_usd=1.25, min_ram_per_gpu_gb=64)
+        self.remaining = 600
+        self.plan = WorkerGuardPlan("owned-worker", self.spec.session_id, "a" * 32,
+                                    time.time() + 1000, 30)
+        self.budget = SimpleNamespace(approval=self.gate.service.approval,
+            remaining_seconds=lambda _: self.remaining, guard_plan=lambda _: self.plan)
+        self.runtime = dict(runtime_fixture(), compute_precision="bf16")
+        self.requests = []
+        self.loss = None
+        self.fault = None
+        self.driver = self.new_driver()
+
+    def new_driver(self):
+        driver = SSHWorker(self.spec, self.gate.service, self.budget, None, self.key,
+                           self.root / "ssh-state", allow_live=True)
+        driver.plan, driver._key = self.plan, "lease"
+        driver.runtime_evidence = self.runtime
+        driver._prepared_s2v = worker(self.gate)
+        driver._request = self.rpc
+        self.addCleanup(driver.close)
+        return driver
+
+    def rpc(self, request, timeout, **options):
+        self.requests.append(request)
+        self.assertGreater(timeout, 0)
+        self.assertLessEqual(timeout, min(10, self.remaining - 120))
+        if self.fault is not None:
+            self.fault(request)
+        body = dict(request, profile=self.driver._profile)
+        reply = paired_transfer(body, self.remote)
+        if request["operation"] == self.loss:
+            raise TimeoutError("CANARY lost acknowledgement")
+        return reply
+
+    def static_failure(self, operation):
+        with self.assertRaises(WorkerError) as caught:
+            operation()
+        self.assertNotIn("CANARY", "".join(traceback.format_exception(caught.exception)))
+        self.assertIsNone(caught.exception.__context__)
+        self.assertIsNone(caught.exception.__cause__)
+
+    def test_complete_pair_exact_bytes_metadata_and_consumed_repeated_request(self):
+        proof = self.driver.stage_s2v(self.selection)
+        bound = self.selection.bind_worker(worker(self.gate), proof)
+        bound.require_execution_worker(worker(self.gate))
+        for kind, payload in (("image", self.gate.actor.read()), ("audio", self.gate.speech.payload)):
+            path = self.remote / "ComfyUI/input" / self.gate.media[kind]["basename"]
+            self.assertEqual(path.read_bytes(), payload)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(path.stat().st_nlink, 1)
+        self.assertEqual(self.requests[0]["operation"], "s2v_pair_begin")
+        self.assertEqual(self.requests[-1]["operation"], "s2v_pair_finish")
+        calls = len(self.requests)
+        self.static_failure(lambda: self.driver.stage_s2v(self.selection))
+        self.assertEqual(len(self.requests), calls)
+        fresh = self.new_driver()
+        self.static_failure(lambda: fresh.stage_s2v(self.selection))
+        self.assertEqual(self.requests[-1]["operation"], "s2v_pair_begin")
+
+    def test_large_original_png_chunked_under_existing_request_limit(self):
+        path = self.root / "large"
+        path.mkdir()
+        gate, _ = context(path, actor_png=png(compressed=False))
+        gate = reapprove(gate, service=self.gate.service)
+        selection = select_s2v(gate)
+        proof = self.driver.stage_s2v(selection)
+        self.assertGreater(proof.pair_sha256, "")
+        chunks = [request for request in self.requests if request["operation"] == "s2v_pair_chunk"]
+        self.assertGreater(len(chunks), 32)
+        for request in chunks:
+            self.assertLess(len(canonical(request)), 256 * 1024)
+            self.assertLessEqual(len(base64.b64decode(request["chunk"])), 65536)
+        path = self.remote / "ComfyUI/input" / gate.media["image"]["basename"]
+        self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), gate.media["image"]["sha256"])
+
+    def test_second_approved_language_reuses_only_complete_exact_owned_slots(self):
+        self.driver.stage_s2v(self.selection)
+        first_image = self.remote / "ComfyUI/input" / self.gate.media["image"]["basename"]
+        inode = first_image.stat().st_ino
+        path = self.root / "zh"
+        path.mkdir()
+        gate, _ = context(path, language="zh")
+        gate = reapprove(gate, service=self.gate.service)
+        selection = select_s2v(gate)
+        start = len(self.requests)
+        proof = self.driver.stage_s2v(selection)
+        self.assertEqual(first_image.stat().st_ino, inode)
+        self.assertEqual([request["operation"] for request in self.requests[start:]],
+                         ["s2v_pair_begin", "s2v_pair_finish"])
+        selection.bind_worker(worker(gate), proof).require_execution_worker(worker(gate))
+
+    def test_lost_begin_chunk_or_finish_ack_is_consumed_without_blind_retry(self):
+        for phase in ("s2v_pair_begin", "s2v_pair_chunk", "s2v_pair_finish"):
+            with self.subTest(phase=phase):
+                self.remote = self.root / phase
+                (self.remote / "ComfyUI/input").mkdir(parents=True, mode=0o700)
+                self.driver = self.new_driver()
+                self.requests = []
+                self.loss = phase
+                self.static_failure(lambda: self.driver.stage_s2v(self.selection))
+                self.assertEqual(self.requests[-1]["operation"], phase)
+                old = len(self.requests)
+                self.static_failure(lambda: self.driver.stage_s2v(self.selection))
+                self.assertEqual(len(self.requests), old)
+                with self.assertRaises(S2VError):
+                    self.selection.require_execution_worker(worker(self.gate))
+        self.loss = None
+
+    def test_symlink_hardlink_foreign_or_partial_slots_are_never_overwritten(self):
+        for kind in ("foreign", "symlink", "hardlink"):
+            with self.subTest(kind=kind):
+                self.remote = self.root / kind
+                (self.remote / "ComfyUI/input").mkdir(parents=True, mode=0o700)
+                outside = self.remote / "foreign"
+                outside.write_bytes(b"CANARY foreign bytes")
+                outside.chmod(0o600)
+                target = self.remote / "ComfyUI/input" / self.gate.media["image"]["basename"]
+                if kind == "symlink":
+                    target.symlink_to(outside)
+                elif kind == "hardlink":
+                    os.link(outside, target)
+                else:
+                    target.write_bytes(b"CANARY partial")
+                    target.chmod(0o600)
+                self.driver = self.new_driver()
+                self.static_failure(lambda: self.driver.stage_s2v(self.selection))
+                self.assertEqual(outside.read_bytes(), b"CANARY foreign bytes")
+                self.assertEqual(target.read_bytes(), b"CANARY partial" if kind == "foreign"
+                                 else b"CANARY foreign bytes")
+
+    def test_revocation_mid_transfer_or_before_submission_and_foreign_worker_refuse(self):
+        before = len(self.requests)
+        self.plan = replace(self.plan, pod_id="foreign-worker")
+        self.driver.plan = self.plan
+        self.static_failure(lambda: self.driver.stage_s2v(self.selection))
+        self.assertEqual(len(self.requests), before)
+        self.plan = replace(self.plan, pod_id="owned-worker")
+        self.driver.plan = self.plan
+        def revoke(request):
+            if request["operation"] == "s2v_pair_chunk":
+                self.gate.ledger.revoke(self.gate.model_rights, reason="CANARY")
+        self.fault = revoke
+        self.static_failure(lambda: self.driver.stage_s2v(self.selection))
+        self.assertNotEqual(self.requests[-1]["operation"], "s2v_pair_finish")
+        self.assertEqual(list((self.remote / "ComfyUI/input").iterdir()), [])
+
+    def test_native_callback_requires_arm_hardware_optin_and_remaining_reserve_without_graph(self):
+        self.driver._prepared_s2v = None
+        calls = []
+        def callback(timeout):
+            calls.append(timeout)
+            return "synthetic-result"
+        self.assertFalse(hasattr(self.driver.selection, "workflow"))
+        self.static_failure(lambda: self.driver.run_guarded_native(callback))
+        self.assertEqual(calls, [])
+        self.assertEqual(self.driver.run_guarded_native(callback, allow_live=True), "synthetic-result")
+        self.assertEqual(calls, [480])
+        self.driver.plan = None
+        self.static_failure(lambda: self.driver.run_guarded_native(callback, allow_live=True))
+        self.driver.plan = self.plan
+        self.driver.runtime_evidence = None
+        self.static_failure(lambda: self.driver.run_guarded_native(callback, allow_live=True))
+        self.driver.runtime_evidence = self.runtime
+        self.remaining = 120
+        self.static_failure(lambda: self.driver.run_guarded_native(callback, allow_live=True))
+        self.remaining = 600
+        self.static_failure(lambda: self.driver.run_guarded_native(
+            lambda _: (_ for _ in ()).throw(RuntimeError("CANARY")), allow_live=True))
+
+    def test_dispatch_checks_guard_and_bound_profile_before_transfer(self):
+        (self.remote / "plan.json").write_bytes(canonical(self.plan.to_dict()))
+        (self.remote / "profile.json").write_bytes(canonical(self.driver._profile))
+        (self.remote / "guard-pid.json").write_bytes(b'{"pid":123}')
+        (self.remote / "guard.py").write_bytes(b"synthetic guard fixture")
+        request = {"operation": "s2v_pair_begin", "timeout_seconds": 10, "allow_live": True,
+            "plan": self.plan.to_dict(), "profile": self.driver._profile,
+            "guard_sha256": hashlib.sha256(b"synthetic guard fixture").hexdigest()}
+        with patch.object(bootstrap, "worker_root", return_value=self.remote), \
+                patch.object(bootstrap, "guard_alive", side_effect=bootstrap.BootstrapError("guard refused")), \
+                patch("cineforge.s2v_stage.paired_transfer") as transfer:
+            with self.assertRaises(bootstrap.BootstrapError):
+                bootstrap.dispatch(request)
+        transfer.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()
