@@ -380,6 +380,81 @@ class AudioTests(unittest.TestCase):
         self.assertIn("revoked_rights", sound.preflight(plan, registry, ledger,
                                                       current_picture=sound.picture).reasons)
 
+    def test_character_voice_is_consistent_across_speaker_aliases_and_pin_revisions(self) -> None:
+        sound = sheet()
+        english, mandarin = sound.script.utterances
+        alias = replace(mandarin, speaker_id="same-character-alias")
+        script = replace(sound.script, utterances=(english, alias))
+        self.assertEqual(DialogueScript.from_json(script.to_json()), script)
+        sound = replace(sound, script=script)
+        plan, registry, ledger = context(sound)
+        self.assertTrue(sound.preflight(plan, registry, ledger,
+                                        current_picture=sound.picture).allowed)
+        other_voice = VoiceIdentity("other-voice", 1, permission("other-voice", "voice"), None)
+        for fields in ({"voice": other_voice},
+                       {"character": replace(alias.character, revision=2)},
+                       {"character": replace(alias.character, sha256=OTHER)}):
+            with self.assertRaises(ContractError):
+                replace(script, utterances=(english, replace(alias, **fields)))
+            data = script.to_dict()
+            for key, value in fields.items():
+                data["utterances"][1][key] = value.to_dict()
+            with self.assertRaises(AudioError):
+                DialogueScript.from_dict(data)
+
+    def test_declared_recording_reference_cannot_be_omitted(self) -> None:
+        sound = sheet()
+        voice = replace(sound.script.utterances[0].voice, reference_id=None)
+        script = replace(sound.script, utterances=tuple(replace(item, voice=voice)
+                                                        for item in sound.script.utterances))
+        sound = replace(sound, script=script)
+        plan, registry, ledger = context(sound)
+        self.assertEqual(registry.lookup(sound.script.utterances[0].character).voice_reference_id,
+                         "voice")
+        result = sound.preflight(plan, registry, ledger, current_picture=sound.picture)
+        self.assertFalse(result.allowed)
+        self.assertIn("missing_or_changed_voice_reference", result.reasons)
+
+    def test_legacy_recording_and_logical_voice_permissions_are_independent(self) -> None:
+        sound = sheet()
+        original = character()
+        original_json, original_pin = original.to_json(), original.pin()
+        recording = RightsBinding(SubjectRef("voice", "recording", "r1", OTHER),
+                                  RightsRef("recording-rights", "r1"))
+        legacy_reference = replace(original.references[1], artifact=EvidenceRef(
+            "private://synthetic/recording-r1", OTHER), permission=recording)
+        actor = with_character_review(replace(original, references=(original.references[0],
+                                                                    legacy_reference)),
+                                       reviewer="synthetic-reviewer", evidence=EVIDENCE)
+        script = replace(sound.script, utterances=tuple(replace(item, character=actor.pin())
+                                                        for item in sound.script.utterances))
+        sound = replace(sound, script=script)
+        plan, _, _ = context(sound)
+        plan = replace(plan, shots=(pin_shot(plan.shots[0], actor.pin()),))
+        registry = CharacterRegistry()
+        registry.register(actor)
+        profile = sound.script.utterances[0].voice.permission
+        self.assertNotEqual(profile, recording)
+        for withdrawn in (None, recording.rights, profile.rights):
+            _, _, ledger = context(sound)
+            ledger.register(with_review(RightsRecord(
+                recording.rights, recording.subject, source=EVIDENCE, source_revision="r1",
+                license_id="LicenseRef-Synthetic", terms=EVIDENCE, notices=("Synthetic",),
+                attribution="Synthetic", consent=EVIDENCE, allowed_uses=(Use("generate"),)),
+                reviewer="synthetic-reviewer", evidence=EVIDENCE))
+            self.assertTrue(registry.resolve(actor.pin(), ledger, use=Use("generate")).allowed)
+            if withdrawn is not None:
+                ledger.revoke(withdrawn, reason="Synthetic withdrawal")
+            result = sound.preflight(plan, registry, ledger, current_picture=sound.picture)
+            if withdrawn is None:
+                self.assertTrue(result.allowed, result.reasons)
+            else:
+                self.assertFalse(result.allowed)
+                self.assertIn("revoked_rights", result.reasons)
+        self.assertEqual(original.to_json(), original_json)
+        self.assertEqual(original.pin(), original_pin)
+        self.assertEqual(CharacterRevision.from_json(actor.to_json()).pin(), actor.pin())
+
     def test_voice_permission_cannot_authorize_unrelated_identity_or_revision(self) -> None:
         voice = sheet().script.utterances[0].voice
         for fields in ({"voice_id": "other-voice"}, {"revision": 2},

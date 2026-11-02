@@ -221,11 +221,16 @@ class DialogueScript(_AudioContract):
         _tuple(self.utterances, Utterance, "utterances")
         _unique(tuple(item.utterance_id for item in self.utterances), "utterance IDs")
         speakers: dict[str, tuple[CharacterPin, VoiceIdentity]] = {}
+        characters: dict[str, tuple[CharacterPin, VoiceIdentity]] = {}
         for item in self.utterances:
             identity = (item.character, item.voice)
             if item.speaker_id in speakers and speakers[item.speaker_id] != identity:
                 raise AudioError("ambiguous speaker identity")
+            character_id = item.character.character_id
+            if character_id in characters and characters[character_id] != identity:
+                raise AudioError("ambiguous character voice identity")
             speakers[item.speaker_id] = identity
+            characters[character_id] = identity
 
     def pin(self) -> RevisionPin:
         return RevisionPin(self.script_id, self.revision, self.digest())
@@ -402,13 +407,16 @@ class CueSheet(_AudioContract):
             shot = plan_shots.get(item.shot_id)
             if shot is not None and shot.character_revision != item.character.to_key():
                 reasons.add("shot_character_mismatch")
-            if record is not None and item.voice.reference_id is not None:
-                refs = {ref.reference_id: ref for ref in record.references}
-                ref = refs.get(item.voice.reference_id)
-                if (ref is None or ref.role != "voice"
-                        or record.voice_reference_id != item.voice.reference_id
-                        or ref.permission != item.voice.permission):
+            if record is not None:
+                if record.voice_reference_id != item.voice.reference_id:
                     reasons.add("missing_or_changed_voice_reference")
+                if item.voice.reference_id is not None:
+                    refs = {ref.reference_id: ref for ref in record.references}
+                    ref = refs.get(item.voice.reference_id)
+                    if ref is None or ref.role != "voice":
+                        reasons.add("missing_or_changed_voice_reference")
+                # registry.resolve checks recording permission; the logical voice profile
+                # below is a separate subject and can have a different immutable revision.
             reasons.update(ledger.preflight_use(item.voice.permission.subject,
                                                item.voice.permission.rights, use).reasons)
         for cue in self.cues:

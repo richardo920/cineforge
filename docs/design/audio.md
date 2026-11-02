@@ -6,7 +6,9 @@ Keep dialogue, ambience, Foley/effects, and music as separate stems with start/d
 
 Voice permission subjects match the logical voice ID and `vN` revision. `AudioTimebase.ticks_for_seconds()` bridges legacy shot seconds within one float ULP and strictly less than half a tick; all cue/end bounds remain exact integers (`49/24` seconds at `48000` ticks/second → `98000` ticks).
 
-Non-dialogue cues use explicit `shot_id: null` for scene scope and may cross real shot boundaries; dialogue remains shot-bound. The M5 baseline keeps one declared voice per speaker across English/Mandarin; per-language voice references remain unimplemented.
+Non-dialogue cues use explicit `shot_id: null` for scene scope and may cross real shot boundaries; dialogue remains shot-bound. The [owner-selected M5 baseline](https://github.com/richardo920/cineforge/issues/79#issuecomment-6565672917) binds one character pin/voice per canonical character across English/Mandarin and speaker aliases; per-language voice references remain unimplemented.
+
+The voice's recording reference must match the current character declaration, including absence for reference-free synthetic voices. Recording and logical voice-profile permissions are checked independently; legacy recording subject revisions (for example `r1`) remain valid beside a logical profile's `vN` revision.
 
 M5 takes short approved script/台词 lines with text revision, language, speaker/character/voice identity, emotion/delivery, pronunciation and timing; English and Mandarin are the minimum. Full brief-to-screenplay planning remains M6; code-switching and multi-person scenes are outside the M5 baseline.
 
