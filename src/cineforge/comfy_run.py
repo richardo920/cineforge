@@ -114,6 +114,10 @@ def execute_comfy(
     bounded = None
     request = None
     deadline = 0.0
+    run_id = ""
+    key = ""
+    record: dict[str, Any] | None = None
+    prepared_record: bytes | None = None
     try:
         if (allow_live is not True or not isinstance(plan, ProjectPlan)
                 or len(plan.shots) != 1 or not isinstance(selection, ApprovedComfySelection)
@@ -148,24 +152,28 @@ def execute_comfy(
             verified_server_revision=worker.record["server_revision"],
             verified_worker_id=worker.record["worker_id"],
         )
+        # Translation rechecks current rights; record/approval access and JSON
+        # preparation must also reject statically before claiming private storage.
+        run_id = "comfy-" + uuid.uuid4().hex
+        key = run_id + "-shot"
+        record = {
+            "schema_version": 1, "run_id": run_id, "outcome": "prepared",
+            "plan": plan.to_dict(), "request": request.to_dict(), "idempotency_key": key,
+            "translated_workflow": selection.workflow.translate(request),
+            "selection_subject_sha256": selection.declarations["approval"]["model_workflow"][
+                "approved_subject_sha256"],
+            "worker_verification": worker.record, "known_run": None, "server_output": None,
+            "cloud_cost": {"status": "not_measured", "approved_setup_limit_usd":
+                           selection.declarations["approval"]["spend_limit_usd"]},
+            "cancellation": {"attempted": False, "confirmed_terminal": False},
+        }
+        prepared_record = canonical(record)
     except (Exception, KeyboardInterrupt):
         failed = True
-    if failed or provider is None or bounded is None or request is None:
+    if (failed or provider is None or bounded is None or request is None
+            or record is None or prepared_record is None):
         raise ComfyRunError("ComfyUI single-shot preflight rejected")
 
-    run_id = "comfy-" + uuid.uuid4().hex
-    key = run_id + "-shot"
-    record: dict[str, Any] = {
-        "schema_version": 1, "run_id": run_id, "outcome": "prepared",
-        "plan": plan.to_dict(), "request": request.to_dict(), "idempotency_key": key,
-        "translated_workflow": selection.workflow.translate(request),
-        "selection_subject_sha256": selection.declarations["approval"]["model_workflow"][
-            "approved_subject_sha256"],
-        "worker_verification": worker.record, "known_run": None, "server_output": None,
-        "cloud_cost": {"status": "not_measured", "approved_setup_limit_usd":
-                       selection.declarations["approval"]["spend_limit_usd"]},
-        "cancellation": {"attempted": False, "confirmed_terminal": False},
-    }
     run: ShotRun | None = None
     completed: RunManifest | None = None
     failed = False
@@ -173,7 +181,7 @@ def execute_comfy(
         with PrivateRunDirectory(output_dir) as store:
             try:
                 # Persist intent before any request; never replay this directory on restart.
-                store.checkpoint(canonical(record))
+                store.checkpoint(prepared_record)
                 _verify_nodes(bounded, selection, request_timeout_seconds)
                 record["outcome"] = "submitting"
                 store.checkpoint(canonical(record))
