@@ -3,33 +3,21 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from dataclasses import dataclass
 from typing import Any
 
 from cineforge.comfy_transport import positive_seconds
+from cineforge.json_codec import canonical_json, strict_loads
 from cineforge.providers import ExecutionRequest, ProviderError, _text
 
 
 def canonical(value: object) -> bytes:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"),
-                      ensure_ascii=False, allow_nan=False).encode("utf-8")
+    return canonical_json(value).encode("utf-8")
 
 
 def strict_object(raw: bytes | str) -> dict[str, Any]:
-    def pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
-        result: dict[str, Any] = {}
-        for key, value in items:
-            if key in result:
-                raise ValueError("duplicate JSON key")
-            result[key] = value
-        return result
-
-    def constant(value: str) -> None:
-        raise ValueError("nonfinite JSON number")
-
     try:
-        value = json.loads(raw, object_pairs_hook=pairs, parse_constant=constant)
+        value = strict_loads(raw)
         if not isinstance(value, dict):
             raise ValueError
         canonical(value)

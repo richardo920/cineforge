@@ -13,14 +13,14 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
-from cineforge.comfy import SUPPORTED_SERVER_REVISION
+from cineforge.comfy import SUPPORTED_SERVER_REVISION, ComfyExecutionProvider, JobDeadlineError
 from cineforge.comfy_policy import (
     ApprovedComfySelection,
     ComfyPolicyError,
     WorkerVerification,
     load_comfy_selection,
 )
-from cineforge.comfy_run import ComfyRunError, execute_comfy
+from cineforge.comfy_run import ComfyRunError, _BoundedTransport, execute_comfy
 from cineforge.contracts import Project, ProjectPlan, RunManifest, RunStatus, Scene, Shot
 from cineforge.private_store import ArtifactStoreError, PrivateRunDirectory, read_private_input
 from cineforge.providers import FakeExecutionProvider
@@ -407,6 +407,239 @@ class ComfyRunTests(unittest.TestCase):
         self.assertEqual(record["known_run"]["status"], "cancelled")
         self.assertTrue(record["cancellation"]["confirmed_terminal"])
         self.assertTrue(all(0 < call[3] <= 0.25 for call in self.wire.calls))
+
+    def test_stalled_cancellation_stays_within_the_total_cap_and_lease_reserve(self):
+        from test_cloud_budget import BudgetTests
+
+        fixture = BudgetTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        with fixture.session() as budget:
+            provider = fixture.provider(budget)
+            fixture.acquire(provider)
+            fixture.clock.sleep(1735)
+            budget.heartbeat("first")
+            cap = budget.remaining_seconds("first")
+            self.assertEqual(cap, 5)
+            started = fixture.clock.monotonic()
+            self.wire.mode = "running"
+            original_request = self.wire.request
+            histories = 0
+            cancel_calls = []
+
+            def request(method, path, body=None, **kwargs):
+                nonlocal histories
+                if path.startswith("/history/"):
+                    histories += 1
+                    if histories == 1:
+                        fixture.clock.sleep(2.4)
+                    elif histories == 2:
+                        fixture.clock.sleep(.1)
+                        raise TimeoutError("synthetic inference timeout")
+                    elif histories == 3:
+                        cancel_calls.append((fixture.clock.monotonic() - started,
+                                             kwargs["timeout_seconds"]))
+                        fixture.clock.sleep(min(9, kwargs["timeout_seconds"]))
+                        raise TimeoutError("synthetic cancellation stall")
+                return original_request(method, path, body, **kwargs)
+
+            self.wire.request = request
+            with self.assertRaises(ComfyRunError):
+                self.execute(timeout_seconds=cap, clock=fixture.clock.monotonic,
+                             sleep=fixture.clock.sleep)
+            self.assertEqual(len(cancel_calls), 1)
+            self.assertLessEqual(cancel_calls[0][1], cap - cancel_calls[0][0])
+            self.assertLessEqual(fixture.clock.monotonic() - started, cap)
+            self.assertGreaterEqual(1800 - (fixture.clock.time() - 10000), 60)
+            record = json.loads((self.output / "run.json").read_bytes())
+            self.assertEqual(record["outcome"], "incomplete")
+            self.assertEqual(record["known_run"]["job_id"], IDENTITY)
+            self.assertEqual(record["known_run"]["status"], "running")
+            self.assertIsNone(record["server_output"])
+            self.assertEqual(record["cancellation"],
+                             {"attempted": True, "confirmed_terminal": False})
+            self.assertNotIn("manifest", record)
+            # Orchestration leaves worker cleanup to its owning caller.
+            self.assertTrue(fixture.cloud.pods)
+            provider.release("pod_1")
+            self.assertEqual(budget.snapshots[0].state, "released")
+            self.assertFalse(fixture.cloud.pods)
+
+    def test_already_expired_absolute_cap_starts_no_cancellation_io(self):
+        now = [0.0]
+        checkpoint = PrivateRunDirectory.checkpoint
+        self.wire.mode = "running"
+
+        def delayed_checkpoint(store, payload):
+            checkpoint(store, payload)
+            if json.loads(payload)["outcome"] == "submitted":
+                now[0] = 1
+
+        with patch.object(PrivateRunDirectory, "checkpoint", delayed_checkpoint):
+            with self.assertRaises(ComfyRunError):
+                self.execute(timeout_seconds=1, clock=lambda: now[0])
+        self.assertFalse(any(c[1].startswith("/history/") or c[1].endswith("/cancel")
+                             for c in self.wire.calls))
+        self.assertEqual(sum(c[1] == "/prompt" for c in self.wire.calls), 1)
+        record = json.loads((self.output / "run.json").read_bytes())
+        self.assertEqual(record["known_run"]["job_id"], IDENTITY)
+        self.assertEqual(record["known_run"]["status"], "queued")
+        self.assertEqual(record["outcome"], "incomplete")
+        self.assertFalse(record["cancellation"]["confirmed_terminal"])
+        self.assertIsNone(record["server_output"])
+        self.assertNotIn("manifest", record)
+
+    def test_tiny_cap_can_reconcile_cancellation_success_without_losing_output(self):
+        now = [0.0]
+        self.wire.mode = "running"
+        original_request = self.wire.request
+        histories = 0
+        cancel_bounds = []
+
+        def request(method, path, body=None, **kwargs):
+            nonlocal histories
+            if path.startswith("/history/"):
+                histories += 1
+                if histories == 1:
+                    now[0] = .5
+                    raise TimeoutError("synthetic inference timeout")
+                cancel_bounds.append(kwargs["timeout_seconds"])
+                self.wire.mode = "success"
+                now[0] += min(.1, kwargs["timeout_seconds"] / 2)
+            return original_request(method, path, body, **kwargs)
+
+        self.wire.request = request
+        with self.assertRaises(ComfyRunError):
+            self.execute(timeout_seconds=1, clock=lambda: now[0])
+        self.assertEqual(cancel_bounds, [.5])
+        self.assertLessEqual(now[0], 1)
+        record = json.loads((self.output / "run.json").read_bytes())
+        self.assertEqual(record["outcome"], "incomplete")
+        self.assertEqual(record["known_run"]["status"], "succeeded")
+        self.assertEqual(record["server_output"],
+                         {"filename": "fixture.webm", "subfolder": "", "type": "output"})
+        self.assertTrue(record["cancellation"]["confirmed_terminal"])
+        self.assertNotIn("manifest", record)
+        self.assertFalse(any(c[1].startswith("/view?") for c in self.wire.calls))
+
+    def test_reserved_transfer_survives_inference_cutoff_and_checkpoints_output_first(self):
+        now = [0.0]
+        original_request = self.wire.request
+        checkpoint = PrivateRunDirectory.checkpoint
+
+        def observed_checkpoint(store, payload):
+            checkpoint(store, payload)
+            if json.loads(payload)["outcome"] == "awaiting_artifact":
+                now[0] = 6.1
+
+        def request(method, path, body=None, **kwargs):
+            raw = original_request(method, path, body, **kwargs)
+            if path.startswith("/history/"):
+                now[0] = 5.9
+            if path.startswith("/view?"):
+                record = json.loads((self.output / "run.json").read_bytes())
+                self.assertEqual(record["server_output"]["filename"], "fixture.webm")
+                self.assertEqual(record["known_run"]["status"], "succeeded")
+                self.assertLessEqual(kwargs["timeout_seconds"], 3.8 + 1e-10)
+                now[0] += 3
+            return raw
+
+        self.wire.request = request
+        with patch.object(PrivateRunDirectory, "checkpoint", observed_checkpoint):
+            manifest = self.execute(timeout_seconds=10, result_timeout_seconds=4,
+                                    request_timeout_seconds=10, clock=lambda: now[0])
+        self.assertEqual(manifest.shot_runs[0].status, RunStatus.SUCCEEDED)
+        self.assertEqual(sum(c[1].startswith("/view?") for c in self.wire.calls), 1)
+        self.assertLess(now[0], 10)
+
+    def test_transfer_failure_retains_output_and_never_exceeds_either_deadline(self):
+        for succeeded_at, transfer_delay, expected_bound in ((5.9, 4.1, 4), (1, 4.1, 4)):
+            with self.subTest(succeeded_at=succeeded_at):
+                self.output = self.root / ("transfer-" + str(succeeded_at))
+                wire = WireFixture(self.selection)
+                now = [0.0]
+                original_request = wire.request
+
+                def request(method, path, body=None, **kwargs):
+                    raw = original_request(method, path, body, **kwargs)
+                    if path.startswith("/history/"):
+                        now[0] = succeeded_at
+                    if path.startswith("/view?"):
+                        self.assertLessEqual(kwargs["timeout_seconds"], expected_bound)
+                        now[0] += transfer_delay
+                    return raw
+
+                wire.request = request
+                with self.assertRaises(ComfyRunError):
+                    self.execute(timeout_seconds=10, result_timeout_seconds=4,
+                                 request_timeout_seconds=10, transport=wire, clock=lambda: now[0])
+                record = json.loads((self.output / "run.json").read_bytes())
+                self.assertEqual(record["outcome"], "incomplete")
+                self.assertEqual(record["known_run"]["job_id"], IDENTITY)
+                self.assertEqual(record["known_run"]["status"], "succeeded")
+                self.assertEqual(record["server_output"],
+                                 {"filename": "fixture.webm", "subfolder": "", "type": "output"})
+                self.assertEqual(record["request"], self.selection.request(self.plan.shots[0]).to_dict())
+                self.assertFalse(record["cancellation"]["attempted"])
+                self.assertNotIn("manifest", record)
+                self.assertEqual(sum(c[1] == "/prompt" for c in wire.calls), 1)
+                self.assertEqual(sum(c[1].startswith("/view?") for c in wire.calls), 1)
+                self.assertFalse(list(self.output.glob("artifact-*")))
+
+    def test_invalid_transfer_reserve_rejects_without_io(self):
+        for value in (0, True, float("nan"), float("inf"), 10, 11):
+            with self.subTest(value=value), self.assertRaises(ComfyRunError):
+                self.execute(timeout_seconds=10, result_timeout_seconds=value)
+            self.assertEqual(self.wire.calls, [])
+            self.assertFalse(self.output.exists())
+
+    def test_outer_transport_caps_a_longer_provider_transfer_without_losing_metadata(self):
+        now = [0.0]
+        original_request = self.wire.request
+
+        def request(method, path, body=None, **kwargs):
+            raw = original_request(method, path, body, **kwargs)
+            if path.startswith("/view?"):
+                self.assertEqual(kwargs["timeout_seconds"], 1)
+                now[0] = 10.1
+            return raw
+
+        self.wire.request = request
+        provider = ComfyExecutionProvider(
+            _BoundedTransport(self.wire, 10, lambda: now[0]), self.selection.workflow,
+            job_timeout_seconds=8, result_timeout_seconds=10, clock=lambda: now[0])
+        run = provider.submit(self.selection.request(self.plan.shots[0]), "synthetic-key")
+        now[0] = 7.9
+        provider.status(run.job_id)
+        now[0] = 9
+        with self.assertRaises(JobDeadlineError):
+            provider.result(run.job_id)
+        count = len(self.wire.calls)
+        with self.assertRaises(JobDeadlineError):
+            provider.result(run.job_id)
+        self.assertEqual(len(self.wire.calls), count)
+        self.assertEqual(provider.status(run.job_id).status, RunStatus.SUCCEEDED)
+        self.assertEqual(provider.output_descriptor(run.job_id)["filename"], "fixture.webm")
+
+    def test_tiny_default_timeout_reserves_half_without_extending_total(self):
+        now = [0.0]
+        original_request = self.wire.request
+
+        def request(method, path, body=None, **kwargs):
+            raw = original_request(method, path, body, **kwargs)
+            if path == "/prompt":
+                self.assertEqual(kwargs["timeout_seconds"], .5)
+            if path.startswith("/history/"):
+                now[0] = .49
+            if path.startswith("/view?"):
+                self.assertLessEqual(kwargs["timeout_seconds"], .5)
+                now[0] = .9
+            return raw
+
+        self.wire.request = request
+        manifest = self.execute(timeout_seconds=1, clock=lambda: now[0])
+        self.assertEqual(manifest.shot_runs[0].status, RunStatus.SUCCEEDED)
+        self.assertLess(now[0], 1)
 
     def test_connection_failure_after_submit_preserves_identity_without_error_leak(self):
         secret = "synthetic-private-status"  # pragma: allowlist secret - synthetic rejection fixture

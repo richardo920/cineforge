@@ -32,6 +32,8 @@ Idempotency lasts only for one provider instance; an uncertain submission reserv
 
 `load_comfy_selection` validates a separately trusted ledger/graph/license; `WorkerVerification` checks operator-attested image/runtime/GPU and exact model-file hashes. `execute_comfy` / `comfy-run` require explicit live opt-in, one matching shot and loopback transport, verify the installed core-node schemas, and persist a private atomic journal/payload outside Git; failures retain known job state and never resubmit automatically.
 
+`execute_comfy` reserves `result_timeout_seconds` inside the unchanged absolute `timeout_seconds` cap (default reserve: `min(request_timeout_seconds, timeout_seconds / 2)`); setup/inference ends before that reserve. A confirmed output has one fixed transfer window, retries cannot renew it, and its validated server descriptor is checkpointed before download; cancellation also stays inside the original cap and an expired cap permits no new I/O, preserving the caller's lease cleanup reserve.
+
 Selection hashes bind declarations, not owner identity; worker records are attestations, not remote inspection. Client bounds and best-effort job cancellation do not enforce cloud rental costs or guarantee worker shutdown.
 
 Pod and Serverless will be selectable execution adapters sharing domain/model/workflow/artifact contracts. M2 implements private ComfyUI access to a manually prepared Pod; Serverless job APIs and cloud lifecycle automation remain future work.
@@ -40,7 +42,7 @@ Pod and Serverless will be selectable execution adapters sharing domain/model/wo
 
 [The owner-approved Runpod Pod scope](../../config/cloud/runpod-pod-proposal.json) compares Lambda and Modal and records a separate USD3 aggregate M3 validation cap with its [approval receipt](https://github.com/richardo920/cineforge/issues/48#issuecomment-6554788309). Live readiness remains false until M3.2/M3.3 safety gates, external credentials, explicit opt-in and fresh worker preflight pass; persistent storage, image publication and other GPU SKUs remain outside this scope.
 
-`RunpodPodProvisioner(spec, transport, probe=..., before_create=..., event_sink=...)` reserves an `AcquisitionIntent` before POST, records each `LeaseSnapshot`, and returns a `GPUDevice` only after a separately supplied runtime probe; Runpod's `gpu.memory` is host RAM. Release verifies its own ephemeral worker's identity/configuration, deletes it, and confirms GET404; uncertain creation blocks replay, and unconfirmed cleanup retains the owned ID.
+`RunpodPodProvisioner(spec, transport, probe=..., before_create=..., event_sink=...)` reserves an `AcquisitionIntent` before POST, records each `LeaseSnapshot`, and returns a `GPUDevice` only after a separately supplied runtime probe; Runpod's `gpu.memory` is host RAM. Release verifies the exact journal-owned ID/name/session/lease independently of execution configuration, attempts deletion, and confirms fresh GET404; uncertain creation blocks replay, and unconfirmed cleanup retains the owned ID.
 
 The required policy hook supplies fresh quote/approval/budget checks; the event sink persists private intent/state for M3.3 supervision. `RunpodHTTPTransport(api_key, allow_live=True)` only supplies bounded fixed-origin RESTv2 HTTPS: it does not authenticate owner approval, enforce a rental deadline, provision storage, install models, or execute workflows; a price race can still allocate before read-back rejects it. `restore_owned(intent, snapshot)` accepts trusted operator journal records only and never discovers ownership by name alone.
 

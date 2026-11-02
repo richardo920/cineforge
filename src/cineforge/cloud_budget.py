@@ -16,7 +16,12 @@ from urllib.parse import quote
 from cineforge.cloud_journal import CloudJournal
 from cineforge.comfy_policy import ApprovedComfySelection
 from cineforge.devices import ModelSpec
-from cineforge.runpod import AcquisitionIntent, LeaseSnapshot, RunpodPodProvisioner
+from cineforge.runpod import (
+    AcquisitionIntent,
+    CleanupUncertainError,
+    LeaseSnapshot,
+    RunpodPodProvisioner,
+)
 from cineforge.runpod_transport import CloudResponse, CloudTransport
 from cineforge.worker_guard import GuardReceipt, WorkerGuardPlan, worker_guard_source_sha256
 from cineforge.workflows import canonical, strict_object
@@ -24,6 +29,14 @@ from cineforge.workflows import canonical, strict_object
 
 class CloudBudgetError(ValueError):
     """Admission, journal, or recovery failed closed; diagnostics contain no source payloads."""
+
+
+class CloudCleanupUncertainError(CleanupUncertainError):
+    """Every claimed release was attempted; retained journal keys identify uncertain work."""
+
+    def __init__(self, released_keys: tuple[str, ...], uncertain_keys: tuple[str, ...]) -> None:
+        super().__init__("one or more owned worker cleanups are not confirmed")
+        self.released_keys, self.uncertain_keys = released_keys, uncertain_keys
 
 
 def _number(value: object, *, zero: bool = False) -> bool:
@@ -490,6 +503,7 @@ class CloudBudgetSession:
             attempts = sum(r["authorized"] for r in self._data["records"].values())
             if (self._poisoned or not self.guard_deployment_configured
                     or record["intent"] != intent.to_dict() or record["authorized"]
+                    or LeaseSnapshot.from_dict(record["snapshot"]).state != "reserved"
                     or not self.approval.admits(intent) or attempts >= self.approval.max_attempts
                     or any(LeaseSnapshot.from_dict(r["snapshot"]).state not in _TERMINAL
                            for r in others)):
@@ -581,15 +595,48 @@ class CloudBudgetSession:
     def _release(self, provisioner: RunpodPodProvisioner, intent: AcquisitionIntent,
                  snapshot: LeaseSnapshot) -> None:
         """Never hold the budget lock across provider locks, callbacks, or lifecycle I/O."""
+        completed = False
         try:
             if snapshot.resource_id is None:
                 raise CloudBudgetError("cannot release an unknown worker")
             if not any(v.key == intent.key for v in provisioner.snapshots):
                 provisioner.restore_owned(intent, snapshot)
             provisioner.release(snapshot.resource_id)
+            completed = True
         finally:
             with self._lock:
-                self._cleanup_inflight.discard(intent.key)
+                try:
+                    record = self._record(intent.key)
+                    current = LeaseSnapshot.from_dict(record["snapshot"])
+                    if not completed and current.state not in _TERMINAL:
+                        record["snapshot"] = replace(current, state="cleanup_uncertain").to_dict()
+                        try:
+                            self._save()
+                        except CloudBudgetError:
+                            # Persistence failure poisons admission; cleanup continues.
+                            pass
+                finally:
+                    self._cleanup_inflight.discard(intent.key)
+
+    def _release_claims(self, provisioner: RunpodPodProvisioner,
+                        claims: list[tuple[AcquisitionIntent, LeaseSnapshot]],
+                        uncertain: list[str] | None = None) -> tuple[str, ...]:
+        released = []
+        failed = list(uncertain or ())
+        for intent, snapshot in claims:
+            release_failed = False
+            try:
+                self._release(provisioner, intent, snapshot)
+            except (Exception, KeyboardInterrupt):
+                release_failed = True
+            if release_failed:
+                failed.append(intent.key)
+            else:
+                released.append(intent.key)
+        if failed:
+            # Raise outside the per-resource handlers: never expose provider errors/chains.
+            raise CloudCleanupUncertainError(tuple(released), tuple(failed))
+        return tuple(released)
 
     def enforce_limits(self, provisioner: RunpodPodProvisioner) -> tuple[str, ...]:
         """Call frequently during setup/download/inference; heartbeat never extends deadline."""
@@ -607,32 +654,37 @@ class CloudBudgetSession:
                     claim = self._claim_cleanup(record)
                     if claim is not None:
                         claims.append(claim)
-        stopped = []
-        for intent, snapshot in claims:
-            self._release(provisioner, intent, snapshot)
-            stopped.append(intent.key)
-        return tuple(stopped)
+        return self._release_claims(provisioner, claims)
 
     def recover_owned(self, provisioner: RunpodPodProvisioner, *, max_pages: int = 10) -> tuple[str, ...]:
         """GET-only discovery followed by verified owned deletion; never recreate/retry POST."""
         if type(max_pages) is not int or not 1 <= max_pages <= 20:
             raise CloudBudgetError("invalid recovery pagination bound")
         claims = []
+        uncertain = []
         with self._lock:
             for record in self._data["records"].values():
                 snapshot = LeaseSnapshot.from_dict(record["snapshot"])
                 if snapshot.state in _TERMINAL or snapshot.key in self._cleanup_inflight:
                     continue
-                if snapshot.resource_id is None:
-                    self._discover(record, max_pages)
-                claim = self._claim_cleanup(record)
-                if claim is not None:
-                    claims.append(claim)
-        recovered = []
-        for intent, snapshot in claims:
-            self._release(provisioner, intent, snapshot)
-            recovered.append(intent.key)
-        return tuple(recovered)
+                try:
+                    if (snapshot.resource_id is None and not record["authorized"]
+                            and not record["discovered_ids"]):
+                        # The durable authorization hook precedes every possible POST.
+                        # A never-authorized reservation has nothing to discover/release.
+                        record["snapshot"] = replace(snapshot, state="not_created").to_dict()
+                        self._save()
+                        continue
+                    if snapshot.resource_id is None:
+                        self._discover(record, max_pages)
+                    claim = self._claim_cleanup(record)
+                    if claim is not None:
+                        claims.append(claim)
+                except (Exception, KeyboardInterrupt):
+                    # Discovery/checkpoint failure on a later record must not prevent
+                    # releases already claimed, or other records' recovery attempts.
+                    uncertain.append(snapshot.key)
+        return self._release_claims(provisioner, claims, uncertain)
 
     def _discover(self, record: dict[str, Any], max_pages: int) -> None:
         intent = AcquisitionIntent.from_dict(record["intent"])
@@ -695,13 +747,7 @@ class CloudBudgetSession:
                 and re.fullmatch(r"[A-Za-z0-9_-]{1,80}", pod["id"]) is not None
                 and pod.get("name") == intent.name and isinstance(env, dict)
                 and env.get("CINEFORGE_SESSION") == intent.spec.session_id
-                and env.get("CINEFORGE_LEASE") == intent.owner_token
-                and pod.get("image") == intent.spec.image and pod.get("cloud") == "SECURE"
-                and pod.get("disk") == intent.spec.disk_gb
-                and pod.get("dataCenterId") == intent.spec.data_center_id
-                and isinstance(pod.get("gpu"), dict)
-                and pod["gpu"].get("id") == intent.spec.gpu_id
-                and pod["gpu"].get("count") == 1 and pod.get("mounts") == {})
+                and env.get("CINEFORGE_LEASE") == intent.owner_token)
 
     @staticmethod
     def _billing_reference(value: object) -> bool:
