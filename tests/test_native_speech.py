@@ -498,6 +498,24 @@ class NativeSDKBridgeTests(unittest.TestCase):
 
 
 class NativeProcessTests(unittest.TestCase):
+    def test_descriptor_reuse_is_distinguished_from_an_aliased_open_file(self):
+        from tests_linux_native.test_native_speech_network import descriptor_identity, same_identity
+        with tempfile.TemporaryDirectory(prefix="cineforge-fd-identity-") as temporary:
+            root = Path(temporary)
+            first = os.open(root / "first", os.O_CREAT | os.O_RDWR, 0o600)
+            alias = os.dup(first)
+            second = os.open(root / "second", os.O_CREAT | os.O_RDWR, 0o600)
+            try:
+                expected = descriptor_identity(first)
+                self.assertTrue(same_identity(descriptor_identity(alias), expected))
+                os.dup2(second, first)
+                self.assertEqual(descriptor_identity(first)["fd"], expected["fd"])
+                self.assertFalse(same_identity(descriptor_identity(first), expected))
+                self.assertTrue(same_identity(descriptor_identity(alias), expected))
+            finally:
+                for descriptor in (first, alias, second):
+                    os.close(descriptor)
+
     def execute(self, code, *, seconds=4):
         return run_child((sys.executable, "-I", "-S", "-c", code), payload=b"fixture",
             env={"PATH": "/usr/bin:/bin", "LANG": "C"}, cwd="/", deadline=time.monotonic() + seconds)
