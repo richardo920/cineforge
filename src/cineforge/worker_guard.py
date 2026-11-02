@@ -197,12 +197,13 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 class _DeadlineHTTPSConnection(http.client.HTTPSConnection):
     """Refuse HTTP bytes after slow DNS/connect/TLS exhausts the request deadline."""
 
-    def __init__(self, host: str, *, deadline: float, **options: Any) -> None:
-        self.deadline = deadline
+    def __init__(self, host: str, *, deadline: float,
+                 monotonic: Callable[[], float], **options: Any) -> None:
+        self.deadline, self.monotonic = deadline, monotonic
         super().__init__(host, **options)
 
     def _remaining(self) -> float:
-        remaining = self.deadline - time.monotonic()
+        remaining = self.deadline - self.monotonic()
         if not _finite(remaining) or remaining <= 0:
             self.close()
             raise WorkerGuardError("worker request deadline exceeded")
@@ -225,14 +226,16 @@ class _DeadlineHTTPSConnection(http.client.HTTPSConnection):
 
 
 class _DeadlineHTTPSHandler(urllib.request.HTTPSHandler):
-    def __init__(self) -> None:
+    def __init__(self, monotonic: Callable[[], float]) -> None:
+        self.monotonic = monotonic
         self.context = ssl.create_default_context()
         super().__init__(context=self.context)
         self.deadline = 0.0
 
     def https_open(self, req: Any) -> Any:
         def connection(host: str, **options: Any) -> _DeadlineHTTPSConnection:
-            return _DeadlineHTTPSConnection(host, deadline=self.deadline, **options)
+            return _DeadlineHTTPSConnection(host, deadline=self.deadline,
+                                             monotonic=self.monotonic, **options)
         return self.do_open(connection, req, context=self.context)
 
 
@@ -261,9 +264,14 @@ def worker_credential(plan: WorkerGuardPlan) -> str:
     return key
 
 
-def _worker_request(plan: WorkerGuardPlan) -> Callable[[str, bool, float], dict[str, Any]]:
+def _worker_request(plan: WorkerGuardPlan, *, deadline: float | None = None,
+                    monotonic: Callable[[], float] | None = None) \
+        -> Callable[[str, bool, float], dict[str, Any]]:
+    clock = time.monotonic if monotonic is None else monotonic
+    if not callable(clock) or deadline is not None and not _finite(deadline):
+        raise WorkerGuardError("invalid worker request deadline")
     key = worker_credential(plan)
-    https = _DeadlineHTTPSHandler()
+    https = _DeadlineHTTPSHandler(clock)
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect(), https)
     url = "https://api.runpod.io/v2/pods/" + plan.pod_id
 
@@ -271,13 +279,19 @@ def _worker_request(plan: WorkerGuardPlan) -> Callable[[str, bool, float], dict[
                 timeout_seconds: float = 3) -> dict[str, Any]:
         if not _finite(timeout_seconds) or not 0 < timeout_seconds <= 3:
             raise WorkerGuardError("invalid worker request bound")
-        https.deadline = time.monotonic() + timeout_seconds
+        now = clock()
+        if not _finite(now):
+            raise WorkerGuardError("invalid worker request clock")
+        https.deadline = min(now + timeout_seconds, deadline) if deadline is not None \
+            else now + timeout_seconds
+        if not _finite(https.deadline) or https.deadline <= now:
+            raise WorkerGuardError("worker request deadline exceeded")
         req = urllib.request.Request(url + ("/action" if stop else ""),
             data=b'{"action":"stop"}' if stop else None, method=method,
             headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"})
-        with opener.open(req, timeout=timeout_seconds) as reply:
+        with opener.open(req, timeout=min(timeout_seconds, https.deadline - now)) as reply:
             data = reply.read(65537)
-            if len(data) > 65536 or time.monotonic() >= https.deadline:
+            if len(data) > 65536 or clock() >= https.deadline:
                 raise ValueError
             return _strict_json(data)
     return request
@@ -307,12 +321,17 @@ def verify_own_pod(plan: WorkerGuardPlan, *, allow_live: bool = False) -> bool:
 
 def stop_own_pod(plan: WorkerGuardPlan, *, allow_live: bool = False,
                  timeout_seconds: float = 5,
+                 absolute_deadline: float | None = None,
                  monotonic: Callable[[], float] = time.monotonic,
                  sleep: Callable[[float], None] = time.sleep) -> bool:
-    """Bound owned GET/STOP/poll by one attempt deadline. EXITED proves compute stop only."""
+    """Bound GET/STOP/poll by one attempt cap, retaining any caller's absolute deadline.
+
+    EXITED proves compute stop only; a delayed native entry cannot renew the cap.
+    """
     if allow_live is not True:
         raise WorkerGuardError("worker shutdown needs explicit live opt-in")
     if (not _finite(timeout_seconds) or not 0 < timeout_seconds <= 10
+            or absolute_deadline is not None and not _finite(absolute_deadline)
             or not callable(monotonic) or not callable(sleep)):
         raise WorkerGuardError("invalid worker shutdown bound")
     try:
@@ -320,8 +339,12 @@ def stop_own_pod(plan: WorkerGuardPlan, *, allow_live: bool = False,
         if not _finite(started):
             return False
         deadline = started + timeout_seconds
+        if absolute_deadline is not None:
+            deadline = min(deadline, absolute_deadline)
+        if deadline <= started:
+            return False
         previous = started
-        native = _worker_request(plan)
+        native = _worker_request(plan, deadline=deadline, monotonic=monotonic)
 
         def remaining() -> float:
             nonlocal previous
@@ -380,14 +403,14 @@ def run_guard(plan: WorkerGuardPlan, heartbeat: Callable[[], float],
               sleep: Callable[[float], None] = time.sleep,
               poll_seconds: float = 1, max_stop_attempts: int = 3,
               attempt_timeout_seconds: float = 5,
-              bounded_stop: Callable[[float], bool] | None = None) -> dict[str, Any]:
+              bounded_stop: Callable[[float, float], bool] | None = None) -> dict[str, Any]:
     """Independent process; absent/invalid heartbeats, rollback or expiry request STOP.
 
     A heartbeat means the orchestrator is still supervising startup/generation; it
     must continue during long model downloads and inference. It never extends the
     absolute lease deadline. Timed-out stop threads can finish late, but only stop
     this same worker; they cannot create resources or mutate another Pod.
-    Native callbacks receive the attempt's remaining bound through bounded_stop;
+    Native callbacks receive remaining time and the absolute attempt deadline;
     injected no-argument stop callbacks keep their existing interface.
     DNS/connect cannot be forcibly preempted; expiry blocks later HTTP sends and
     controller follow-up, but cannot recall an already-sent STOP or response read.
@@ -451,7 +474,7 @@ def run_guard(plan: WorkerGuardPlan, heartbeat: Callable[[], float],
             try:
                 remaining = deadline - monotonic()
                 destination.put(remaining > 0 and (
-                    stop() if bounded_stop is None else bounded_stop(remaining)) is True)
+                    stop() if bounded_stop is None else bounded_stop(remaining, deadline)) is True)
             except (Exception, KeyboardInterrupt):
                 destination.put(False)
 
@@ -495,8 +518,9 @@ def main() -> int:
             return 0 if verified else 2
         answer = run_guard(plan, lambda: read_heartbeat(args.heartbeat, plan),
                            lambda: stop_own_pod(plan, allow_live=True),
-                           bounded_stop=lambda remaining: stop_own_pod(
-                               plan, allow_live=True, timeout_seconds=remaining))
+                           bounded_stop=lambda remaining, deadline: stop_own_pod(
+                               plan, allow_live=True, timeout_seconds=remaining,
+                               absolute_deadline=deadline))
     except (Exception, KeyboardInterrupt):
         failed = True
     if failed or answer is None:
