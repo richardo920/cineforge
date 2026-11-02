@@ -24,4 +24,8 @@ Energy checks use frame-aligned windows and declared tick tolerances; partial en
 
 Measured true peak strictly above `0 dBTP` adds `true_peak_overload`, separately from PCM sample-risk counts; exactly zero is not overload, and delivery targets remain M5.4. Process finalization attempts group termination, bounded reap and every descriptor close independently; OS refusal or cleanup failure raises a sanitized error with `cleanup_uncertain=True` and leaves analysis explicitly unavailable, without claiming all descendants were killed/reaped.
 
+`speech.QwenBaseSpeechAdapter` translates exact English/Mandarin lines to pinned Qwen Base request data using explicit canonical voice bindings and current script/picture pins; neutral/default delivery with no pronunciation hints is the supported baseline. Its default runtime returns deterministic silence fixtures; native SDK loading, real speech and execution approval remain unimplemented, and explicitly injected Python runtimes are trusted code.
+
+`stem_import.import_original_stem` validates and returns original non-dialogue PCM16 WAV bytes unchanged, with exact rational cue timing and current reference/copy rights. Trusted calling code must select the exact existing rights-review evidence as its original-source assertion; matching metadata cannot prove original/synthetic origin or grant human review/export approval.
+
 Reuse reviewed upstream models/workflows only after pinned model/weights/dependencies, rights/voice consent, hardware and budget approval, before any download, upload, paid test or voice cloning. No model is selected or execution authorized by this proposal; default CI stays offline, and generation, lip sync and mixing remain planned.
