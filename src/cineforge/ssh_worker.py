@@ -281,7 +281,10 @@ class SSHWorker:
             if timeout <= 0:
                 raise WorkerError("absolute SSH deadline exhausted")
             request["timeout_seconds"] = timeout
-        flags = "python3 -I -B -S -c " if native else "python3 -I -c "
+        if type(self.selection) is S2VServiceContext:
+            flags = "/usr/bin/python3.11 -I -B -S -c "
+        else:
+            flags = "python3 -I -B -S -c " if native else "python3 -I -c "
         command = self._command() + [self._host, flags + shlex.quote(self._source.decode())]
         diagnostic_setup = self._profile is not None and request.get("operation") == "setup"
         bounds: dict[str, Any] = {} if absolute_deadline is None else {"absolute_deadline": absolute_deadline}

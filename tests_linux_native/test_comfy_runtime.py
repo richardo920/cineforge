@@ -26,11 +26,14 @@ class ClosedComfyProcessTests(unittest.TestCase):
         source = worker_source()
         package, pins = native_package()
         command = "python3 -I -B -S -c " + shlex.quote(source.decode())
+        m5_command = "/usr/bin/python3.11 -I -B -S -c " + shlex.quote(source.decode())
         self.assertLessEqual(len(source), MAX_SOURCE_BYTES)
         self.assertLess(len(command.encode()), 128 * 1024)
+        self.assertLess(len(m5_command.encode()), 128 * 1024)
         self.assertLessEqual(len(package), 2 * 1024**2)
-        # Exact SSH remote shell argument/flags, using the explicit OS PATH and
-        # invalid admission data: compile/run first-party bundle, zero setup.
+        # Legacy native SSH prefix through OS PATH; same no-site flags/source as
+        # M5's fixed /usr/bin/python3.11 command. This CI interpreter is a stand-in,
+        # not pinned-image CPython3.11 or hardware evidence. Zero setup effects.
         result = subprocess.run(
             ["/bin/sh", "-c", command],
             input=b"{}",
@@ -46,6 +49,9 @@ class ClosedComfyProcessTests(unittest.TestCase):
                 {
                     "source_bytes": len(source),
                     "ssh_shell_argument_bytes": len(command.encode()),
+                    "m5_fixed_ssh_argument_bytes": len(m5_command.encode()),
+                    "m5_fixed_prefix": "/usr/bin/python3.11 -I -B -S -c ",
+                    "executed_interpreter_kind": "legacy native OS PATH stand-in",
                     "package_bytes": len(package),
                     "package_files": len(pins),
                     "actual_linux_shell_execution": True,
