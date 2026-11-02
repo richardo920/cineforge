@@ -533,9 +533,9 @@ class RunpodPodProvisioner:
                         or old.intent.max_cost_usd != max_cost_usd):
                     raise ProvisioningError("cloud idempotency key has a different request")
                 if old.snapshot.state == "ready" and old.observation is not None:
-                    observation = old.observation
+                    cached_observation = old.observation
                     self._emit(old, state="ready")  # Guard source/deadline may have changed.
-                    return observation.device
+                    return cached_observation.device
                 raise AcquisitionUncertainError("cloud acquisition key cannot be replayed",
                                                 old.snapshot)
             if any(item.snapshot.state not in {"rejected", "released", "not_created"}
