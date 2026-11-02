@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-import json
 import math
 import re
 from dataclasses import MISSING, dataclass, fields
 from datetime import datetime
 from enum import Enum
 from typing import Any, ClassVar, Self
+
+from cineforge.json_codec import canonical_json, strict_loads
 
 SCHEMA_VERSION = 1
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
@@ -78,19 +79,6 @@ def _unique(values: tuple[object, ...], label: str) -> None:
         raise ContractError(f"duplicate {label}")
 
 
-def _pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for key, value in pairs:
-        if key in result:
-            raise ContractError(f"duplicate JSON key: {key}")
-        result[key] = value
-    return result
-
-
-def _constant(value: str) -> None:
-    raise ContractError(f"nonfinite JSON number: {value}")
-
-
 def _encode(value: Any) -> Any:
     if isinstance(value, Contract):
         return value.to_dict()
@@ -107,7 +95,9 @@ class Contract:
 
     schema_version: int = SCHEMA_VERSION
     _objects: ClassVar[dict[str, type[Contract]]] = {}
+    _optional_objects: ClassVar[dict[str, type[Contract]]] = {}
     _sequences: ClassVar[dict[str, type[Contract]]] = {}
+    _tuple_fields: ClassVar[tuple[str, ...]] = ()
     _enums: ClassVar[dict[str, type[Enum]]] = {}
 
     def __post_init__(self) -> None:
@@ -118,8 +108,7 @@ class Contract:
         return {field.name: _encode(getattr(self, field.name)) for field in fields(self)}
 
     def to_json(self) -> str:
-        return json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"),
-                          ensure_ascii=False, allow_nan=False)
+        return canonical_json(self.to_dict())
 
     @classmethod
     def from_dict(cls, data: object) -> Self:
@@ -135,16 +124,19 @@ class Contract:
         for name, kind in cls._objects.items():
             if name in values:
                 values[name] = kind.from_dict(values[name])
+        for name, kind in cls._optional_objects.items():
+            if name in values and values[name] is not None:
+                values[name] = kind.from_dict(values[name])
         for name, kind in cls._sequences.items():
             if name in values:
                 if not isinstance(values[name], list):
                     raise ContractError(f"{name} must be a JSON array")
                 values[name] = tuple(kind.from_dict(item) for item in values[name])
-        # String-tuples have no nested record type.
-        if "artifact_ids" in values:
-            if not isinstance(values["artifact_ids"], list):
-                raise ContractError("artifact_ids must be a JSON array")
-            values["artifact_ids"] = tuple(values["artifact_ids"])
+        for name in cls._tuple_fields:
+            if name in values:
+                if not isinstance(values[name], list):
+                    raise ContractError(f"{name} must be a JSON array")
+                values[name] = tuple(values[name])
         for name, enum in cls._enums.items():
             if name in values:
                 try:
@@ -161,7 +153,7 @@ class Contract:
         if not isinstance(raw, str):
             raise ContractError("JSON input must be text")
         try:
-            value = json.loads(raw, object_pairs_hook=_pairs, parse_constant=_constant)
+            value = strict_loads(raw)
         except (ValueError, RecursionError) as exc:
             raise ContractError("invalid contract JSON") from exc
         return cls.from_dict(value)
@@ -289,6 +281,8 @@ class RunStatus(str, Enum):
 
 @dataclass(frozen=True, slots=True)
 class ShotRun(Contract):
+    _tuple_fields: ClassVar[tuple[str, ...]] = ("artifact_ids",)
+
     shot_id: str
     shot_revision: int
     attempt: int
