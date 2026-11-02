@@ -106,8 +106,8 @@ def execute_comfy(
     Worker records and reviewed selection are operator-trusted declarations, separate
     from the creative plan. Runtime bounds do not enforce cloud rental/billing limits.
     A failure may leave active GPU work; run.json records bounded cancellation results.
-    The absolute timeout includes setup, inference and transfer. Reserve transfer time
-    inside it (default: min(request timeout, half the total)); never extend the cap.
+    The absolute timeout includes setup, inference, transfer and cancellation. Reserve
+    transfer time inside it (default: min(request timeout, half the total)).
     """
     failed = False
     provider = None
@@ -208,7 +208,9 @@ def execute_comfy(
                 # acknowledgement/history never becomes a fabricated cancelled state.
                 if run is not None and run.status not in TERMINAL:
                     record["cancellation"]["attempted"] = True
-                    bounded.deadline = clock() + request_timeout_seconds
+                    # Best-effort cancellation may use remaining reserved time, but
+                    # cannot renew the total cap or consume the caller's lease reserve.
+                    bounded.deadline = min(deadline, clock() + request_timeout_seconds)
                     try:
                         run = provider.cancel(run.job_id)
                         record["cancellation"]["confirmed_terminal"] = run.status in TERMINAL

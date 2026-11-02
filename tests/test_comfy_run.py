@@ -408,6 +408,120 @@ class ComfyRunTests(unittest.TestCase):
         self.assertTrue(record["cancellation"]["confirmed_terminal"])
         self.assertTrue(all(0 < call[3] <= 0.25 for call in self.wire.calls))
 
+    def test_stalled_cancellation_stays_within_the_total_cap_and_lease_reserve(self):
+        from test_cloud_budget import BudgetTests
+
+        fixture = BudgetTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        with fixture.session() as budget:
+            provider = fixture.provider(budget)
+            fixture.acquire(provider)
+            fixture.clock.sleep(1735)
+            budget.heartbeat("first")
+            cap = budget.remaining_seconds("first")
+            self.assertEqual(cap, 5)
+            started = fixture.clock.monotonic()
+            self.wire.mode = "running"
+            original_request = self.wire.request
+            histories = 0
+            cancel_calls = []
+
+            def request(method, path, body=None, **kwargs):
+                nonlocal histories
+                if path.startswith("/history/"):
+                    histories += 1
+                    if histories == 1:
+                        fixture.clock.sleep(2.4)
+                    elif histories == 2:
+                        fixture.clock.sleep(.1)
+                        raise TimeoutError("synthetic inference timeout")
+                    elif histories == 3:
+                        cancel_calls.append((fixture.clock.monotonic() - started,
+                                             kwargs["timeout_seconds"]))
+                        fixture.clock.sleep(min(9, kwargs["timeout_seconds"]))
+                        raise TimeoutError("synthetic cancellation stall")
+                return original_request(method, path, body, **kwargs)
+
+            self.wire.request = request
+            with self.assertRaises(ComfyRunError):
+                self.execute(timeout_seconds=cap, clock=fixture.clock.monotonic,
+                             sleep=fixture.clock.sleep)
+            self.assertEqual(len(cancel_calls), 1)
+            self.assertLessEqual(cancel_calls[0][1], cap - cancel_calls[0][0])
+            self.assertLessEqual(fixture.clock.monotonic() - started, cap)
+            self.assertGreaterEqual(1800 - (fixture.clock.time() - 10000), 60)
+            record = json.loads((self.output / "run.json").read_bytes())
+            self.assertEqual(record["outcome"], "incomplete")
+            self.assertEqual(record["known_run"]["job_id"], IDENTITY)
+            self.assertEqual(record["known_run"]["status"], "running")
+            self.assertIsNone(record["server_output"])
+            self.assertEqual(record["cancellation"],
+                             {"attempted": True, "confirmed_terminal": False})
+            self.assertNotIn("manifest", record)
+            # Orchestration leaves worker cleanup to its owning caller.
+            self.assertTrue(fixture.cloud.pods)
+            provider.release("pod_1")
+            self.assertEqual(budget.snapshots[0].state, "released")
+            self.assertFalse(fixture.cloud.pods)
+
+    def test_already_expired_absolute_cap_starts_no_cancellation_io(self):
+        now = [0.0]
+        checkpoint = PrivateRunDirectory.checkpoint
+        self.wire.mode = "running"
+
+        def delayed_checkpoint(store, payload):
+            checkpoint(store, payload)
+            if json.loads(payload)["outcome"] == "submitted":
+                now[0] = 1
+
+        with patch.object(PrivateRunDirectory, "checkpoint", delayed_checkpoint):
+            with self.assertRaises(ComfyRunError):
+                self.execute(timeout_seconds=1, clock=lambda: now[0])
+        self.assertFalse(any(c[1].startswith("/history/") or c[1].endswith("/cancel")
+                             for c in self.wire.calls))
+        self.assertEqual(sum(c[1] == "/prompt" for c in self.wire.calls), 1)
+        record = json.loads((self.output / "run.json").read_bytes())
+        self.assertEqual(record["known_run"]["job_id"], IDENTITY)
+        self.assertEqual(record["known_run"]["status"], "queued")
+        self.assertEqual(record["outcome"], "incomplete")
+        self.assertFalse(record["cancellation"]["confirmed_terminal"])
+        self.assertIsNone(record["server_output"])
+        self.assertNotIn("manifest", record)
+
+    def test_tiny_cap_can_reconcile_cancellation_success_without_losing_output(self):
+        now = [0.0]
+        self.wire.mode = "running"
+        original_request = self.wire.request
+        histories = 0
+        cancel_bounds = []
+
+        def request(method, path, body=None, **kwargs):
+            nonlocal histories
+            if path.startswith("/history/"):
+                histories += 1
+                if histories == 1:
+                    now[0] = .5
+                    raise TimeoutError("synthetic inference timeout")
+                cancel_bounds.append(kwargs["timeout_seconds"])
+                self.wire.mode = "success"
+                now[0] += min(.1, kwargs["timeout_seconds"] / 2)
+            return original_request(method, path, body, **kwargs)
+
+        self.wire.request = request
+        with self.assertRaises(ComfyRunError):
+            self.execute(timeout_seconds=1, clock=lambda: now[0])
+        self.assertEqual(cancel_bounds, [.5])
+        self.assertLessEqual(now[0], 1)
+        record = json.loads((self.output / "run.json").read_bytes())
+        self.assertEqual(record["outcome"], "incomplete")
+        self.assertEqual(record["known_run"]["status"], "succeeded")
+        self.assertEqual(record["server_output"],
+                         {"filename": "fixture.webm", "subfolder": "", "type": "output"})
+        self.assertTrue(record["cancellation"]["confirmed_terminal"])
+        self.assertNotIn("manifest", record)
+        self.assertFalse(any(c[1].startswith("/view?") for c in self.wire.calls))
+
     def test_reserved_transfer_survives_inference_cutoff_and_checkpoints_output_first(self):
         now = [0.0]
         original_request = self.wire.request
