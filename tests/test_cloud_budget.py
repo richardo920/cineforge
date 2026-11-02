@@ -256,7 +256,7 @@ class BudgetTests(unittest.TestCase):
                 good = GuardReceipt(session.guard_plan(snapshot.key),
                     worker_guard_source_sha256(), 123, self.clock.time(), True, True)
                 # Previous source receipts cannot attest this changed guard implementation.
-                old_source_sha256 = "773592a771c9bf4729c3f40cd9dcfadbead301e1a2bcd8cf63a633e435eee70c"
+                old_source_sha256 = "773592a771c9bf4729c3f40cd9dcfadbead301e1a2bcd8cf63a633e435eee70c"  # pragma: allowlist secret - public historical worker source SHA256
                 self.assertNotEqual(old_source_sha256, worker_guard_source_sha256())
                 for bad in (replace(good, source_sha256=old_source_sha256),
                             replace(good, source_sha256="f"*64),
