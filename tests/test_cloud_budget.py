@@ -31,6 +31,10 @@ from cineforge.runpod_transport import CloudResponse
 from cineforge.worker_guard import GuardReceipt, worker_guard_source_sha256
 from cineforge.workflows import canonical
 
+OLD_GUARD_SOURCE_SHA256 = (
+    "773592a771c9bf4729c3f40cd9dcfadbead301e1a2bcd8cf63a633e435eee70c"  # pragma: allowlist secret - public historical worker source SHA256
+)
+
 
 def selection():
     return load_comfy_selection(Path(__file__).resolve().parents[1]
@@ -256,7 +260,7 @@ class BudgetTests(unittest.TestCase):
                 good = GuardReceipt(session.guard_plan(snapshot.key),
                     worker_guard_source_sha256(), 123, self.clock.time(), True, True)
                 # Previous source receipts cannot attest this changed guard implementation.
-                old_source_sha256 = "773592a771c9bf4729c3f40cd9dcfadbead301e1a2bcd8cf63a633e435eee70c"  # pragma: allowlist secret - public historical worker source SHA256
+                old_source_sha256 = OLD_GUARD_SOURCE_SHA256
                 self.assertNotEqual(old_source_sha256, worker_guard_source_sha256())
                 for bad in (replace(good, source_sha256=old_source_sha256),
                             replace(good, source_sha256="f"*64),
@@ -275,7 +279,7 @@ class BudgetTests(unittest.TestCase):
         path = self.path / "budget.json"
         data = json.loads(path.read_bytes())
         data["records"]["first"]["snapshot"]["state"] = "created"
-        data["records"]["first"]["guard"]["source_sha256"] = "773592a771c9bf4729c3f40cd9dcfadbead301e1a2bcd8cf63a633e435eee70c"
+        data["records"]["first"]["guard"]["source_sha256"] = OLD_GUARD_SOURCE_SHA256
         path.write_bytes(canonical(data))
         with self.session() as session:
             intent, snapshot = session.intents[0], session.snapshots[0]
@@ -299,7 +303,7 @@ class BudgetTests(unittest.TestCase):
             self.acquire(self.provider(session))
         path = self.path / "budget.json"
         data = json.loads(path.read_bytes())
-        data["records"]["first"]["guard"]["source_sha256"] = "773592a771c9bf4729c3f40cd9dcfadbead301e1a2bcd8cf63a633e435eee70c"
+        data["records"]["first"]["guard"]["source_sha256"] = OLD_GUARD_SOURCE_SHA256
         path.write_bytes(canonical(data))
         with self.session() as session:
             self.assertEqual(session.recover_owned(self.provider(session)), ("first",))
