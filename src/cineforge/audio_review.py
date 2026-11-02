@@ -253,7 +253,7 @@ class TechnicalReviewVerifier(Protocol):
     """Trusted code must verify native receipts/media/metering for this exact snapshot.
 
     In particular, unverified_injected_runtime is not native proof: verify the
-    native child's receipt_for(request, actual_bytes), not a caller flag or JSON.
+    NativeSpeechRuntime.receipt_for(request, actual_bytes), not a caller flag or JSON.
     """
 
     def verify(self, snapshot: ReviewSnapshot) -> TechnicalReview: ...
@@ -374,6 +374,17 @@ def assess_review(snapshot: ReviewSnapshot, review: OwnerReview | None, *,
     """
     _instance(snapshot, ReviewSnapshot)
     _instance(current, ReviewSnapshot)
+    invalid = False
+    try:
+        snapshot = ReviewSnapshot.from_dict(snapshot.to_dict())
+        current = ReviewSnapshot.from_dict(current.to_dict())
+        if review is not None:
+            _instance(review, OwnerReview)
+            review = OwnerReview.from_dict(review.to_dict())
+    except (ContractError, TypeError, UnicodeError, RecursionError, OverflowError, AttributeError):
+        invalid = True
+    if invalid:
+        raise ReviewError("invalid current media review metadata")
     if snapshot != current:
         return ReviewAssessment(False, ("stale_snapshot",))
     if review is None:

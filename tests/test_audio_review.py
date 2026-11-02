@@ -273,6 +273,35 @@ class AudioReviewTests(unittest.TestCase):
             self.assertFalse(assess_review(current, record, current=current,
                                           verifier=Verifier(status=status)).current)
 
+    def test_malformed_typed_operator_records_refuse_before_verifier(self):
+        current = native_shaped_contract(self.snapshot)
+        record = owner(current)
+        for change in (dict(checks=()), dict(checks=record.checks[:-1]),
+                       dict(checks=(record.checks[0], *record.checks[:-1])),
+                       dict(reviewed_at_ns=True), dict(method="PRIVATE-CANARY"),
+                       dict(schema_version=True)):
+            malformed = object.__new__(OwnerReview)
+            for item in fields(record):
+                object.__setattr__(malformed, item.name,
+                                   change.get(item.name, getattr(record, item.name)))
+            verifier = Verifier()
+            try:
+                assess_review(current, malformed, current=current, verifier=verifier)
+            except ReviewError as error:
+                self.assertIsNone(error.__context__)
+                self.assertNotIn("CANARY", str(error))
+            else:
+                self.fail("malformed operator metadata reached assessment")
+            self.assertFalse(verifier.calls)
+        malformed = object.__new__(ReviewSnapshot)
+        for item in fields(current):
+            object.__setattr__(malformed, item.name,
+                               True if item.name == "revision" else getattr(current, item.name))
+        verifier = Verifier()
+        with self.assertRaises(ReviewError):
+            assess_review(malformed, record, current=malformed, verifier=verifier)
+        self.assertFalse(verifier.calls)
+
     def test_malformed_technical_responses_refuse_without_retry_or_private_context(self):
         current = native_shaped_contract(self.snapshot)
         record = owner(current)
