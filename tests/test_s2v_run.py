@@ -101,8 +101,8 @@ class S2VRunTests(unittest.TestCase):
         self.verification = worker(self.fixture.gate)
         self.selection = self.fixture.selection.bind_worker(self.verification, proof)
         self.wire = S2VWire(self.selection)
-        self.driver.endpoint = lambda: "http://127.0.0.1:8188"
-        self.driver.execution_transport = lambda: self.wire
+        self.driver.endpoint = lambda **kwargs: "http://127.0.0.1:8188"
+        self.driver.execution_transport = lambda **kwargs: self.wire
         self.output = self.fixture.root / "output"
 
     def run_scene(self, **changes):
@@ -211,7 +211,7 @@ class S2VRunTests(unittest.TestCase):
     def _absolute_fixture(self):
         now = [100.0]
         self.driver.budget.remaining_seconds = lambda _: 180 - (now[0] - 100)
-        self.driver.execution_transport = lambda: SupervisedComfyTransport(self.driver, self.wire)
+        self.driver.execution_transport = lambda **kwargs: SupervisedComfyTransport(self.driver, self.wire)
         return now
 
     def test_slow_initial_native_proof_cannot_renew_run_cap_or_claim_storage(self):

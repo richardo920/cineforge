@@ -40,7 +40,8 @@ def install_wheel(path: Path, target: Path, wheel: dict[str, Any],
             if info.is_dir() and stat.S_IFMT(info.external_attr >> 16) not in (0, stat.S_IFDIR):
                 raise ValueError("closed Comfy wheel directory is not regular")
         names = [info.filename for info in archive.infolist() if not info.is_dir()]
-        destinations = [_destination(name, comfy_layout=True) for name in names]
+        destinations = [_destination(name, (wheel["name"], wheel["version"]), comfy_layout=True)
+                        for name in names]
         allowed_shared = {"site/" + entry["path"]: entry for entry in shared_files}
         if len(set(destinations)) != len(destinations):
             raise ValueError("closed Comfy wheel destination overlaps")
@@ -84,7 +85,7 @@ def install_wheel(path: Path, target: Path, wheel: dict[str, Any],
                 raise ValueError("closed Comfy notice identity differs")
             if hashlib.sha256(archive.read(name)).hexdigest() != sha:
                 raise ValueError("closed Comfy notice bytes differ")
-    _install_wheel(path, target, wheel, manifest, deadline, top_level_metadata=True, comfy_layout=True)
+    _install_wheel(path, target, wheel, manifest, deadline, comfy_layout=True)
     nr_check(deadline)
 
 

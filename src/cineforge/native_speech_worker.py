@@ -164,7 +164,7 @@ def handle(header: dict[str, Any], reference: bytes) -> tuple[dict[str, Any], by
     sdk_content = verify_tree(selection.sdk, deadline)
     runtime_content = verify_tree(selection.runtime, deadline, distributions=True)
     model_content = verify_tree(selection.base if header["operation"] == "base"
-                                else selection.design, deadline)
+                                else selection.design, deadline, model_role=header["operation"])
     if time.monotonic() >= deadline:
         raise NativeSpeechError("native speech work deadline exhausted")
     payload, conversion, hardware = _generate(header["operation"], request, reference,

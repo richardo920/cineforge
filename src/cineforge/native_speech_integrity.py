@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import stat
@@ -17,11 +18,17 @@ from dataclasses import dataclass, field
 from email.parser import BytesParser
 from typing import Any
 
+from cineforge.json_codec import strict_loads
 from cineforge.native_speech_pins import BASE_FILES, DESIGN_FILES, RUNTIME_DISTRIBUTIONS, SDK_FILES
 
 FilePin = tuple[str, int, str, str]
 _HASH = re.compile(r"[0-9a-f]{64}\Z")
 _MAX_TREE_BYTES = 64 * 1024**3
+_MODEL_CONFIG_PATHS = frozenset({
+    "config.json", "generation_config.json", "preprocessor_config.json",
+    "speech_tokenizer/config.json", "speech_tokenizer/configuration.json",
+    "speech_tokenizer/preprocessor_config.json", "tokenizer_config.json",
+})
 
 
 class NativeSpeechError(ValueError):
@@ -256,9 +263,46 @@ def verify_binary(binary: NativeBinary, deadline: float) -> None:
         os.close(descriptor)
 
 
+def _distribution_identity(path: str, data: bytes) -> tuple[str, str]:
+    """Only root dist-info identifies an installed distribution; vendors stay data."""
+    if path.count("/") != 1 or not path.endswith(".dist-info/METADATA"):
+        raise NativeSpeechError("invalid root speech distribution metadata")
+    parsed = BytesParser().parsebytes(data)
+    if len(parsed.get_all("Name", [])) != 1 or len(parsed.get_all("Version", [])) != 1:
+        raise NativeSpeechError("ambiguous speech runtime distribution identity")
+    package = re.sub(r"[-_.]+", "-", str(parsed["Name"]).lower())
+    version = str(parsed["Version"])
+    directory = path.split("/")[0][:-len(".dist-info")]
+    name, separator, directory_version = directory.rpartition("-")
+    if (not package or not version or not separator or directory_version != version
+            or re.sub(r"[-_.]+", "-", name.lower()) != package):
+        raise NativeSpeechError("speech runtime metadata directory differs")
+    return package, version
+
+
 def verify_tree(tree: NativeTree, deadline: float, *, distributions: bool = False,
+                model_role: str | None = None,
                 empty_directories: frozenset[str] = frozenset()) -> str:
-    """Check exact tree through no-follow descriptors; retain no private filenames in errors."""
+    """Hash exact resources; semantic config checks require the pinned model role.
+
+    Runtime/SDK/source resources are opaque data, including JSONC/build configs.
+    Base/Design callers must supply their fixed role and exact curated pin set.
+    """
+    if type(distributions) is not bool:
+        raise NativeSpeechError("invalid speech tree role")
+    if empty_directories and (model_role is not None or distributions):
+        raise NativeSpeechError("empty directories cannot extend pinned model or runtime roles")
+    if model_role is None:
+        if tree.files in (BASE_FILES, DESIGN_FILES):
+            raise NativeSpeechError("explicit pinned model role required")
+        configs: frozenset[str] = frozenset()
+    else:
+        if type(model_role) is not str or model_role not in ("base", "design") or distributions:
+            raise NativeSpeechError("invalid speech model role")
+        pins = BASE_FILES if model_role == "base" else DESIGN_FILES
+        if tree.files != pins:
+            raise NativeSpeechError("speech model tree differs from role pins")
+        configs = _MODEL_CONFIG_PATHS
     expected = {p[0]: p for p in tree.files}
     directories = {""} | {path.rsplit("/", i)[0] for path in expected
                              for i in range(1, path.count("/") + 1)}
@@ -285,18 +329,18 @@ def verify_tree(tree: NativeTree, deadline: float, *, distributions: bool = Fals
             else:
                 if path not in expected:
                     raise NativeSpeechError("unexpected speech staging file")
-                metadata = distributions and path.endswith(".dist-info/METADATA")
-                config = path.endswith(("config.json", "configuration.json"))
+                metadata = (distributions and path.count("/") == 1
+                            and path.endswith(".dist-info/METADATA"))
+                config = path in configs
                 checksum, data = _read_file(descriptor, name, expected[path], deadline,
                                             capture=metadata or config)
                 observed.add(path)
                 checksums.append((path, checksum))
                 if metadata:
-                    parsed = BytesParser().parsebytes(data)
-                    package = re.sub(r"[-_.]+", "-", str(parsed.get("Name", "")).lower())
+                    package, version = _distribution_identity(path, data)
                     if package in packages:
                         raise NativeSpeechError("duplicate speech runtime distribution")
-                    packages[package] = str(parsed.get("Version", ""))
+                    packages[package] = version
                 if config:
                     _config(data)
     try:
@@ -311,7 +355,14 @@ def verify_tree(tree: NativeTree, deadline: float, *, distributions: bool = Fals
 
 
 def _config(data: bytes) -> None:
-    value = json.loads(data)
+    value = None
+    failed = False
+    try:
+        value = strict_loads(data)
+    except (ValueError, UnicodeError, RecursionError):
+        failed = True
+    if failed or type(value) is not dict:
+        raise NativeSpeechError("invalid strict speech model configuration") from None
     forbidden = {"auto_map", "trust_remote_code", "_attn_implementation_internal",
                  "custom_pipelines", "code_revision"}
 
@@ -324,4 +375,6 @@ def _config(data: bytes) -> None:
         elif isinstance(item, list):
             for child in item:
                 visit(child)
+        elif type(item) is float and not math.isfinite(item):
+            raise NativeSpeechError("nonfinite speech model configuration")
     visit(value)
