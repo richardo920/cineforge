@@ -162,6 +162,7 @@ def _admit(selection: S2VSelection, verification: WorkerVerification, driver: SS
     validate_s2v_runtime(driver.runtime_evidence)
     selection.require_execution_worker(verification)
     driver.check()
+    driver.verify_comfy_current(absolute_deadline=deadline)
     _window(driver, deadline, clock)
 
 

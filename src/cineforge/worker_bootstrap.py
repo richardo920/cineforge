@@ -532,10 +532,71 @@ def validate_s2v_runtime(runtime: dict[str, Any]) -> None:
                          if key != "compute_precision"})
 
 
+def validate_s2v_admission(runtime: dict[str, Any]) -> None:
+    """NVML/stdlib hardware only; no claim that unreviewed Python imports are ready."""
+    if "admission_status" not in runtime:
+        validate_s2v_runtime(runtime)
+        return
+    fields = {"admission_status", "python_version", "gpu_raw_name", "gpu_memory_mib",
+              "capability", "device_count", "nvml_total_mib", "nvml_reserved_mib",
+              "driver_version"} | M4_RESOURCE_FIELDS
+    requirements = S2V_WORKER.reference_runtime
+    if (requirements is None or set(runtime) != fields
+            or runtime["admission_status"] != "hardware_only_unverified_runtime"
+            or runtime["gpu_raw_name"] != S2V_WORKER.gpu
+            or runtime["capability"] != [12, 0]
+            or any(type(v) is not int for v in runtime["capability"])
+            or type(runtime["device_count"]) is not int or runtime["device_count"] != 1
+            or type(runtime["gpu_memory_mib"]) is not int
+            or not S2V_WORKER.minimum_memory_mib <= runtime["gpu_memory_mib"] <= requirements.maximum_memory_mib
+            or runtime["nvml_total_mib"] != runtime["gpu_memory_mib"]
+            or type(runtime["nvml_reserved_mib"]) is not int
+            or not 0 <= runtime["nvml_reserved_mib"] < runtime["nvml_total_mib"]
+            or type(runtime["python_version"]) is not str
+            or re.fullmatch(r"3\.11\.[0-9]{1,3}", runtime["python_version"]) is None
+            or type(runtime["driver_version"]) is not str
+            or re.fullmatch(r"[0-9.]{3,32}", runtime["driver_version"]) is None):
+        raise BootstrapError("M5 unimported hardware admission unavailable")
+    accounting = memory_accounting(runtime["host_memory_bytes"], runtime["host_available_memory_bytes"],
+                                   runtime["cgroup_limits"], runtime["memory_accounting"])
+    if (any(runtime[k] != v for k, v in accounting.items())
+            or runtime["memory_limit_bytes"] < requirements.minimum_effective_ram_bytes
+            or runtime["available_memory_bytes"] < requirements.minimum_available_ram_bytes
+            or type(runtime["filesystem_free_bytes"]) is not int
+            or type(runtime["filesystem_total_bytes"]) is not int
+            or not requirements.minimum_filesystem_free_bytes <= runtime["filesystem_free_bytes"]
+            <= runtime["filesystem_total_bytes"]):
+        raise BootstrapError("M5 hardware resources unavailable")
+
+
+def s2v_hardware_admission(root: Path, deadline: float) -> dict[str, Any]:
+    import platform
+    if (sys.implementation.name != "cpython" or sys.version_info[:2] != (3, 11)
+            or sys.platform != "linux" or platform.machine() != "x86_64"):
+        raise BootstrapError("M5 fixed interpreter ABI unavailable")
+    raw = bounded_process(["/usr/bin/nvidia-smi", "--query-gpu=name,memory.total,memory.reserved,compute_cap,driver_version",
+        "--format=csv,noheader,nounits"], timeout=min(5, deadline-time.monotonic()),
+        max_output=1024, environment={"PATH": "", "LANG": "C"}, absolute_deadline=deadline)
+    rows = raw.decode("ascii").strip().splitlines()
+    values = rows[0].split(",") if len(rows) == 1 else []
+    if len(values) != 5:
+        raise BootstrapError("M5 bounded NVML hardware evidence unavailable")
+    result = dict(admission_status="hardware_only_unverified_runtime", python_version=platform.python_version(),
+        gpu_raw_name=values[0].strip(), gpu_memory_mib=int(values[1]), nvml_total_mib=int(values[1]),
+        nvml_reserved_mib=int(values[2]), capability=[int(v) for v in values[3].strip().split(".")],
+        device_count=1, driver_version=values[4].strip(), **resource_evidence(root))
+    validate_s2v_admission(result)
+    if time.monotonic() >= deadline:
+        raise BootstrapError("M5 hardware admission deadline exhausted")
+    return result
+
+
 def runtime_probe(timeout: float, python: str = sys.executable, *,
                   profile: dict[str, Any] | None = None, resource_root: Path | None = None) \
         -> dict[str, Any]:
     configured = _configuration(profile)
+    if configured is S2V_WORKER:
+        raise BootstrapError("M5 imports require the closed Comfy production launcher")
     requirements = configured.reference_runtime
     deadline = time.monotonic() + timeout
     code = ("import json,platform,torch,importlib.metadata as m;"
@@ -631,7 +692,9 @@ def arm(request: dict[str, Any], deadline: float) -> dict[str, Any]:
         raise BootstrapError("worker guard exited")
     guard_alive(root, process.pid)
     private_write(root, "guard-pid.json", encode({"pid": process.pid}))
-    runtime = (runtime_probe(max(.01, deadline - time.monotonic()), profile=profile, resource_root=root)
+    runtime = (s2v_hardware_admission(root, deadline) if profile is not None
+               and profile["id"] == S2V_WORKER.profile_id else
+               runtime_probe(max(.01, deadline - time.monotonic()), profile=profile, resource_root=root)
                if profile is not None else runtime_probe(max(.01, deadline - time.monotonic())))
     return {"receipt": {"plan": plan, "source_sha256": hashlib.sha256(source).hexdigest(),
         "pid": process.pid, "observed_unix": time.time(), "operator_verified_alive": True,
@@ -733,6 +796,8 @@ def _setup(request: dict[str, Any], deadline: float,
     configured = _configuration(profile)
     revision = configured.model_revision
     root = worker_root(plan["session_id"])
+    if configured is S2V_WORKER:
+        raise BootstrapError("M5 requires the separately reviewed fixed Comfy installer", reason="setup_rejected")
     if configured is S2V_WORKER:
         subject = selection.get("approval", {}).get("model_workflow", {}).get("approved_subject_sha256")
         if type(subject) is not str or re.fullmatch(r"[0-9a-f]{64}", subject) is None:

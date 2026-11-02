@@ -281,7 +281,8 @@ def _distribution_identity(path: str, data: bytes) -> tuple[str, str]:
 
 
 def verify_tree(tree: NativeTree, deadline: float, *, distributions: bool = False,
-                model_role: str | None = None) -> str:
+                model_role: str | None = None,
+                empty_directories: frozenset[str] = frozenset()) -> str:
     """Hash exact resources; semantic config checks require the pinned model role.
 
     Runtime/SDK/source resources are opaque data, including JSONC/build configs.
@@ -289,6 +290,8 @@ def verify_tree(tree: NativeTree, deadline: float, *, distributions: bool = Fals
     """
     if type(distributions) is not bool:
         raise NativeSpeechError("invalid speech tree role")
+    if empty_directories and (model_role is not None or distributions):
+        raise NativeSpeechError("empty directories cannot extend pinned model or runtime roles")
     if model_role is None:
         if tree.files in (BASE_FILES, DESIGN_FILES):
             raise NativeSpeechError("explicit pinned model role required")
@@ -315,7 +318,7 @@ def verify_tree(tree: NativeTree, deadline: float, *, distributions: bool = Fals
             path = prefix + name
             info = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
             if stat.S_ISDIR(info.st_mode):
-                if path not in directories:
+                if path not in directories and path not in empty_directories:
                     raise NativeSpeechError("unexpected speech staging directory")
                 child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
                                 dir_fd=descriptor)

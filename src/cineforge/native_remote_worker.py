@@ -111,7 +111,7 @@ def _parts(name: str) -> tuple[str, ...]:
     return tuple(name.split("/"))
 
 
-def _destination(name: str, distribution: tuple[str, str]) -> str:
+def _destination(name: str, distribution: tuple[str, str], *, comfy_layout: bool = False) -> str:
     parts = _parts(name)
     if parts[0].endswith(".data"):
         expected = distribution[0].replace("-", "_") + "-" + distribution[1] + ".data"
@@ -121,11 +121,15 @@ def _destination(name: str, distribution: tuple[str, str]) -> str:
             # Preserve only these pinned bodies at original archive paths, as
             # mode0600 data. Never install bin/PATH entries, wrappers or scripts.
             # These directories are not import roots; full manifests bind bytes.
-            return name
+            if not comfy_layout:
+                return name
+            if distribution != ("sympy", "1.14.0"):
+                raise ValueError("unsupported closed Comfy data layout")
+            return "data/sympy-1.14.0/isympy.1"
         if parts[1] not in ("purelib", "platlib"):
             raise ValueError("unsupported native wheel relocation")
-        return "/".join(parts[2:])
-    return name
+        name = "/".join(parts[2:])
+    return "site/" + name if comfy_layout else name
 
 
 def _parent(root: Path, relative: str) -> Path:
@@ -145,6 +149,7 @@ def _install_wheel(
     declaration: dict[str, Any],
     manifest: dict[str, tuple[int, str]],
     deadline: float,
+    *, comfy_layout: bool = False,
 ) -> None:
     nr_private(path)
     with zipfile.ZipFile(path) as archive:
@@ -195,7 +200,8 @@ def _install_wheel(
             mode = info.external_attr >> 16
             if mode and stat.S_IFMT(mode) not in (0, stat.S_IFREG):
                 raise ValueError("native wheel special file rejected")
-            relative = _destination(info.filename, (declaration["name"], declaration["version"]))
+            relative = _destination(info.filename, (declaration["name"], declaration["version"]),
+                                    comfy_layout=comfy_layout)
             if relative in destinations:
                 raise ValueError("ambiguous native wheel destination")
             destinations.add(relative)
@@ -346,6 +352,16 @@ def remote_operation(
     request: dict[str, Any], root: Path, deadline: float, binding: dict[str, Any]
 ) -> dict[str, Any]:
     op = request["operation"]
+    if op in ("native_comfy_install", "native_comfy_model", "native_comfy_setup", "native_comfy_verify"):
+        from cineforge.comfy_runtime_worker import (
+            current_comfy,
+            install_comfy,
+            setup_comfy,
+            stage_comfy_model,
+        )
+        functions = {"native_comfy_install": install_comfy, "native_comfy_model": stage_comfy_model,
+                     "native_comfy_setup": setup_comfy, "native_comfy_verify": current_comfy}
+        return functions[op](request, root, deadline)
     if op == "native_setup":
         return _setup(root, deadline)
     if op == "native_select":
