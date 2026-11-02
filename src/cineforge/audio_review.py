@@ -247,6 +247,12 @@ class TechnicalReview:
         _instance(self.snapshot, RevisionPin)
         _instance(self.evidence, EvidenceRef)
         _checklist(self.checks, TECHNICAL_CHECKLIST)
+        # A typed callback can still return malformed nested records. Reuse their
+        # strict codecs before equality (where True otherwise compares equal to 1).
+        RevisionPin.from_dict(self.snapshot.to_dict())
+        EvidenceRef.from_dict(self.evidence.to_dict())
+        for check in self.checks:
+            ReviewCheck.from_dict(check.to_dict())
 
 
 class TechnicalReviewVerifier(Protocol):
