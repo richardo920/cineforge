@@ -415,11 +415,11 @@ class NativeIntegrityTests(unittest.TestCase):
 
     def test_runtime_metadata_closure_and_remote_config_are_not_authority(self):
         self.path.unlink()
-        directory = self.root / "fixture.dist-info"
+        directory = self.root / "fixture-1.dist-info"
         directory.mkdir(mode=0o700)
         payload = b"Name: fixture\nVersion: 1\n"
         (directory / "METADATA").write_bytes(payload)
-        self.tree = NativeTree(str(self.root), (pin("fixture.dist-info/METADATA", payload),))
+        self.tree = NativeTree(str(self.root), (pin("fixture-1.dist-info/METADATA", payload),))
         with patch("cineforge.native_speech_integrity.RUNTIME_DISTRIBUTIONS", (("fixture", "1"),)):
             self.assertEqual(len(verify_tree(self.tree, time.monotonic() + 5, distributions=True)), 64)
         with self.assertRaises(NativeSpeechError):

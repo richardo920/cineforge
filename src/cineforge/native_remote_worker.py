@@ -7,13 +7,11 @@ import csv
 import hashlib
 import io
 import os
-import re
 import stat
 import time
 import urllib.parse
 import urllib.request
 import zipfile
-from email.parser import BytesParser
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +28,7 @@ from cineforge.native_remote_plan import (
 from cineforge.native_speech import NativeSpeechRuntime, OriginalVoiceDesign
 from cineforge.native_speech_integrity import (
     NativeSpeechSelection,
+    _distribution_identity,
     digest,
     verify_binary,
     verify_tree,
@@ -44,6 +43,12 @@ from cineforge.native_speech_pins import (
 from cineforge.native_speech_process import pack, unpack
 from cineforge.native_speech_worker import _selection
 from cineforge.speech import BASE_MODEL, BASE_REVISION, QwenBaseRequest
+
+_RETAINED_DATA = {
+    ("sympy", "1.14.0"): "sympy-1.14.0.data/data/share/man/man1/isympy.1",
+    ("numba", "0.68.1"): "numba-0.68.1.data/scripts/numba",
+    ("ruff", "0.17.3"): "ruff-0.17.3.data/scripts/ruff",
+}
 
 
 class _NativeRedirect(urllib.request.HTTPRedirectHandler):
@@ -112,13 +117,10 @@ def _destination(name: str, distribution: tuple[str, str]) -> str:
         expected = distribution[0].replace("-", "_") + "-" + distribution[1] + ".data"
         if parts[0] != expected or len(parts) < 3:
             raise ValueError("unsupported native wheel relocation")
-        if (
-            distribution == ("sympy", "1.14.0")
-            and name == "sympy-1.14.0.data/data/share/man/man1/isympy.1"
-        ):
-            # Preserve the only admitted data-scheme body and its original RECORD
-            # path. This dotted/hyphenated archive directory is never an import
-            # root; the entire body remains in NativeTree/subject/receipt hashes.
+        if name == _RETAINED_DATA.get(distribution):
+            # Preserve only these pinned bodies at original archive paths, as
+            # mode0600 data. Never install bin/PATH entries, wrappers or scripts.
+            # These directories are not import roots; full manifests bind bytes.
             return name
         if parts[1] not in ("purelib", "platlib"):
             raise ValueError("unsupported native wheel relocation")
@@ -150,8 +152,8 @@ def _install_wheel(
         names = [item.filename for item in infos]
         if len(set(names)) != len(names) or len(infos) > 100000:
             raise ValueError("ambiguous native wheel closure")
-        metadata = [n for n in names if n.endswith(".dist-info/METADATA")]
-        records = [n for n in names if n.endswith(".dist-info/RECORD")]
+        metadata = [n for n in names if n.count("/") == 1 and n.endswith(".dist-info/METADATA")]
+        records = [n for n in names if n.count("/") == 1 and n.endswith(".dist-info/RECORD")]
         if (
             len(metadata) != 1
             or len(records) != 1
@@ -163,14 +165,9 @@ def _install_wheel(
             or archive.getinfo(records[0]).file_size > 8 * 1024**2
         ):
             raise ValueError("excessive native wheel metadata")
-        headers = BytesParser().parsebytes(archive.read(metadata[0]))
-
-        def normalize(value: str) -> str:
-            return re.sub(r"[-_.]+", "-", value).lower()
-
-        if (
-            normalize(headers.get("Name", "")) != declaration["name"]
-            or headers.get("Version") != declaration["version"]
+        if _distribution_identity(metadata[0], archive.read(metadata[0])) != (
+            declaration["name"],
+            declaration["version"],
         ):
             raise ValueError("native wheel distribution differs")
         record: dict[str, tuple[str, int]] = {}

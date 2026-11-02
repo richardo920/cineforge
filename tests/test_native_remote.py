@@ -8,6 +8,7 @@ import csv
 import hashlib
 import io
 import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -630,6 +631,66 @@ class RemoteDeclarations(unittest.TestCase):
             (target / member).write_bytes(b"changed manual")
             with self.assertRaises(NativeSpeechError):
                 verify_tree(tree, time.monotonic() + 10)
+
+    def test_only_exact_pinned_script_bodies_remain_inert_at_original_hashed_paths(self):
+        for name, version, member in (
+            ("numba", "0.68.1", "numba-0.68.1.data/scripts/numba"),
+            ("ruff", "0.17.3", "ruff-0.17.3.data/scripts/ruff"),
+        ):
+            with self.subTest(distribution=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                target = root / "runtime"
+                target.mkdir(mode=0o700)
+                archive = root / "synthetic.whl"
+                body = b"synthetic inert script body; never executed"
+                record = self.synthetic_distribution(
+                    archive, {member: body}, name=name, version=version
+                )
+                # Match the actual ZIP permission shape while proving the
+                # installer deliberately retains data with no executable bit.
+                with zipfile.ZipFile(archive) as source:
+                    bodies = {n: source.read(n) for n in source.namelist()}
+                with zipfile.ZipFile(archive, "w") as output:
+                    for path, raw in bodies.items():
+                        info = zipfile.ZipInfo(path)
+                        info.create_system = 3
+                        info.external_attr = (stat.S_IFREG | 0o755) << 16
+                        output.writestr(info, raw)
+                manifest = {}
+                remote._install_wheel(
+                    archive,
+                    target,
+                    {"name": name, "version": version},
+                    manifest,
+                    time.monotonic() + 10,
+                )
+                self.assertEqual((target / member).read_bytes(), body)
+                self.assertEqual((target / member).stat().st_mode & 0o777, 0o600)
+                self.assertEqual((target / member).stat().st_nlink, 1)
+                self.assertEqual(
+                    (target / (name + "-" + version + ".dist-info/RECORD")).read_bytes(), record
+                )
+                self.assertFalse((target / "bin").exists())
+                self.assertFalse((target / name).exists())
+                declared = NativeTree(
+                    str(target),
+                    tuple((p, size, "sha256", sha) for p, (size, sha) in sorted(manifest.items())),
+                )
+                self.assertEqual(
+                    verify_tree(declared, time.monotonic() + 10),
+                    digest(sorted((p, sha) for p, (_, sha) in manifest.items())),
+                )
+                (target / member).write_bytes(b"tampered inert body")
+                with self.assertRaises(NativeSpeechError):
+                    verify_tree(declared, time.monotonic() + 10)
+        for name, version, member in (
+            ("numba", "0.68.1", "numba-0.68.1.data/scripts/other"),
+            ("ruff", "0.17.3", "ruff-0.17.3.data/scripts/ruffx"),
+            ("ruff", "0.17.2", "ruff-0.17.2.data/scripts/ruff"),
+            ("sympy", "1.14.0", "sympy-1.14.0.data/scripts/isympy"),
+        ):
+            with self.assertRaises(ValueError):
+                remote._destination(member, (name, version))
 
     def test_unreviewed_data_schemes_collisions_and_existing_paths_refuse(self):
         member = "sympy-1.14.0.data/data/share/man/man1/isympy.1"

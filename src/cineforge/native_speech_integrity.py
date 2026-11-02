@@ -256,6 +256,23 @@ def verify_binary(binary: NativeBinary, deadline: float) -> None:
         os.close(descriptor)
 
 
+def _distribution_identity(path: str, data: bytes) -> tuple[str, str]:
+    """Only root dist-info identifies an installed distribution; vendors stay data."""
+    if path.count("/") != 1 or not path.endswith(".dist-info/METADATA"):
+        raise NativeSpeechError("invalid root speech distribution metadata")
+    parsed = BytesParser().parsebytes(data)
+    if len(parsed.get_all("Name", [])) != 1 or len(parsed.get_all("Version", [])) != 1:
+        raise NativeSpeechError("ambiguous speech runtime distribution identity")
+    package = re.sub(r"[-_.]+", "-", str(parsed["Name"]).lower())
+    version = str(parsed["Version"])
+    directory = path.split("/")[0][:-len(".dist-info")]
+    name, separator, directory_version = directory.rpartition("-")
+    if (not package or not version or not separator or directory_version != version
+            or re.sub(r"[-_.]+", "-", name.lower()) != package):
+        raise NativeSpeechError("speech runtime metadata directory differs")
+    return package, version
+
+
 def verify_tree(tree: NativeTree, deadline: float, *, distributions: bool = False) -> str:
     """Check exact tree through no-follow descriptors; retain no private filenames in errors."""
     expected = {p[0]: p for p in tree.files}
@@ -284,18 +301,18 @@ def verify_tree(tree: NativeTree, deadline: float, *, distributions: bool = Fals
             else:
                 if path not in expected:
                     raise NativeSpeechError("unexpected speech staging file")
-                metadata = distributions and path.endswith(".dist-info/METADATA")
+                metadata = (distributions and path.count("/") == 1
+                            and path.endswith(".dist-info/METADATA"))
                 config = path.endswith(("config.json", "configuration.json"))
                 checksum, data = _read_file(descriptor, name, expected[path], deadline,
                                             capture=metadata or config)
                 observed.add(path)
                 checksums.append((path, checksum))
                 if metadata:
-                    parsed = BytesParser().parsebytes(data)
-                    package = re.sub(r"[-_.]+", "-", str(parsed.get("Name", "")).lower())
+                    package, version = _distribution_identity(path, data)
                     if package in packages:
                         raise NativeSpeechError("duplicate speech runtime distribution")
-                    packages[package] = str(parsed.get("Version", ""))
+                    packages[package] = version
                 if config:
                     _config(data)
     try:
