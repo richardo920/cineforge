@@ -5,10 +5,13 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from cineforge import worker_guard
 from cineforge.worker_guard import (
     GuardReceipt,
     WorkerGuardError,
@@ -205,7 +208,7 @@ class GuardTests(unittest.TestCase):
         own = dict(id="fixture-pod", env=dict(CINEFORGE_SESSION="fixture-session",
             CINEFORGE_LEASE="0"*32), mounts={}, status="RUNNING", actions=["stop"], runtime={})
         calls = []
-        def request(method, stop=False):
+        def request(method, stop=False, timeout_seconds=3):
             calls.append((method, stop))
             return dict(own, status="EXITED" if len(calls) >= 2 else own["status"])
         with patch("cineforge.worker_guard._worker_request", return_value=request):
@@ -216,6 +219,232 @@ class GuardTests(unittest.TestCase):
             own["env"]["CINEFORGE_LEASE"] = "foreign"
             self.assertFalse(stop_own_pod(plan(), allow_live=True))
             self.assertEqual(calls, [("GET", False)])
+
+    def test_delayed_exited_is_polled_and_stopping_does_not_repeat_stop(self):
+        for initial in ("RUNNING", "STOPPING"):
+            with self.subTest(initial=initial):
+                calls = []
+                reads = 0
+                def request(method, stop=False, timeout_seconds=3):
+                    nonlocal reads
+                    calls.append((method, stop, timeout_seconds))
+                    if method == "POST":
+                        return {}
+                    reads += 1
+                    status = initial if reads == 1 else "STOPPING" if reads == 2 else "EXITED"
+                    return dict(id="fixture-pod", env=dict(CINEFORGE_SESSION="fixture-session",
+                        CINEFORGE_LEASE="0"*32), mounts={}, status=status, actions=["stop"])
+                with patch("cineforge.worker_guard._worker_request", return_value=request):
+                    self.assertTrue(stop_own_pod(plan(), allow_live=True))
+                self.assertEqual([c[0] for c in calls].count("POST"), int(initial == "RUNNING"))
+                self.assertEqual(reads, 3)
+
+    def test_already_exited_and_foreign_terminal_stop_without_post(self):
+        for foreign in (False, True):
+            calls = []
+            def request(method, stop=False, timeout_seconds=3):
+                calls.append(method)
+                return dict(id="fixture-pod", env=dict(CINEFORGE_SESSION="fixture-session",
+                    CINEFORGE_LEASE="foreign" if foreign else "0"*32), mounts={},
+                    status="EXITED", actions=[])
+            with patch("cineforge.worker_guard._worker_request", return_value=request):
+                self.assertEqual(stop_own_pod(plan(), allow_live=True), not foreign)
+            self.assertEqual(calls, ["GET"])
+
+    def test_stop_phase_clamps_every_request_to_shared_remaining_budget(self):
+        clock = Clock()
+        calls = []
+        def request(method, stop=False, timeout_seconds=3):
+            calls.append((method, timeout_seconds))
+            clock.sleep(min(1.75, timeout_seconds))
+            return dict(id="fixture-pod", env=dict(CINEFORGE_SESSION="fixture-session",
+                CINEFORGE_LEASE="0"*32), mounts={}, status="RUNNING", actions=["stop"])
+        with patch("cineforge.worker_guard._worker_request", return_value=request):
+            self.assertFalse(stop_own_pod(plan(), allow_live=True, timeout_seconds=5,
+                monotonic=clock.monotonic, sleep=clock.sleep))
+        self.assertLessEqual(clock.mono, 15)
+        self.assertEqual([c[0] for c in calls], ["GET", "POST", "GET"])
+        self.assertEqual(calls[:2], [("GET", 3), ("POST", 3)])
+        self.assertLessEqual(calls[-1][1], 1.5)
+
+    def test_unknown_terminated_and_stalled_states_stay_uncertain_with_bounded_polling(self):
+        for status in ("TERMINATED", "UNKNOWN", "STOPPING"):
+            with self.subTest(status=status):
+                clock = Clock()
+                calls = []
+                def request(method, stop=False, timeout_seconds=3):
+                    calls.append((method, timeout_seconds))
+                    return dict(id="fixture-pod", env=dict(CINEFORGE_SESSION="fixture-session",
+                        CINEFORGE_LEASE="0"*32), mounts={}, status=status, actions=[])
+                with patch("cineforge.worker_guard._worker_request", return_value=request):
+                    self.assertFalse(stop_own_pod(plan(), allow_live=True, timeout_seconds=1,
+                        monotonic=clock.monotonic, sleep=clock.sleep))
+                self.assertLessEqual(clock.mono, 11)
+                self.assertTrue(all(c[0] == "GET" and 0 < c[1] <= 1 for c in calls))
+                self.assertLessEqual(len(calls), 6)
+        # A frozen injected clock/sleep must still have a finite call limit.
+        calls.clear()
+        with patch("cineforge.worker_guard._worker_request", return_value=request):
+            self.assertFalse(stop_own_pod(plan(), allow_live=True, monotonic=lambda: 0,
+                                        sleep=lambda seconds: None))
+        self.assertLessEqual(len(calls), 42)
+
+    def test_stalled_or_late_owned_get_cannot_schedule_stop_after_deadline(self):
+        entered, release = threading.Event(), threading.Event()
+        calls = []
+        def stalled(method, stop=False, timeout_seconds=3):
+            calls.append((method, timeout_seconds))
+            entered.set()
+            release.wait(2)
+            return dict(id="fixture-pod", env=dict(CINEFORGE_SESSION="fixture-session",
+                CINEFORGE_LEASE="0"*32), mounts={}, status="RUNNING", actions=["stop"])
+        class StalledOpener:
+            def open(self, request, timeout):
+                return Reply(stalled(request.method, False, timeout))
+        try:
+            with patch("cineforge.worker_guard.worker_credential", return_value="fixture-scoped-key"), \
+                    patch("urllib.request.build_opener", return_value=StalledOpener()):
+                started = time.monotonic()
+                self.assertFalse(stop_own_pod(plan(), allow_live=True, timeout_seconds=.03))
+                self.assertLess(time.monotonic() - started, .5)
+                self.assertTrue(entered.is_set())
+                self.assertEqual([c[0] for c in calls], ["GET"])
+        finally:
+            release.set()
+        clock = Clock()
+        def late(method, stop=False, timeout_seconds=3):
+            calls.append((method, timeout_seconds))
+            clock.sleep(6)
+            return stalled(method, stop, timeout_seconds)
+        calls.clear()
+        with patch("cineforge.worker_guard._worker_request", return_value=late):
+            self.assertFalse(stop_own_pod(plan(), allow_live=True, timeout_seconds=5,
+                                        monotonic=clock.monotonic, sleep=clock.sleep))
+        self.assertTrue(all(c[0] == "GET" for c in calls))
+
+    def test_poll_revalidates_ownership_and_no_native_request_exceeds_remaining_time(self):
+        clock = Clock()
+        calls = []
+        class Opener:
+            def open(self, request, timeout):
+                calls.append((request.method, timeout))
+                self_status = "RUNNING" if len(calls) == 1 else "STOPPING"
+                data = dict(id="fixture-pod", env=dict(CINEFORGE_SESSION="fixture-session",
+                    CINEFORGE_LEASE="0"*32), mounts={}, status=self_status, actions=["stop"])
+                clock.sleep(1.5)
+                if len(calls) == 3:
+                    data["env"]["CINEFORGE_LEASE"] = "foreign"
+                    data["status"] = "EXITED"
+                return Reply(data)
+        with patch("cineforge.worker_guard.worker_credential", return_value="fixture-scoped-key"), \
+                patch("urllib.request.build_opener", return_value=Opener()):
+            self.assertFalse(stop_own_pod(plan(), allow_live=True, timeout_seconds=5,
+                monotonic=clock.monotonic, sleep=clock.sleep))
+        self.assertEqual([c[0] for c in calls], ["GET", "POST", "GET"])
+        self.assertEqual([c[1] for c in calls], [3, 3, 2])
+
+    def test_run_guard_shares_attempt_and_overall_budget_with_native_stop(self):
+        clock = Clock()
+        budgets = []
+        def bounded(remaining):
+            budgets.append(remaining)
+            clock.sleep(remaining)
+            return False
+        result = run_guard(plan(stop_at_unix=100), lambda: 100, lambda: False,
+            clock=clock.time, monotonic=clock.monotonic, sleep=clock.sleep,
+            max_stop_attempts=3, attempt_timeout_seconds=2, bounded_stop=bounded)
+        self.assertEqual(budgets, [2, 2, 2])
+        self.assertEqual(clock.mono, 18)
+        self.assertEqual(result["status"], "compute_stop_unconfirmed")
+        self.assertEqual(result["attempts"], 3)
+        self.assertFalse(result["resource_deleted"])
+
+    def test_native_stop_retries_share_overall_budget_without_repeating_stop(self):
+        clock = Clock()
+        calls = []
+        def request(method, stop=False, timeout_seconds=3):
+            calls.append((method, timeout_seconds))
+            return dict(id="fixture-pod", env=dict(CINEFORGE_SESSION="fixture-session",
+                CINEFORGE_LEASE="0"*32), mounts={}, status="STOPPING", actions=["stop"])
+        with patch("cineforge.worker_guard._worker_request", return_value=request):
+            result = run_guard(plan(stop_at_unix=100), lambda: 100, lambda: False,
+                clock=clock.time, monotonic=clock.monotonic, sleep=clock.sleep,
+                max_stop_attempts=2, attempt_timeout_seconds=1,
+                bounded_stop=lambda remaining: stop_own_pod(plan(), allow_live=True,
+                    timeout_seconds=remaining, monotonic=clock.monotonic, sleep=clock.sleep))
+        self.assertEqual(clock.mono, 13)
+        self.assertEqual(result["attempts"], 2)
+        self.assertEqual(result["status"], "compute_stop_unconfirmed")
+        self.assertFalse(result["resource_deleted"])
+        self.assertTrue(all(method == "GET" and 0 < timeout <= 1 for method, timeout in calls))
+        self.assertEqual(len(calls), 10)
+
+    def test_native_stop_rejects_invalid_budget_and_late_success(self):
+        for bound in (True, 0, -1, float("nan"), float("inf"), 11):
+            with self.assertRaises(WorkerGuardError):
+                stop_own_pod(plan(), allow_live=True, timeout_seconds=bound)
+        clock = Clock()
+        def late(remaining):
+            clock.sleep(10)
+            return True
+        result = run_guard(plan(stop_at_unix=100), lambda: 100, lambda: False,
+            clock=clock.time, monotonic=clock.monotonic, sleep=clock.sleep,
+            max_stop_attempts=2, attempt_timeout_seconds=1, bounded_stop=late)
+        self.assertEqual(result["status"], "compute_stop_unconfirmed")
+        self.assertEqual(result["attempts"], 1)
+        self.assertFalse(result["resource_deleted"])
+
+    def test_native_https_slow_connect_cannot_send_late_stop(self):
+        clock = Clock()
+        class Socket:
+            def __init__(self):
+                self.sent, self.closed = [], False
+            def settimeout(self, timeout):
+                pass
+            def sendall(self, data):
+                self.sent.append((clock.mono, data))
+            def close(self):
+                self.closed = True
+        socket = Socket()
+        def connect(connection):
+            clock.sleep(4)  # DNS/connect/TLS may ignore the caller's socket timeout.
+            connection.sock = socket
+        with patch("cineforge.worker_guard.worker_credential", return_value="fixture-scoped-key"), \
+                patch("cineforge.worker_guard.time.monotonic", side_effect=clock.monotonic), \
+                patch("http.client.HTTPSConnection.connect", autospec=True, side_effect=connect):
+            request = worker_guard._worker_request(plan())
+            with self.assertRaises(WorkerGuardError):
+                request("POST", True, 3)
+        self.assertEqual(socket.sent, [])
+        self.assertTrue(socket.closed)
+
+    def test_native_https_rechecks_deadline_between_stop_headers_and_body(self):
+        clock = Clock()
+        class Socket:
+            def __init__(self):
+                self.sent, self.closed = [], False
+            def settimeout(self, timeout):
+                pass
+            def sendall(self, data):
+                self.sent.append((clock.mono, data))
+                clock.sleep(3)
+            def close(self):
+                self.closed = True
+        socket = Socket()
+        def connect(connection):
+            clock.sleep(1)
+            connection.sock = socket
+        with patch("cineforge.worker_guard.worker_credential", return_value="fixture-scoped-key"), \
+                patch("cineforge.worker_guard.time.monotonic", side_effect=clock.monotonic), \
+                patch("http.client.HTTPSConnection.connect", autospec=True, side_effect=connect):
+            request = worker_guard._worker_request(plan())
+            with self.assertRaises(WorkerGuardError):
+                request("POST", True, 3)
+        self.assertEqual(len(socket.sent), 1)
+        self.assertLess(socket.sent[0][0], 13)
+        self.assertIn(b"POST /v2/pods/fixture-pod/action HTTP/1.1", socket.sent[0][1])
+        self.assertNotIn(b'{"action":"stop"}', socket.sent[0][1])
+        self.assertTrue(socket.closed)
 
     def test_standalone_fake_guard_process_proves_no_orchestrator_dependency(self):
         code = '''import json
