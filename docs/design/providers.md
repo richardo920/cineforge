@@ -32,6 +32,8 @@ Idempotency lasts only for one provider instance; an uncertain submission reserv
 
 `load_comfy_selection` validates a separately trusted ledger/graph/license; `WorkerVerification` checks operator-attested image/runtime/GPU and exact model-file hashes. `execute_comfy` / `comfy-run` require explicit live opt-in, one matching shot and loopback transport, verify the installed core-node schemas, and persist a private atomic journal/payload outside Git; failures retain known job state and never resubmit automatically.
 
+`execute_comfy` reserves `result_timeout_seconds` inside the unchanged absolute `timeout_seconds` cap (default reserve: `min(request_timeout_seconds, timeout_seconds / 2)`); setup/inference ends before that reserve. A confirmed output has one fixed transfer window, retries cannot renew it, and its validated server descriptor is checkpointed before download; cancellation also stays inside the original cap and an expired cap permits no new I/O, preserving the caller's lease cleanup reserve.
+
 Selection hashes bind declarations, not owner identity; worker records are attestations, not remote inspection. Client bounds and best-effort job cancellation do not enforce cloud rental costs or guarantee worker shutdown.
 
 Pod and Serverless will be selectable execution adapters sharing domain/model/workflow/artifact contracts. M2 implements private ComfyUI access to a manually prepared Pod; Serverless job APIs and cloud lifecycle automation remain future work.
