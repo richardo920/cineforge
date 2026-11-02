@@ -206,6 +206,10 @@ class MixedArtifact:
     payload: bytes = field(repr=False)
     report: MixReport
 
+    @property
+    def pin(self) -> RevisionPin:
+        return self.report.output
+
     def __post_init__(self) -> None:
         _instance(self.report, MixReport)
         wave = None
