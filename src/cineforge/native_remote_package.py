@@ -17,6 +17,7 @@ _PACKAGE_FILES = (
     "audio_mix.py",
     "audio_pcm.py",
     "audio_process.py",
+    "audio_review.py",
     "characters.py",
     "cli.py",
     "cloud_budget.py",

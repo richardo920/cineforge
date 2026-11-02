@@ -240,7 +240,8 @@ class PairTransferTests(unittest.TestCase):
     def test_native_callback_requires_arm_hardware_optin_and_remaining_reserve_without_graph(self):
         self.driver._prepared_s2v = None
         calls = []
-        def callback(timeout):
+        def callback(timeout, *, absolute_deadline):
+            self.assertGreater(absolute_deadline, time.monotonic())
             calls.append(timeout)
             return "synthetic-result"
         self.assertFalse(hasattr(self.driver.selection, "workflow"))
@@ -258,7 +259,60 @@ class PairTransferTests(unittest.TestCase):
         self.static_failure(lambda: self.driver.run_guarded_native(callback, allow_live=True))
         self.remaining = 600
         self.static_failure(lambda: self.driver.run_guarded_native(
-            lambda _: (_ for _ in ()).throw(RuntimeError("CANARY")), allow_live=True))
+            lambda _, **kw: (_ for _ in ()).throw(RuntimeError("CANARY")), allow_live=True))
+
+    def test_native_original_absolute_cap_survives_delayed_callback_and_typeerror_is_once(self):
+        import test_native_speech as native_fixtures
+
+        from cineforge.native_speech import NativeSpeechRuntime
+        configured = native_fixtures.selection(self.root)
+        self.remaining = 123
+        now = [100.0]
+        calls = []
+        def delayed(timeout, *, absolute_deadline):
+            calls.append((timeout, absolute_deadline))
+            now[0] += 4
+            # A fresh relative timeout would grant until107; original cap103 refuses.
+            return NativeSpeechRuntime(configured, allow_native=True, timeout_seconds=timeout,
+                                       absolute_deadline=absolute_deadline)
+        with patch("cineforge.ssh_worker.time.monotonic", side_effect=lambda: now[0]), \
+                patch("cineforge.native_speech.run_child") as child:
+            self.static_failure(lambda: self.driver.run_guarded_native(delayed, allow_live=True))
+        self.assertEqual(calls, [(3, 103)])
+        child.assert_not_called()
+        calls = []
+        def raises_typeerror(timeout, *, absolute_deadline):
+            calls.append((timeout, absolute_deadline))
+            raise TypeError("CANARY callback body")
+        with patch("cineforge.ssh_worker.time.monotonic", return_value=100):
+            self.static_failure(lambda: self.driver.run_guarded_native(raises_typeerror,
+                                                                      allow_live=True))
+        self.assertEqual(calls, [(3, 103)])
+
+    def test_native_late_return_is_incomplete_even_when_callback_returns_a_value(self):
+        self.remaining = 123
+        now = [100.0]
+        calls = []
+        def late(timeout, *, absolute_deadline):
+            calls.append((timeout, absolute_deadline))
+            now[0] = absolute_deadline
+            return "late result is not confirmed success"
+        with patch("cineforge.ssh_worker.time.monotonic", side_effect=lambda: now[0]):
+            self.static_failure(lambda: self.driver.run_guarded_native(late, allow_live=True))
+        self.assertEqual(calls, [(3, 103)])
+
+    def test_final_pair_ack_does_not_commit_proof_after_voice_revocation(self):
+        def revoke(request):
+            if request["operation"] == "s2v_pair_finish":
+                self.gate.ledger.revoke(self.gate.utterance.voice.permission.rights, reason="CANARY")
+        self.fault = revoke
+        self.static_failure(lambda: self.driver.stage_s2v(self.selection))
+        self.assertEqual(self.requests[-1]["operation"], "s2v_pair_finish")
+        before = len(self.requests)
+        self.static_failure(lambda: self.driver.stage_s2v(self.selection))
+        self.assertEqual(len(self.requests), before)
+        with self.assertRaises(S2VError):
+            self.selection.require_execution_worker(worker(self.gate))
 
     def test_dispatch_checks_guard_and_bound_profile_before_transfer(self):
         (self.remote / "plan.json").write_bytes(canonical(self.plan.to_dict()))
