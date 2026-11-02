@@ -36,6 +36,8 @@ Results bind bytes, source metadata, admission snapshot, script/character/pictur
 
 `s2v_service.S2VServiceContext` binds a separately checked one-lease RTX 5090 scope (150 GB ephemeral disk, USD 5 ceiling, 120-second cleanup reserve) before speech exists; it grants no graph execution. After guarded hardware/native-speech verification, `s2v.VerifiedS2V` requires current EN/ZH script, character/voice/picture/rights, original RGB PNG and mono PCM16 speech bytes, plus trusted operator proof callbacks; descriptors and JSON flags cannot prove likeness or native execution.
 
+`SSHWorker.run_guarded_native` calls trusted controller-local code once as `invoke(timeout, absolute_deadline=cap)`; that code forwards the original same-host cap to native execution and owns cleanup. It provides guard admission, not remote transport; the remote bridge must derive its own worker-clock cap.
+
 The exact 14-node Wan2.2 core recipe uses four pinned assets (FP8-scaled diffusion storage; BF16 compute), 832×480, 77 frames at 16 fps, one front-facing fictional adult and one language per clip. Hash-named PNG/WAV pairs transfer through a guarded, bounded once-only protocol; uncertain setup, transfer or submission requires inspecting retained private state before a new request, with no blind retry.
 
 `s2v_run.run_s2v` uses an already prepared/staged owned worker and records original speech timing, lineage, actual output bytes and restricted local VP9 decoding; the silent video stays paired with unmodified speech for later mixing. Offline fixtures and native synthetic-video decoding do not prove model quality, intelligibility, identity or visible lip sync; exact-media human review and export authority remain separate.
@@ -45,6 +47,7 @@ Reuse reviewed upstream models/workflows only after pinned model/weights/depende
 `native_remote.RemoteNativeSpeechRuntime` stages only a complete reviewed 108-wheel runtime, separate curated SDK tree, pinned models and verified first-party package on an already guarded M5 worker; selection requires separately reviewed actual installed manifests. Every transfer/invocation shares the original controller cap and a fixed worker-local cap with the lease cleanup reserve; lost acknowledgements consume the attempt, retain uncertainty and require owned Pod cleanup.
 
 Bridge-owned provisional proofs bind completed request/reference/output bytes and native cleanup facts; they remain inspectable offline after Pod deletion and grant no new work, rights, human review or export authority. Staging uses the existing five-second clock bound conservatively; network socket denial allows local UNIX IPC and does not claim a hostile-code sandbox or all-descendant termination proof.
+
 `audio_review.snapshot_for_review()` hashes supplied delivery/mix bytes and paired `en`/`zh` clips, binding script, cue, character, voice/reference and recipe identities. `assess_review()` requires separate current owner decisions plus an injected trusted technical verifier; metadata authenticates no person and grants no export authority.
 
 Checklist: English/Mandarin intelligibility and visible lip sync, shared actor/voice identity, music, artifacts, transitions and balance. Actual owner listening/visual review remains pending until exact M5.6 media exists.

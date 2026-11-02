@@ -18,7 +18,7 @@ import uuid
 from pathlib import Path
 from threading import Event, Lock, RLock, Thread
 from types import TracebackType
-from typing import Any, Callable
+from typing import Any, Callable, Protocol
 
 from cineforge import worker_bootstrap, worker_guard
 from cineforge.cloud_budget import CloudBudgetSession
@@ -33,6 +33,10 @@ from cineforge.s2v_service import S2VServiceContext
 from cineforge.worker_bundle import worker_source
 from cineforge.worker_guard import GuardReceipt, WorkerGuardPlan, worker_guard_source_sha256
 from cineforge.workflows import canonical, strict_object
+
+
+class NativeInvoker(Protocol):
+    def __call__(self, timeout: float, *, absolute_deadline: float) -> Any: ...
 
 
 class WorkerError(ValueError):
@@ -480,11 +484,14 @@ class SSHWorker:
             raise WorkerError("native speech absolute deadline exceeded")
         return result
 
-    def run_guarded_native(self, invoke: Callable[[float], Any], *, allow_live: bool = False) -> Any:
-        """Trusted native103 callback only, with the existing guard and lease reserve.
+    def run_guarded_native(self, invoke: NativeInvoker, *, allow_live: bool = False) -> Any:
+        """Invoke trusted controller-local code once under the current M5 guard.
 
-        No operation/code/command comes from JSON. The separately reviewed native
-        executor must enforce the supplied absolute remaining budget and cleanup.
+        The callback must forward the original same-host absolute deadline to
+        native103 or the separately reviewed remote108 controller. Remote code
+        derives its own local cap; this method does not transport execution.
+        No code/command comes from JSON. The callback owns bounded work/cleanup;
+        admission and the current guard are checked before and after return.
         """
         if (allow_live is not True or type(self.selection) is not S2VServiceContext
                 or self.plan is None or self.runtime_evidence is None or not callable(invoke)):
@@ -499,7 +506,7 @@ class SSHWorker:
         failed = False
         result = None
         try:
-            result = invoke(timeout)
+            result = invoke(timeout, absolute_deadline=deadline)
             self.check()
             if time.monotonic() >= deadline:
                 raise ValueError
