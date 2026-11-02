@@ -310,6 +310,71 @@ class BudgetTests(unittest.TestCase):
             self.assertEqual(session.snapshots[0].state, "released")
         self.assertFalse(self.cloud.pods)
 
+    def test_refused_ready_cannot_populate_restored_created_or_ready_cache(self):
+        for state in ("created", "ready"):
+            with self.subTest(state=state):
+                self.path = Path(self.temp.name).resolve() / state
+                self.cloud = Cloud(self.clock)
+                with self.session() as session:
+                    self.acquire(self.provider(session))
+                path = self.path / "budget.json"
+                data = json.loads(path.read_bytes())
+                data["records"]["first"]["snapshot"]["state"] = state
+                data["records"]["first"]["guard"]["source_sha256"] = "b" * 64
+                path.write_bytes(canonical(data))
+                with self.session() as session:
+                    provider = self.provider(session, probe=lambda snapshot, timeout:
+                        WorkerObservation(GPUDevice(snapshot.resource_id, Backend.CUDA, 24082,
+                            frozenset({Precision.FP16})), spec().gpu_id))
+                    provider.restore_owned(session.intents[0], session.snapshots[0])
+                    with self.assertRaises(ProvisioningError):
+                        self.acquire(provider)  # Restored metadata is not an observation.
+                    with self.assertRaises(ProvisioningError):
+                        provider.inspect("pod_1")
+                    self.assertEqual(provider.snapshots[0].state, state)
+                    with self.assertRaises(ProvisioningError):
+                        self.acquire(provider)  # A refused READY cannot authorize replay.
+                    session.arm_guard("first", GuardReceipt(session.guard_plan("first"),
+                        worker_guard_source_sha256(), 123, self.clock.time(), True, True))
+                    self.assertEqual(provider.inspect("pod_1").device_id, "pod_1")
+                    self.assertEqual(self.acquire(provider).device_id, "pod_1")
+                    self.assertEqual(sum(c[0] == "POST" for c in self.cloud.calls), 1)
+                    provider.release("pod_1")
+                self.assertFalse(self.cloud.pods)
+
+    def test_cached_ready_rechecks_current_guard_source_before_returning_work(self):
+        with self.session() as session:
+            source = [worker_guard_source_sha256()]
+            def probe(snapshot, timeout):
+                session.arm_guard(snapshot.key, GuardReceipt(session.guard_plan(snapshot.key),
+                    source[0], 123, self.clock.time(), True, True))
+                return WorkerObservation(GPUDevice(snapshot.resource_id, Backend.CUDA, 24082,
+                    frozenset({Precision.FP16})), spec().gpu_id)
+            provider = self.provider(session, probe=probe)
+            self.acquire(provider)
+            with patch("cineforge.cloud_budget.worker_guard_source_sha256", return_value="e"*64):
+                with self.assertRaises(ProvisioningError):
+                    self.acquire(provider)
+                self.assertEqual(sum(c[0] == "POST" for c in self.cloud.calls), 1)
+                # A fresh probe must attest the changed source before the cache can recover.
+                source[0] = "e" * 64
+                self.assertEqual(provider.inspect("pod_1").device_id, "pod_1")
+                self.assertEqual(self.acquire(provider).device_id, "pod_1")
+                provider.release("pod_1")
+        self.assertFalse(self.cloud.pods)
+
+    def test_cached_ready_rechecks_expiry_without_blocking_owned_cleanup(self):
+        with self.session() as session:
+            provider = self.provider(session)
+            self.acquire(provider)
+            self.clock.sleep(session.guard_plan("first").stop_at_unix - self.clock.time())
+            self.assertEqual(session.remaining_seconds("first"), 0)
+            with self.assertRaises(ProvisioningError):
+                self.acquire(provider)
+            self.assertEqual(sum(c[0] == "POST" for c in self.cloud.calls), 1)
+            provider.release("pod_1")
+        self.assertFalse(self.cloud.pods)
+
     def test_attempt_slots_never_reset_after_zero_final_invoice_or_restart(self):
         with self.session() as session:
             provider = self.provider(session)
