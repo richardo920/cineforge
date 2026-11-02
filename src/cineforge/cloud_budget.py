@@ -747,13 +747,7 @@ class CloudBudgetSession:
                 and re.fullmatch(r"[A-Za-z0-9_-]{1,80}", pod["id"]) is not None
                 and pod.get("name") == intent.name and isinstance(env, dict)
                 and env.get("CINEFORGE_SESSION") == intent.spec.session_id
-                and env.get("CINEFORGE_LEASE") == intent.owner_token
-                and pod.get("image") == intent.spec.image and pod.get("cloud") == "SECURE"
-                and pod.get("disk") == intent.spec.disk_gb
-                and pod.get("dataCenterId") == intent.spec.data_center_id
-                and isinstance(pod.get("gpu"), dict)
-                and pod["gpu"].get("id") == intent.spec.gpu_id
-                and pod["gpu"].get("count") == 1 and pod.get("mounts") == {})
+                and env.get("CINEFORGE_LEASE") == intent.owner_token)
 
     @staticmethod
     def _billing_reference(value: object) -> bool:
