@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import selectors
 import signal
@@ -103,6 +104,8 @@ def run_child(command: tuple[str, ...], *, payload: bytes, env: dict[str, str],
     failed = cancelled = False
     if type(payload) is not bytes or len(payload) > MAX_INPUT:
         raise NativeSpeechError("native speech input bound exceeded")
+    if type(deadline) not in (int, float) or not math.isfinite(deadline):
+        raise NativeSpeechError("invalid native speech deadline")
     try:
         work_deadline = deadline - 2
         if time.monotonic() >= work_deadline:
@@ -163,4 +166,9 @@ def run_child(command: tuple[str, ...], *, payload: bytes, env: dict[str, str],
     if failed or result is None or process is None or process.returncode != 0:
         raise NativeSpeechError("bounded native speech child failed",
                                 owned_process_id=None if process is None else process.pid) from None
-    return OwnedChildResult(result, process.pid)
+    owned = OwnedChildResult(result, process.pid)
+    # Cleanup and scheduler delays consume the original cap too. A known-clean
+    # late result is a failed attempt, not invented cleanup uncertainty.
+    if time.monotonic() >= deadline:
+        raise NativeSpeechError("native speech deadline exceeded", owned_process_id=process.pid)
+    return owned

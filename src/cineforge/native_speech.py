@@ -70,18 +70,27 @@ class NativeSpeechRuntime:
 
     The technical receipt and returned PCM remain provisional, including a designed
     reference. They never certify human quality, voice identity, consent or export.
+    absolute_deadline is an optional trusted caller cap on this host's monotonic
+    clock; it cannot be transferred between hosts or renewed by a delayed call.
     """
 
     def __init__(self, selection: NativeSpeechSelection, *, allow_native: bool = False,
-                 timeout_seconds: float = 300, seed: int = 0) -> None:
+                 timeout_seconds: float = 300, seed: int = 0,
+                 absolute_deadline: float | None = None) -> None:
         if (type(selection) is not NativeSpeechSelection or allow_native is not True
                 or type(timeout_seconds) not in (int, float) or not math.isfinite(timeout_seconds)
                 or not 3 <= timeout_seconds <= 1800 or type(seed) is not int
                 or not 0 <= seed <= 2**32 - 1):
             raise NativeSpeechError("explicit reviewed native speech opt-in required")
+        if absolute_deadline is not None and (
+                type(absolute_deadline) not in (int, float)
+                or not math.isfinite(absolute_deadline)
+                or absolute_deadline <= time.monotonic()):
+            raise NativeSpeechError("invalid or expired native speech caller deadline")
         self._selection = selection
         self._timeout = float(timeout_seconds)
         self._seed = seed
+        self._absolute_deadline = absolute_deadline
         self.last_attempt: NativeAttempt | None = None
         self._receipt: dict[str, Any] | None = None
         self._unresolved: NativeAttempt | None = None
@@ -98,6 +107,7 @@ class NativeSpeechRuntime:
         self._admit_call()
         self._receipt = None
         self.last_attempt = NativeAttempt(None, "refused")
+        deadline = self._call_deadline()
         if type(request) is not QwenBaseRequest or type(reference) is not PCM16Wave:
             raise NativeSpeechError("typed speech request and reference required")
         failed = False
@@ -113,21 +123,25 @@ class NativeSpeechRuntime:
             failed = True
         if failed or declaration is None:
             raise NativeSpeechError("native speech reference rejected") from None
-        result = self._invoke("base", declaration, reference.pcm)
-        wave = inspect_pcm16_wav(result)
-        if wave.frames * request.timebase.ticks_per_second > request.duration_ticks * wave.sample_rate:
-            self._receipt = None
-            self.last_attempt = NativeAttempt(self.last_attempt.input_sha256, "failed")
-            raise NativeSpeechError("native speech exceeds reserved duration")
-        return result
+        return self._invoke("base", declaration, reference.pcm, deadline=deadline)
 
     def preview(self, design: OriginalVoiceDesign) -> bytes:
         self._admit_call()
         self._receipt = None
         self.last_attempt = NativeAttempt(None, "refused")
+        deadline = self._call_deadline()
         if type(design) is not OriginalVoiceDesign:
             raise NativeSpeechError("explicit original voice-design request required")
-        return self._invoke("design", asdict(design), b"")
+        return self._invoke("design", asdict(design), b"", deadline=deadline)
+
+    def _call_deadline(self) -> float:
+        now = time.monotonic()
+        deadline = now + self._timeout
+        if self._absolute_deadline is not None:
+            deadline = min(deadline, self._absolute_deadline)
+        if now >= deadline:
+            raise NativeSpeechError("native speech caller deadline exhausted")
+        return deadline
 
     def _require_clean(self) -> None:
         if self._unresolved is not None:
@@ -172,14 +186,16 @@ class NativeSpeechRuntime:
             raise NativeSpeechError("native receipt does not match actual request and bytes") from None
         return result
 
-    def _invoke(self, operation: str, request: dict[str, Any], reference: bytes) -> bytes:
+    def _invoke(self, operation: str, request: dict[str, Any], reference: bytes,
+                *, deadline: float) -> bytes:
         self._receipt = None
         identity = None
         self.last_attempt = NativeAttempt(None, "preparing")
-        deadline = time.monotonic() + self._timeout
         failed = cancelled = uncertain = False
         process_id = None
         result = None
+        pending_receipt = None
+        key = None
         try:
             identity = digest({"operation": operation, "request": request, "seed": self._seed,
                                "selection": self._selection.subject_sha256(),
@@ -218,8 +234,16 @@ class NativeSpeechRuntime:
                     if (wave.frames * current.timebase.ticks_per_second
                             > current.duration_ticks * wave.sample_rate):
                         raise NativeSpeechError("native speech exceeds reserved duration")
-                self._receipt = dict(receipt, owned_process_id=process_id,
+                pending_receipt = dict(receipt, owned_process_id=process_id,
                     owned_child_status="exit0-parent-reaped-group-signal-attempted")
+            # Include receipt hashing/copying and TemporaryDirectory finalization
+            # before the last admission check; publish no late provisional proof.
+            key = (operation, digest(request), hashlib.sha256(result).hexdigest())
+            import copy
+            proof = copy.deepcopy(pending_receipt)
+            attempt = NativeAttempt(identity, "provisional", owned_process_id=process_id)
+            if time.monotonic() >= deadline:
+                raise NativeSpeechError("native speech deadline exceeded")
         except KeyboardInterrupt:
             cancelled = True
         except BaseException as error:
@@ -234,7 +258,7 @@ class NativeSpeechRuntime:
             self._receipt = None
             self.last_attempt = NativeAttempt(identity, "interrupted", owned_process_id=process_id)
             raise KeyboardInterrupt from None
-        if failed or result is None:
+        if failed or result is None or pending_receipt is None or key is None:
             self._receipt = None
             self.last_attempt = NativeAttempt(identity, "failed", uncertain, process_id)
             if uncertain:
@@ -242,12 +266,10 @@ class NativeSpeechRuntime:
             raise NativeSpeechError("native speech attempt failed", cleanup_uncertain=uncertain,
                                     owned_process_id=process_id) \
                 from None
-        self.last_attempt = NativeAttempt(identity, "provisional", owned_process_id=process_id)
+        self.last_attempt = attempt
+        self._receipt = pending_receipt
         self._success_count += 1
-        if self._receipt is not None:
-            key = (operation, digest(request), hashlib.sha256(result).hexdigest())
-            import copy
-            self._proofs[key] = copy.deepcopy(self._receipt)
+        self._proofs[key] = proof
         return result
 
     def _validate_receipt(self, receipt: dict[str, Any], payload: bytes, identity: str,

@@ -246,6 +246,98 @@ class NativeSpeechTests(unittest.TestCase):
             child.assert_not_called()
         self.assertEqual(self.runtime.receipt_for(self.request, output)["status"], "provisional")
 
+    def test_late_child_validation_cleanup_and_proof_copy_publish_no_success(self):
+        import copy
+        original_temporary = tempfile.TemporaryDirectory
+        original_copy = copy.deepcopy
+        for phase in ("child", "validation", "directory", "proof"):
+            with self.subTest(phase=phase), contextlib.ExitStack() as stack:
+                clock = [100.0]
+                runtime = NativeSpeechRuntime(self.selection, allow_native=True, timeout_seconds=5)
+                stack.enter_context(patch("cineforge.native_speech.time.monotonic",
+                                          side_effect=lambda: clock[0]))
+                validate = runtime._validate_receipt
+                def child(*args, **kwargs):
+                    owned = self.fake_child(*args, **kwargs)
+                    if phase == "child":
+                        clock[0] = 106.0
+                    return owned
+                def validation(*args):
+                    validate(*args)
+                    if phase == "validation":
+                        clock[0] = 106.0
+                class Directory(original_temporary):
+                    def __exit__(self, *args):
+                        result = super().__exit__(*args)
+                        if phase == "directory":
+                            clock[0] = 106.0
+                        return result
+                def copying(value, *args, **kwargs):
+                    result = original_copy(value, *args, **kwargs)
+                    if (phase == "proof" and isinstance(value, dict)
+                            and value.get("owned_child_status")
+                            == "exit0-parent-reaped-group-signal-attempted"):
+                        clock[0] = 106.0
+                    return result
+                stack.enter_context(patch("cineforge.native_speech.run_child", child))
+                stack.enter_context(patch.object(runtime, "_validate_receipt", validation))
+                stack.enter_context(patch("cineforge.native_speech.tempfile.TemporaryDirectory", Directory))
+                stack.enter_context(patch("copy.deepcopy", copying))
+                with self.assertRaises(NativeSpeechError) as caught:
+                    runtime.synthesize(self.request, self.reference)
+                self.assertFalse(caught.exception.cleanup_uncertain)
+                self.assertEqual(caught.exception.owned_process_id, 12345)
+                self.assertEqual(runtime.last_attempt.outcome, "failed")
+                self.assertFalse(runtime.last_attempt.cleanup_uncertain)
+                self.assertIsNone(runtime.last_receipt)
+                self.assertEqual(runtime._success_count, 0)
+                self.assertEqual(runtime._proofs, {})
+                with self.assertRaises(NativeSpeechError):
+                    runtime.receipt_for(self.request, float_pcm([.1] * 2400, 24000)[0])
+
+    def test_trusted_caller_cap_survives_scheduler_delay_and_never_extends_timeout(self):
+        clock = [100.0]
+        design = OriginalVoiceDesign("line", "English", "fictional", HASH)
+        with patch("cineforge.native_speech.time.monotonic", side_effect=lambda: clock[0]):
+            for invalid in (True, "110", float("nan"), float("inf"), 0, 100):
+                with self.assertRaises(NativeSpeechError):
+                    NativeSpeechRuntime(self.selection, allow_native=True, absolute_deadline=invalid)
+            for caller_cap, expected in ((110, 110), (200, 111)):
+                clock[0] = 100.0
+                runtime = NativeSpeechRuntime(self.selection, allow_native=True,
+                    timeout_seconds=5, absolute_deadline=caller_cap)
+                clock[0] = 106.0  # Scheduler delay between trusted construction and entry.
+                def child(*args, **kwargs):
+                    self.assertEqual(kwargs["deadline"], expected)
+                    self.assertEqual(unpack(kwargs["payload"])[0]["deadline"], expected - 2)
+                    return self.fake_child(*args, **kwargs)
+                with patch("cineforge.native_speech.run_child", child):
+                    output = runtime.preview(design)
+                self.assertEqual(runtime.receipt_for(design, output)["status"], "provisional")
+                clock[0] = caller_cap
+                with patch("cineforge.native_speech.run_child") as child:
+                    with self.assertRaises(NativeSpeechError):
+                        runtime.preview(design)
+                    with self.assertRaises(NativeSpeechError):
+                        runtime.synthesize(self.request, self.reference)
+                    child.assert_not_called()
+                # Past technical facts remain facts, not permission to execute again.
+                self.assertEqual(runtime.receipt_for(design, output)["status"], "provisional")
+
+    def test_reference_preflight_consumes_original_cap_before_child(self):
+        from cineforge.native_speech import pcm_wav
+        clock = [100.0]
+        def delayed_reference(*args):
+            result = pcm_wav(*args)
+            clock[0] = 106.0
+            return result
+        with patch("cineforge.native_speech.time.monotonic", side_effect=lambda: clock[0]), \
+                patch("cineforge.native_speech.pcm_wav", delayed_reference), \
+                patch("cineforge.native_speech.run_child") as child:
+            self.assert_static_failure()
+            child.assert_not_called()
+        self.assertIsNone(self.runtime.last_attempt.owned_process_id)
+
     def test_existing_adapter_rechecks_revocation_during_native_call(self):
         def child(command, **kwargs):
             self.arguments["ledger"].revoke(self.arguments["reference"].permission.rights,
@@ -561,6 +653,44 @@ class NativeProcessTests(unittest.TestCase):
                 self.execute("import time;time.sleep(10)")
         self.assertLess(time.monotonic() - start, 5)
         self.assertTrue(all(process.returncode is not None for process in children))
+
+    def test_real_child_reaped_but_cleanup_returned_after_original_cap_is_failure(self):
+        from cineforge.native_speech_process import _finish
+        clock = [100.0]
+        children = []
+        original_popen = subprocess.Popen
+        def popen(*args, **kwargs):
+            process = original_popen(*args, **kwargs)
+            children.append(process)
+            return process
+        def late_finish(*args):
+            uncertain = _finish(*args)
+            self.assertFalse(uncertain)
+            clock[0] = 104.0  # Scheduler resumes after original deadline103.
+            return uncertain
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch("cineforge.native_speech_process.time.monotonic",
+                                      side_effect=lambda: clock[0]))
+            stack.enter_context(patch("cineforge.native_speech_process._finish", late_finish))
+            stack.enter_context(patch("cineforge.native_speech_process.subprocess.Popen", popen))
+            if sys.platform == "darwin":
+                # This host refuses signaling an already-dead group. Timing proof
+                # uses an exited stdlib child; separate tests retain OS uncertainty.
+                stack.enter_context(patch("cineforge.native_speech_process.os.killpg"))
+            with self.assertRaises(NativeSpeechError) as caught:
+                self.execute("import os,sys;sys.stdin.buffer.read();os.write(1,b'ok');os._exit(0)",
+                             seconds=3)
+        self.assertEqual(len(children), 1)
+        self.assertEqual(children[0].returncode, 0)
+        self.assertFalse(caught.exception.cleanup_uncertain)
+        self.assertEqual(caught.exception.owned_process_id, children[0].pid)
+
+    def test_malformed_and_expired_original_cap_refuse_before_spawn(self):
+        with patch("cineforge.native_speech_process.subprocess.Popen") as child:
+            for deadline in (True, float("nan"), float("inf"), "later", time.monotonic() - 1):
+                with self.assertRaises(NativeSpeechError):
+                    run_child((sys.executable,), payload=b"fixture", env={}, cwd="/", deadline=deadline)
+            child.assert_not_called()
 
     def test_isolated_no_site_startup_ignores_synthetic_user_hook(self):
         with tempfile.TemporaryDirectory(prefix="cineforge-site-hook-") as temporary:
