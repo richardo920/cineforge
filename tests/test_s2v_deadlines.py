@@ -310,3 +310,99 @@ class EndpointDeadlineTests(unittest.TestCase):
                 worker.endpoint(absolute_deadline=1)
             self.assertEqual(worker._endpoint, '')
             self.assertTrue(all(p.poll() is not None for p in wire.processes))
+
+
+    def test_real_transport_constructor_crossing_cap_refuses_and_clears_cached_tunnel(self):
+        from cineforge import comfy_transport
+        worker = self.f.worker
+        with self.f.harness() as wire:
+            worker.endpoint(absolute_deadline=3)
+            original = comfy_transport.urlsplit
+            def delayed(*args, **kwargs):
+                result = original(*args, **kwargs)
+                wire.now = 4
+                return result
+            with patch('cineforge.ssh_worker.ComfyHTTPTransport', comfy_transport.ComfyHTTPTransport), \
+                    patch.object(comfy_transport, 'urlsplit', side_effect=delayed), \
+                    patch.object(comfy_transport.ComfyHTTPTransport, 'request', side_effect=AssertionError('no HTTP')):
+                with self.assertRaises(WorkerError):
+                    worker.execution_transport(absolute_deadline=3)
+            self.assertEqual(worker._endpoint, '')
+            self.assertIsNone(worker._tunnel)
+            self.assertTrue(all(p.poll() is not None for p in wire.processes))
+
+    def test_guard_change_inside_real_transport_constructor_refuses_handoff(self):
+        from cineforge import comfy_transport
+        worker = self.f.worker
+        with self.f.harness() as wire:
+            worker.endpoint(absolute_deadline=3)
+            original = comfy_transport.urlsplit
+            def changed(*args, **kwargs):
+                result = original(*args, **kwargs)
+                worker._failed.set()
+                return result
+            with patch('cineforge.ssh_worker.ComfyHTTPTransport', comfy_transport.ComfyHTTPTransport), \
+                    patch.object(comfy_transport, 'urlsplit', side_effect=changed):
+                with self.assertRaises(WorkerError):
+                    worker.execution_transport(absolute_deadline=3)
+            self.assertEqual(worker._endpoint, '')
+            self.assertTrue(all(p.poll() is not None for p in wire.processes))
+
+    def test_final_guard_callback_latency_cannot_renew_original_factory_cap(self):
+        from cineforge import comfy_transport
+        worker = self.f.worker
+        with self.f.harness() as wire:
+            worker.endpoint(absolute_deadline=3)
+            original_split, original_check = comfy_transport.urlsplit, worker.check
+            constructed, observed = [], []
+            def split(*args, **kwargs):
+                result = original_split(*args, **kwargs)
+                constructed.append(True)
+                return result
+            def check():
+                original_check()
+                if constructed:
+                    observed.append(True)
+                    wire.now = 4
+            worker.check = check
+            with patch('cineforge.ssh_worker.ComfyHTTPTransport', comfy_transport.ComfyHTTPTransport), \
+                    patch.object(comfy_transport, 'urlsplit', side_effect=split):
+                with self.assertRaises(WorkerError):
+                    worker.execution_transport(absolute_deadline=3)
+            self.assertTrue(observed)
+            self.assertEqual(worker._endpoint, '')
+            self.assertTrue(all(p.poll() is not None for p in wire.processes))
+
+    def test_healthy_real_transport_factory_and_legacy_no_parent_remain_supported(self):
+        from cineforge import comfy_transport
+        from cineforge.ssh_worker import SupervisedComfyTransport
+        worker = self.f.worker
+        with self.f.harness() as wire:
+            worker.endpoint(absolute_deadline=3)
+            with patch('cineforge.ssh_worker.ComfyHTTPTransport', comfy_transport.ComfyHTTPTransport), \
+                    patch.object(comfy_transport.ComfyHTTPTransport, 'request', side_effect=AssertionError('no HTTP')):
+                for options in ({'absolute_deadline': 3}, {}):
+                    result = worker.execution_transport(**options)
+                    self.assertIs(type(result), SupervisedComfyTransport)
+                    self.assertIs(result.worker, worker)
+            self.assertEqual(len(wire.processes), 1)
+            self.assertIsNotNone(worker._tunnel)
+
+
+    def test_factory_preserves_stricter_original_lease_sample_through_constructor(self):
+        from cineforge import comfy_transport
+        worker = self.f.worker
+        with self.f.harness() as wire:
+            self.f.budget.remaining_seconds = lambda _: 2
+            worker.endpoint(absolute_deadline=100)
+            original = comfy_transport.urlsplit
+            def delayed(*args, **kwargs):
+                result = original(*args, **kwargs)
+                wire.now = 3
+                return result
+            with patch('cineforge.ssh_worker.ComfyHTTPTransport', comfy_transport.ComfyHTTPTransport), \
+                    patch.object(comfy_transport, 'urlsplit', side_effect=delayed):
+                with self.assertRaises(WorkerError):
+                    worker.execution_transport(absolute_deadline=100)
+            self.assertEqual(worker._endpoint, '')
+            self.assertTrue(all(p.poll() is not None for p in wire.processes))

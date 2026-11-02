@@ -867,8 +867,35 @@ class SSHWorker:
             raise WorkerError("private owned tunnel readiness failed")
 
     def execution_transport(self, *, absolute_deadline: float | None = None) -> SupervisedComfyTransport:
-        return SupervisedComfyTransport(self, ComfyHTTPTransport(
-            self.endpoint(absolute_deadline=absolute_deadline), allow_live=True))
+        # Constructor validation and the final fresh guard belong to the original
+        # same-host setup window too; never derive a new cap after either one.
+        transport = None
+        try:
+            deadline = request_deadline(10, absolute_deadline, time.monotonic)
+            sampled = time.monotonic()
+            reserve = 120 if type(self.selection) is S2VServiceContext else 0
+            remaining = self.budget.remaining_seconds(self._key)
+            if (type(remaining) not in (int, float) or not math.isfinite(remaining)
+                    or remaining <= reserve):
+                raise ValueError
+            deadline = min(deadline, sampled + remaining - reserve)
+            require_time(deadline, time.monotonic)
+            candidate = SupervisedComfyTransport(self, ComfyHTTPTransport(
+                self.endpoint(absolute_deadline=deadline), allow_live=True))
+            self._tunnel_remaining(deadline)
+            transport = candidate
+        except (Exception, KeyboardInterrupt):
+            pass
+        if transport is None:
+            cleanup_failed = False
+            try:
+                self._close_tunnel()
+            except WorkerError:
+                cleanup_failed = True
+            if cleanup_failed:
+                raise WorkerError("private transport handoff failed with unconfirmed cleanup")
+            raise WorkerError("private transport handoff failed current guard or deadline")
+        return transport
 
     def close(self) -> None:
         self._stop.set()
