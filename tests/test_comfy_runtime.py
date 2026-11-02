@@ -838,6 +838,25 @@ class ComfyNoticeAndExecutionTests(unittest.TestCase):
 
 
 class ComfyPreimportTests(unittest.TestCase):
+    def test_import_location_requires_an_actual_nonempty_file_path(self):
+        from types import SimpleNamespace
+
+        expected = Path(__file__).resolve()
+        self.assertEqual(
+            launcher._module_location(SimpleNamespace(__file__=str(expected))), str(expected)
+        )
+        for module in (
+            SimpleNamespace(),
+            SimpleNamespace(__file__=None),
+            SimpleNamespace(__file__=""),
+            SimpleNamespace(__file__=123),
+        ):
+            with (
+                self.subTest(module=module),
+                self.assertRaisesRegex(ValueError, "location unavailable"),
+            ):
+                launcher._module_location(module)
+
     def test_unsupported_actual_abi_refuses_before_any_third_party_import(self):
         import importlib
         import sys

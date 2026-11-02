@@ -14,6 +14,7 @@ from pathlib import Path
 from cineforge.comfy_runtime_launcher import launch_command
 from cineforge.comfy_runtime_worker import _server_start, server_facts
 from cineforge.native_remote_plan import nr_encode
+from cineforge.native_speech_integrity import NativeBinary, _directory, verify_binary
 
 
 class ClosedComfyProcessTests(unittest.TestCase):
@@ -28,12 +29,16 @@ class ClosedComfyProcessTests(unittest.TestCase):
             marker = root / "ready"
             # Deliberately first-party stdlib stand-in, not actual Comfy or GPU code.
             (package / "comfy_runtime_launcher.py").write_text(
-                "import time,socket\nfrom pathlib import Path\n"
+                "import time,socket,sys,json\nfrom pathlib import Path\n"
                 "def main():\n sock=socket.socket();sock.bind(('127.0.0.1',8188));sock.listen()\n Path("
                 + repr(str(marker))
-                + ").write_text('ready')\n time.sleep(20)\n return 0\n"
+                + ").write_text(json.dumps({'version':sys.version.split()[0],"
+                "'executable':sys.executable}))\n time.sleep(20)\n return 0\n"
             )
-            executable = Path(sys.executable).resolve()
+            # setup-python's toolcache can have group-writable ancestors. Keep
+            # those forbidden; use the explicit protected OS capability for this
+            # stdlib-only stand-in, independently of the controller matrix.
+            executable = Path("/usr/bin/python3").resolve(strict=True)
 
             def pin(path):
                 return {
@@ -43,7 +48,40 @@ class ClosedComfyProcessTests(unittest.TestCase):
                 }
 
             plan = {"interpreter": pin(executable), "native": [], "installed": []}
+            matrix_unprotected = []
+            for line in Path("/proc/self/maps").read_text().splitlines():
+                mapped = line.split(maxsplit=5)[-1]
+                if not mapped.startswith("/") or mapped.startswith("/dev/"):
+                    continue
+                parent = Path(mapped).parent
+                try:
+                    descriptor = _directory(str(parent), private=False)
+                except (ValueError, OSError):
+                    ancestors = []
+                    for ancestor in reversed((parent, *parent.parents)):
+                        info = ancestor.lstat()
+                        ancestors.append(
+                            {
+                                "path": str(ancestor),
+                                "uid": info.st_uid,
+                                "mode": oct(info.st_mode & 0o7777),
+                            }
+                        )
+                    row = {"mapped": mapped, "ancestors": ancestors}
+                    if row not in matrix_unprotected:
+                        matrix_unprotected.append(row)
+                else:
+                    os.close(descriptor)
+            unsafe = root / "unsafe-native-ancestor"
+            unsafe.mkdir(mode=0o700)
+            unsafe.chmod(0o770)
+            try:
+                with self.assertRaisesRegex(ValueError, "ancestor is not protected"):
+                    _directory(str(unsafe), private=False)
+            finally:
+                unsafe.chmod(0o700)
             deadline = time.monotonic() + 15
+            verify_binary(NativeBinary(**plan["interpreter"]), deadline)
             command, environment = launch_command(plan, root, native, "server", deadline)
             process = subprocess.Popen(
                 command,
@@ -95,6 +133,13 @@ class ClosedComfyProcessTests(unittest.TestCase):
                             "mapped_files_checked": len(paths),
                             "unknown_native_file_refused": True,
                             "pid_reuse_refused": True,
+                            "unsafe_ancestor_refused": True,
+                            "child_interpreter": {
+                                **plan["interpreter"],
+                                **json.loads(marker.read_text()),
+                            },
+                            "controller_interpreter": sys.executable,
+                            "controller_matrix_unprotected_maps": matrix_unprotected,
                             "comfy_sdk_gpu_execution": False,
                         },
                         sort_keys=True,

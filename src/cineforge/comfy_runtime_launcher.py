@@ -161,11 +161,18 @@ def _observe(root: Path, deadline: float) -> dict[str, Any]:
                     sha.update(block)
             native[path] = sha.hexdigest()
             nr_check(deadline)
-    return {"runtime": runtime, "imports": {m.__name__: str(Path(m.__file__).resolve())
+    return {"runtime": runtime, "imports": {m.__name__: _module_location(m)
         for m in (torch, torchvision, torchaudio, numpy, transformers, PIL, av)},
         "codecs": {"png": image.mode == "RGB" and image.size == (8, 8), "pcm16": pcm_ok, "vp9": vp9_ok},
         "abi": COMFY_ABI, "native_files": native, "execution_sha256": nr_digest(COMFY_EXECUTION),
         "jit_enabled_before": False, "jit_enabled_after": False}
+
+
+def _module_location(module: Any) -> str:
+    path = getattr(module, "__file__", None)
+    if type(path) is not str or not path:
+        raise ValueError("closed Comfy import location unavailable")
+    return str(Path(path).resolve())
 
 
 def _require_jit_disabled(torch: Any) -> None:
