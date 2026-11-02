@@ -342,6 +342,63 @@ class AudioReviewTests(unittest.TestCase):
         with self.assertRaises(ReviewError):
             TechnicalReview(current.pin(), (), EVIDENCE)
 
+    def test_nested_malformed_callback_records_refuse_once_with_sanitized_errors(self):
+        current = native_shaped_contract(self.snapshot)
+        record = owner(current)
+        valid = Verifier().verify(current)
+
+        def forged(original, **changes):
+            value = object.__new__(type(original))
+            for item in fields(original):
+                object.__setattr__(value, item.name,
+                                   changes.get(item.name, getattr(original, item.name)))
+            return value
+
+        malformed = []
+        for name, values in (("revision", (True, 0, 2**63, float("nan"))),
+                             ("schema_version", (True, 0, 2)),
+                             ("sha256", (True, "unknown")),
+                             ("input_id", (True, "PRIVATE-CANARY/path"))):
+            malformed.extend(forged(valid, snapshot=forged(valid.snapshot, **{name: value}))
+                             for value in values)
+        for name, values in (("schema_version", (True, 0, 2)),
+                             ("criterion", (True, "PRIVATE-CANARY")),
+                             ("status", (True, "approved", float("inf")))):
+            malformed.extend(forged(valid, checks=(forged(valid.checks[0], **{name: value}),
+                                                    *valid.checks[1:])) for value in values)
+        for name, values in (("schema_version", (True, 0, 2)),
+                             ("uri", (True, "PRIVATE-CANARY", "private://host/path?secret=x")),
+                             ("sha256", (True, "unknown"))):
+            malformed.extend(forged(valid, evidence=forged(valid.evidence, **{name: value}))
+                             for value in values)
+        for proof in malformed:
+            with self.subTest(proof_fields=tuple(item.name for item in fields(proof))):
+                with self.assertRaises(ContractError):
+                    TechnicalReview(proof.snapshot, proof.checks, proof.evidence)
+
+                class Callback:
+                    calls = 0
+
+                    def verify(self, snapshot):
+                        self.calls += 1
+                        return proof
+
+                callback = Callback()
+                result = assess_review(current, record, current=current, verifier=callback)
+                self.assertEqual(result.reasons, ("technical_verification_failed",))
+                self.assertFalse(result.current)
+                self.assertEqual(callback.calls, 1)
+                callback.calls = 0
+                try:
+                    require_current_review(current, record, current=current, verifier=callback)
+                except ReviewError as error:
+                    self.assertIsNone(error.__context__)
+                    self.assertIsNone(error.__cause__)
+                    self.assertNotIn("CANARY", traceback.format_exc())
+                else:
+                    self.fail("malformed technical evidence became current")
+                self.assertEqual(callback.calls, 1)
+
     def test_verifier_failures_are_private_safe_single_call_and_never_typeerror_dispatch(self):
         current = native_shaped_contract(self.snapshot)
         record = owner(current)
