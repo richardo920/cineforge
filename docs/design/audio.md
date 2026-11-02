@@ -41,3 +41,7 @@ Presets measure whole delivered PCM through pinned FFmpeg 9.0.2: `broadcast-line
 Results bind bytes, source metadata, admission snapshot, script/character/picture dependencies, processing and actual tool identity; measured timeout budgets may vary with elapsed work while media bytes remain deterministic. Fake meters return `synthetic_fixture_only`; native technical results grant no human listening/visual approval or export authority.
 
 Reuse reviewed upstream models/workflows only after pinned model/weights/dependencies, rights/voice consent, hardware and budget approval, before any download, upload, paid test or voice cloning. Default CI stays offline; native speech generation and talking-video execution remain separate approval-gated work.
+
+`audio_review.snapshot_for_review()` hashes supplied delivery/mix bytes and paired `en`/`zh` clips, binding script, cue, character, voice/reference and recipe identities. `assess_review()` requires separate current owner decisions plus an injected trusted technical verifier; metadata authenticates no person and grants no export authority.
+
+Checklist: English/Mandarin intelligibility and visible lip sync, shared actor/voice identity, music, artifacts, transitions and balance. Actual owner listening/visual review remains pending until exact M5.6 media exists.
