@@ -106,10 +106,21 @@ def _parts(name: str) -> tuple[str, ...]:
     return tuple(name.split("/"))
 
 
-def _destination(name: str) -> str:
+def _destination(name: str, distribution: tuple[str, str]) -> str:
     parts = _parts(name)
     if parts[0].endswith(".data"):
-        if len(parts) < 3 or parts[1] not in ("purelib", "platlib"):
+        expected = distribution[0].replace("-", "_") + "-" + distribution[1] + ".data"
+        if parts[0] != expected or len(parts) < 3:
+            raise ValueError("unsupported native wheel relocation")
+        if (
+            distribution == ("sympy", "1.14.0")
+            and name == "sympy-1.14.0.data/data/share/man/man1/isympy.1"
+        ):
+            # Preserve the only admitted data-scheme body and its original RECORD
+            # path. This dotted/hyphenated archive directory is never an import
+            # root; the entire body remains in NativeTree/subject/receipt hashes.
+            return name
+        if parts[1] not in ("purelib", "platlib"):
             raise ValueError("unsupported native wheel relocation")
         return "/".join(parts[2:])
     return name
@@ -181,12 +192,16 @@ def _install_wheel(
         if set(record) != set(names):
             raise ValueError("native wheel RECORD closure differs")
         total = sum(p[0] for p in manifest.values())
+        destinations: set[str] = set()
         for info in infos:
             nr_check(deadline)
             mode = info.external_attr >> 16
             if mode and stat.S_IFMT(mode) not in (0, stat.S_IFREG):
                 raise ValueError("native wheel special file rejected")
-            relative = _destination(info.filename)
+            relative = _destination(info.filename, (declaration["name"], declaration["version"]))
+            if relative in destinations:
+                raise ValueError("ambiguous native wheel destination")
+            destinations.add(relative)
             target = _parent(root, relative)
             if info.file_size > 16 * 1024**3 or total + info.file_size > 64 * 1024**3:
                 raise ValueError("native runtime exceeds manifest bound")

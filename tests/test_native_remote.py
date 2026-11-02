@@ -40,7 +40,13 @@ from cineforge.native_remote_plan import (
     nr_recipe_subject,
 )
 from cineforge.native_speech import OriginalVoiceDesign
-from cineforge.native_speech_integrity import NativeSpeechError, digest, native_subject
+from cineforge.native_speech_integrity import (
+    NativeSpeechError,
+    NativeTree,
+    digest,
+    native_subject,
+    verify_tree,
+)
 from cineforge.native_speech_pins import BASE_FILES, DESIGN_FILES, RUNTIME_DISTRIBUTIONS, SDK_FILES
 from cineforge.native_speech_process import OwnedChildResult, pack, unpack
 from cineforge.runpod import RunpodPodSpec
@@ -528,6 +534,147 @@ class RemoteTests(RemoteFixture):
 
 
 class RemoteDeclarations(unittest.TestCase):
+    def synthetic_distribution(self, path, bodies, *, name="sympy", version="1.14.0"):
+        bodies = dict(bodies)
+        prefix = name.replace("-", "_") + "-" + version + ".dist-info/"
+        bodies[prefix + "METADATA"] = f"Name: {name}\nVersion: {version}\n".encode()
+        record = prefix + "RECORD"
+        rows = [
+            [
+                filename,
+                "sha256="
+                + base64.urlsafe_b64encode(hashlib.sha256(raw).digest()).decode().rstrip("="),
+                str(len(raw)),
+            ]
+            for filename, raw in bodies.items()
+        ]
+        rows.append([record, "", ""])
+        output = io.StringIO()
+        csv.writer(output).writerows(rows)
+        bodies[record] = output.getvalue().encode()
+        with zipfile.ZipFile(path, "w") as archive:
+            for filename, raw in bodies.items():
+                archive.writestr(filename, raw)
+        path.chmod(0o600)
+        return bodies[record]
+
+    def test_known_sympy_manpage_retains_original_record_path_and_full_subject_binding(self):
+        member = "sympy-1.14.0.data/data/share/man/man1/isympy.1"
+        body = b"synthetic inert manual; never imported or installed outside private tree"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            target = root / "runtime"
+            target.mkdir(mode=0o700)
+            archive = root / "synthetic.whl"
+            original_record = self.synthetic_distribution(
+                archive, {"sympy/__init__.py": b"synthetic inert module", member: body}
+            )
+            manifest = {}
+            remote._install_wheel(
+                archive,
+                target,
+                {"name": "sympy", "version": "1.14.0"},
+                manifest,
+                time.monotonic() + 10,
+            )
+            self.assertEqual((target / member).read_bytes(), body)
+            self.assertEqual(
+                (target / "sympy-1.14.0.dist-info/RECORD").read_bytes(), original_record
+            )
+            self.assertEqual(manifest[member], (len(body), hashlib.sha256(body).hexdigest()))
+            self.assertEqual((target / member).stat().st_mode & 0o777, 0o600)
+            self.assertEqual((target / member).stat().st_nlink, 1)
+            self.assertFalse((target / "share").exists())
+            tree = NativeTree(
+                str(target),
+                tuple((p, size, "sha256", sha) for p, (size, sha) in sorted(manifest.items())),
+            )
+            self.assertEqual(
+                verify_tree(tree, time.monotonic() + 10),
+                digest(sorted((p, sha) for p, (_, sha) in manifest.items())),
+            )
+            picked = selection(root)
+            subject = native_subject(
+                picked.interpreter,
+                picked.seccomp,
+                tree,
+                picked.sdk,
+                picked.base,
+                picked.design,
+                picked.hardware,
+            )
+            changed = replace(
+                tree,
+                files=tuple(
+                    (
+                        p,
+                        size,
+                        alg,
+                        hashlib.sha256(b"changed manual").hexdigest() if p == member else sha,
+                    )
+                    for p, size, alg, sha in tree.files
+                ),
+            )
+            self.assertNotEqual(
+                subject,
+                native_subject(
+                    picked.interpreter,
+                    picked.seccomp,
+                    changed,
+                    picked.sdk,
+                    picked.base,
+                    picked.design,
+                    picked.hardware,
+                ),
+            )
+            (target / member).write_bytes(b"changed manual")
+            with self.assertRaises(NativeSpeechError):
+                verify_tree(tree, time.monotonic() + 10)
+
+    def test_unreviewed_data_schemes_collisions_and_existing_paths_refuse(self):
+        member = "sympy-1.14.0.data/data/share/man/man1/isympy.1"
+        for invalid in (
+            "sympy-1.14.0.data/scripts/isympy",
+            "sympy-1.14.0.data/headers/anything.h",
+            "sympy-1.14.0.data/data/etc/model.py",
+            "sympy-1.14.0.data/data/share/man/man2/isympy.2",
+            "sympy-1.14.0.data/data/share/man/man1/../isympy.1",
+            "sympy-1.13.0.data/data/share/man/man1/isympy.1",
+        ):
+            with self.subTest(path=invalid):
+                with self.assertRaises(ValueError):
+                    remote._destination(invalid, ("sympy", "1.14.0"))
+        with self.assertRaises(ValueError):
+            remote._destination(member, ("example", "1"))
+        for fault in ("collision", "existing"):
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary).resolve()
+                target = root / "runtime"
+                target.mkdir(mode=0o700)
+                archive = root / "synthetic.whl"
+                bodies = {member: b"synthetic inert manual"}
+                if fault == "collision":
+                    bodies.update(
+                        {
+                            "sympy/__init__.py": b"same",
+                            "sympy-1.14.0.data/purelib/sympy/__init__.py": b"same",
+                        }
+                    )
+                else:
+                    existing = remote._parent(target, member)
+                    bootstrap.nr_write(existing, b"existing bytes must remain")
+                self.synthetic_distribution(archive, bodies)
+                with self.assertRaises((ValueError, FileExistsError)):
+                    remote._install_wheel(
+                        archive,
+                        target,
+                        {"name": "sympy", "version": "1.14.0"},
+                        {},
+                        time.monotonic() + 10,
+                    )
+                if fault == "existing":
+                    self.assertEqual(existing.read_bytes(), b"existing bytes must remain")
+
     def test_standalone_bundle_imports_verified_staged_package_without_ambient_cineforge(self):
         package, _ = native_package()
         source = worker_source().rsplit(b'\nif __name__ == "__main__":', 1)[0]
