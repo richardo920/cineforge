@@ -310,6 +310,7 @@ def _setup(root: Path, deadline: float) -> dict[str, Any]:
             NativeTree(tree["root"], tuple(tuple(p) for p in tree["files"])),
             deadline,
             distributions=name == "runtime",
+            model_role=name if name in ("base", "design") else None,
         )
     result = {
         "interpreter": preflight["interpreter"],
