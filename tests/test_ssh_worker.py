@@ -7,6 +7,7 @@ import os
 import sys
 import tempfile
 import time
+import traceback
 import unittest
 from pathlib import Path
 from threading import Event, Thread
@@ -91,6 +92,71 @@ class SSHTests(unittest.TestCase):
             change(self.transport.pod)
             with self.assertRaises((WorkerError, ValueError)):
                 self.worker(allow_live=True)._connection(LeaseSnapshot("first", "created", "pod_1"), 5)
+
+    def test_absent_connection_metadata_is_unready_without_ssh_or_arm(self):
+        original = copy.deepcopy(self.transport.pod)
+        changes = [lambda pod: pod.pop("ssh"), lambda pod: pod.update(ssh=None),
+                   lambda pod: pod.update(ssh={}), lambda pod: pod["ssh"].update(direct=None)]
+        for change in changes:
+            with self.subTest(change=change):
+                self.transport.pod = copy.deepcopy(original)
+                change(self.transport.pod)
+                worker = self.worker(allow_live=True)
+                with patch.object(worker, "_request") as request:
+                    self.assertIsNone(worker.probe(LeaseSnapshot("first", "created", "pod_1"), 5))
+                request.assert_not_called()
+                self.assertIsNone(worker.plan)
+                self.assertEqual((worker._host, worker._port), ("", 0))
+
+    def test_malformed_connection_metadata_is_static_and_clears_stale_endpoint(self):
+        original = copy.deepcopy(self.transport.pod)
+        canary = "private-api-host-canary.invalid;secret"
+        changes = [lambda pod: pod["ssh"]["direct"].update(host=canary),
+                   lambda pod: pod.update(ssh="private-api-ssh-canary"),
+                   lambda pod: pod["ssh"].update(direct=[]),
+                   lambda pod: pod["ssh"]["direct"].pop("port"),
+                   lambda pod: pod["ssh"]["direct"].update(host=134744072),
+                   lambda pod: pod.update(id="foreign"),
+                   lambda pod: pod["env"].update(CINEFORGE_LEASE="foreign")]
+        for change in changes:
+            with self.subTest(change=change):
+                self.transport.pod = copy.deepcopy(original)
+                worker = self.worker(allow_live=True)
+                self.assertTrue(worker._connection(LeaseSnapshot("first", "created", "pod_1"), 5))
+                change(self.transport.pod)
+                with patch("cineforge.ssh_worker.run_process") as run:
+                    with self.assertRaises(WorkerError) as cm:
+                        worker._connection(LeaseSnapshot("first", "created", "pod_1"), 5)
+                diagnostic = "".join(traceback.format_exception(cm.exception))
+                self.assertNotIn("private-api", diagnostic)
+                self.assertIsNone(cm.exception.__context__)
+                self.assertEqual((worker._host, worker._port), ("", 0))
+                run.assert_not_called()
+
+    def test_connection_timeout_is_lease_bounded_and_late_read_cannot_arm(self):
+        worker = self.worker(allow_live=True)
+        self.budget.remaining = 2
+        original = self.transport.request
+        clock = Clock()
+        def late(*args, **kwargs):
+            self.assertEqual(kwargs["timeout_seconds"], 2)
+            reply = original(*args, **kwargs)
+            clock.sleep(3)
+            return reply
+        with patch.object(self.transport, "request", side_effect=late), \
+                patch("cineforge.ssh_worker.time.monotonic", side_effect=clock.monotonic), \
+                patch.object(worker, "_request") as request:
+            self.assertIsNone(worker.probe(LeaseSnapshot("first", "created", "pod_1"), 5))
+        self.assertEqual((worker._host, worker._port), ("", 0))
+        request.assert_not_called()
+
+    def test_connection_cannot_use_a_snapshot_foreign_to_its_guard_plan(self):
+        self.transport.pod["id"] = "other-pod"
+        with patch("cineforge.ssh_worker.run_process") as run:
+            with self.assertRaises(WorkerError):
+                self.worker(allow_live=True)._connection(
+                    LeaseSnapshot("first", "created", "other-pod"), 5)
+        run.assert_not_called()
 
     def test_native_components_not_provider_command_and_private_ssh_options(self):
         worker = self.worker(allow_live=True)
