@@ -352,17 +352,23 @@ class RunpodPodProvisioner:
                 "registry": self.spec.registry_id}
 
     def _owned(self, lease: _Lease, pod: dict[str, Any]) -> None:
+        """Prove journal ownership independently of mutable execution configuration."""
+        env = pod.get("env")
+        if (pod.get("id") != lease.snapshot.resource_id
+                or pod.get("name") != lease.intent.name or not isinstance(env, dict)
+                or env.get("CINEFORGE_SESSION") != lease.intent.spec.session_id
+                or env.get("CINEFORGE_LEASE") != lease.intent.owner_token):
+            raise ProvisioningError("cloud ownership verification failed", lease.snapshot)
+
+    def _configured(self, lease: _Lease, pod: dict[str, Any]) -> None:
+        """Execution admission stays strict; configuration drift cannot block cleanup."""
         failed = False
         try:
             env, gpu = pod["env"], pod["gpu"]
-            if (pod["id"] != lease.snapshot.resource_id or pod["name"] != lease.intent.name
-                    or pod["image"] != self.spec.image or pod["cloud"] != "SECURE"
+            if (pod["image"] != self.spec.image or pod["cloud"] != "SECURE"
                     or type(pod["disk"]) is not int or pod["disk"] != self.spec.disk_gb
                     or pod["mounts"] != {} or pod["ports"] != ["22/tcp"]
                     or pod["registry"] != self.spec.registry_id or pod.get("cluster") is not None
-                    or not isinstance(env, dict)
-                    or env.get("CINEFORGE_SESSION") != self.spec.session_id
-                    or env.get("CINEFORGE_LEASE") != lease.intent.owner_token
                     or env.get("PUBLIC_KEY") != self.spec.ssh_public_key
                     or not isinstance(gpu, dict) or gpu.get("id") != self.spec.gpu_id
                     or type(gpu.get("count")) is not int or gpu["count"] != 1
@@ -377,10 +383,10 @@ class RunpodPodProvisioner:
         except (Exception, KeyboardInterrupt):
             failed = True
         if failed:
-            raise ProvisioningError("cloud ownership or configuration verification failed",
-                                    lease.snapshot)
+            raise ProvisioningError("cloud configuration verification failed", lease.snapshot)
 
-    def _get(self, lease: _Lease, deadline: float) -> dict[str, Any] | None:
+    def _get(self, lease: _Lease, deadline: float, *,
+             cleanup: bool = False) -> dict[str, Any] | None:
         reply = self._call("GET", "/v2/pods/" + str(lease.snapshot.resource_id), deadline)
         if reply.status == 404:
             return None
@@ -388,6 +394,8 @@ class RunpodPodProvisioner:
             raise ProvisioningError("cloud worker inspection failed", lease.snapshot)
         pod = self._json(reply)
         self._owned(lease, pod)
+        if not cleanup:
+            self._configured(lease, pod)
         return pod
 
     def _known(self, identity: str) -> _Lease:
@@ -403,16 +411,17 @@ class RunpodPodProvisioner:
             self._emit(lease)
         except ProvisioningError:
             pass
-        pod = self._get(lease, deadline)
-        if pod is not None and pod["status"] != "TERMINATED":
-            if pod["locked"] or "terminate" not in pod["actions"]:
-                raise ProvisioningError("owned worker cannot be released", lease.snapshot)
+        pod = self._get(lease, deadline, cleanup=True)
+        if pod is not None:
+            # Status/action hints are not deletion evidence or permission to own a
+            # foreign resource. Attempt DELETE for an exact owned identity, then
+            # require fresh absence even when the provider reports TERMINATED.
             try:
                 self._call("DELETE", "/v2/pods/" + str(lease.snapshot.resource_id), deadline)
             except ProvisioningError:
                 pass  # A lost acknowledgement is reconciled by a fresh owned-ID GET.
         for _ in range(self._max_polls):
-            if self._get(lease, deadline) is None:
+            if self._get(lease, deadline, cleanup=True) is None:
                 self._emit(lease, state="released")
                 return
             self._sleep(min(self._interval, max(0, deadline - self._clock())))

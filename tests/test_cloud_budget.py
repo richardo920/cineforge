@@ -597,6 +597,50 @@ class BudgetTests(unittest.TestCase):
             self.assertEqual(json.loads((self.path / "budget.json").read_bytes())["records"][
                 "first"]["snapshot"]["resource_id"], "pod_1")
 
+    def test_unknown_create_discovery_recovers_owned_worker_despite_configuration_drift(self):
+        self.cloud.create_lost = True
+        with self.session() as session:
+            with self.assertRaises(AcquisitionUncertainError):
+                self.acquire(self.provider(session))
+        pod = self.cloud.pods["pod_1"]
+        self.cloud.pods["pod_1"] = {"id": pod["id"], "name": pod["name"],
+                                   "env": {key: value for key, value in pod["env"].items()
+                                           if key != "PUBLIC_KEY"},
+                                   "status": "UNKNOWN_PROVIDER_STATE",
+                                   "actions": ["new-action"]}
+        with self.session() as session:
+            self.assertEqual(session.recover_owned(self.provider(session)), ("first",))
+            self.assertEqual(session.snapshots[0].state, "released")
+            # Recovery proves deletion, not a final invoice or zero cost.
+            self.assertEqual(session.costs()["invoice_unknown_keys"], ["first"])
+        self.assertEqual(sum(c[0] == "POST" for c in self.cloud.calls), 1)
+        self.assertEqual(sum(c[0] == "DELETE" for c in self.cloud.calls), 1)
+        self.assertEqual(self.cloud.calls[-1][:2], ("GET", "/v2/pods/pod_1"))
+        self.assertFalse(self.cloud.pods)
+
+    def test_discovery_requires_exact_name_session_lease_and_valid_id(self):
+        self.cloud.create_lost = True
+        with self.session() as session:
+            with self.assertRaises(AcquisitionUncertainError):
+                self.acquire(self.provider(session))
+            intent = session.intents[0]
+            pod = copy.deepcopy(self.cloud.pods["pod_1"])
+            self.assertTrue(session._discovery_match(pod, intent))
+            variants = [{**pod, "id": "../foreign"}, {**pod, "id": None},
+                        {**pod, "name": "foreign"},
+                        {**pod, "env": {**pod["env"], "CINEFORGE_SESSION": "foreign"}},
+                        {**pod, "env": {**pod["env"], "CINEFORGE_LEASE": "f" * 32}},
+                        {**pod, "env": {}}, None]
+            self.cloud.pages = [dict(pods=variants,
+                                    pagination=dict(nextCursor=None, hasNextPage=False))]
+            self.assertEqual(session.recover_owned(self.provider(session)), ())
+            self.assertEqual(session.snapshots[0].state, "create_uncertain")
+            self.assertIsNone(session.snapshots[0].resource_id)
+            for variant in variants:
+                self.assertFalse(session._discovery_match(variant, intent))
+        self.assertFalse(any(c[0] == "DELETE" for c in self.cloud.calls))
+        self.assertIn("pod_1", self.cloud.pods)
+
     def test_duplicate_matching_discovery_preserves_all_ids_without_blind_delete(self):
         self.cloud.create_lost = True
         with self.session() as session:
