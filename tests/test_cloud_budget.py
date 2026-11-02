@@ -31,6 +31,10 @@ from cineforge.runpod_transport import CloudResponse
 from cineforge.worker_guard import GuardReceipt, worker_guard_source_sha256
 from cineforge.workflows import canonical
 
+OLD_GUARD_SOURCE_SHA256 = (
+    "773592a771c9bf4729c3f40cd9dcfadbead301e1a2bcd8cf63a633e435eee70c"  # pragma: allowlist secret - public historical worker source SHA256
+)
+
 
 def selection():
     return load_comfy_selection(Path(__file__).resolve().parents[1]
@@ -255,7 +259,11 @@ class BudgetTests(unittest.TestCase):
             def probe(snapshot, timeout):
                 good = GuardReceipt(session.guard_plan(snapshot.key),
                     worker_guard_source_sha256(), 123, self.clock.time(), True, True)
-                for bad in (replace(good, source_sha256="f"*64),
+                # Previous source receipts cannot attest this changed guard implementation.
+                old_source_sha256 = OLD_GUARD_SOURCE_SHA256
+                self.assertNotEqual(old_source_sha256, worker_guard_source_sha256())
+                for bad in (replace(good, source_sha256=old_source_sha256),
+                            replace(good, source_sha256="f"*64),
                             replace(good, plan=replace(good.plan, pod_id="foreign")),
                             replace(good, observed_unix=self.clock.time()-31)):
                     with self.assertRaises(CloudBudgetError):
@@ -264,6 +272,108 @@ class BudgetTests(unittest.TestCase):
                 return WorkerObservation(GPUDevice(snapshot.resource_id, Backend.CUDA, 24082,
                     frozenset({Precision.FP16})), spec().gpu_id)
             self.acquire(self.provider(session, probe=probe))
+
+    def test_restored_old_source_guard_cannot_admit_ready_until_current_rearm(self):
+        with self.session() as session:
+            self.acquire(self.provider(session))
+        path = self.path / "budget.json"
+        data = json.loads(path.read_bytes())
+        data["records"]["first"]["snapshot"]["state"] = "created"
+        data["records"]["first"]["guard"]["source_sha256"] = OLD_GUARD_SOURCE_SHA256
+        path.write_bytes(canonical(data))
+        with self.session() as session:
+            intent, snapshot = session.intents[0], session.snapshots[0]
+            self.assertGreater(session.remaining_seconds("first"), 0)  # Setup/rearm stays possible.
+            provider = self.provider(session, probe=lambda snapshot, timeout: WorkerObservation(
+                GPUDevice(snapshot.resource_id, Backend.CUDA, 24082, frozenset({Precision.FP16})),
+                spec().gpu_id))
+            provider.restore_owned(intent, snapshot)
+            with self.assertRaises(ProvisioningError):
+                provider.inspect("pod_1")
+            self.assertEqual(session.snapshots[0].state, "created")
+            session.arm_guard("first", GuardReceipt(session.guard_plan("first"),
+                worker_guard_source_sha256(), 123, self.clock.time(), True, True))
+            self.assertEqual(provider.inspect("pod_1").device_id, "pod_1")
+            self.assertEqual(session.snapshots[0].state, "ready")
+            provider.release("pod_1")
+        self.assertFalse(self.cloud.pods)
+
+    def test_historical_old_guard_receipt_does_not_block_owned_recovery(self):
+        with self.session() as session:
+            self.acquire(self.provider(session))
+        path = self.path / "budget.json"
+        data = json.loads(path.read_bytes())
+        data["records"]["first"]["guard"]["source_sha256"] = OLD_GUARD_SOURCE_SHA256
+        path.write_bytes(canonical(data))
+        with self.session() as session:
+            self.assertEqual(session.recover_owned(self.provider(session)), ("first",))
+            self.assertEqual(session.snapshots[0].state, "released")
+        self.assertFalse(self.cloud.pods)
+
+    def test_refused_ready_cannot_populate_restored_created_or_ready_cache(self):
+        for state in ("created", "ready"):
+            with self.subTest(state=state):
+                self.path = Path(self.temp.name).resolve() / state
+                self.cloud = Cloud(self.clock)
+                with self.session() as session:
+                    self.acquire(self.provider(session))
+                path = self.path / "budget.json"
+                data = json.loads(path.read_bytes())
+                data["records"]["first"]["snapshot"]["state"] = state
+                data["records"]["first"]["guard"]["source_sha256"] = "b" * 64
+                path.write_bytes(canonical(data))
+                with self.session() as session:
+                    provider = self.provider(session, probe=lambda snapshot, timeout:
+                        WorkerObservation(GPUDevice(snapshot.resource_id, Backend.CUDA, 24082,
+                            frozenset({Precision.FP16})), spec().gpu_id))
+                    provider.restore_owned(session.intents[0], session.snapshots[0])
+                    with self.assertRaises(ProvisioningError):
+                        self.acquire(provider)  # Restored metadata is not an observation.
+                    with self.assertRaises(ProvisioningError):
+                        provider.inspect("pod_1")
+                    self.assertEqual(provider.snapshots[0].state, state)
+                    with self.assertRaises(ProvisioningError):
+                        self.acquire(provider)  # A refused READY cannot authorize replay.
+                    session.arm_guard("first", GuardReceipt(session.guard_plan("first"),
+                        worker_guard_source_sha256(), 123, self.clock.time(), True, True))
+                    self.assertEqual(provider.inspect("pod_1").device_id, "pod_1")
+                    self.assertEqual(self.acquire(provider).device_id, "pod_1")
+                    self.assertEqual(sum(c[0] == "POST" for c in self.cloud.calls), 1)
+                    provider.release("pod_1")
+                self.assertFalse(self.cloud.pods)
+
+    def test_cached_ready_rechecks_current_guard_source_before_returning_work(self):
+        with self.session() as session:
+            source = [worker_guard_source_sha256()]
+            def probe(snapshot, timeout):
+                session.arm_guard(snapshot.key, GuardReceipt(session.guard_plan(snapshot.key),
+                    source[0], 123, self.clock.time(), True, True))
+                return WorkerObservation(GPUDevice(snapshot.resource_id, Backend.CUDA, 24082,
+                    frozenset({Precision.FP16})), spec().gpu_id)
+            provider = self.provider(session, probe=probe)
+            self.acquire(provider)
+            with patch("cineforge.cloud_budget.worker_guard_source_sha256", return_value="e"*64):
+                with self.assertRaises(ProvisioningError):
+                    self.acquire(provider)
+                self.assertEqual(sum(c[0] == "POST" for c in self.cloud.calls), 1)
+                # A fresh probe must attest the changed source before the cache can recover.
+                source[0] = "e" * 64
+                self.assertEqual(provider.inspect("pod_1").device_id, "pod_1")
+                self.assertEqual(self.acquire(provider).device_id, "pod_1")
+                provider.release("pod_1")
+        self.assertFalse(self.cloud.pods)
+
+    def test_cached_ready_rechecks_expiry_without_blocking_owned_cleanup(self):
+        with self.session() as session:
+            provider = self.provider(session)
+            self.acquire(provider)
+            self.clock.sleep(session.guard_plan("first").stop_at_unix - self.clock.time())
+            self.assertEqual(session.remaining_seconds("first"), 0)
+            with self.assertRaises(ProvisioningError):
+                self.acquire(provider)
+            self.assertEqual(sum(c[0] == "POST" for c in self.cloud.calls), 1)
+            provider.release("pod_1")
+        self.assertFalse(self.cloud.pods)
 
     def test_attempt_slots_never_reset_after_zero_final_invoice_or_restart(self):
         with self.session() as session:

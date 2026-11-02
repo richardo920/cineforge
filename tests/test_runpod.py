@@ -188,6 +188,20 @@ class RunpodLifecycleTests(unittest.TestCase):
         self.assertEqual(self.acquire(restored).device_id, "pod_1")
         self.assertEqual(sum(c[0] == "POST" for c in self.cloud.calls), 1)
 
+    def test_failed_fresh_inspection_invalidates_the_previous_ready_observation(self):
+        provider = self.provider()
+        self.acquire(provider)
+        self.cloud.get_change = lambda pod: dict(pod, cost=True)
+        with self.assertRaises(ProvisioningError):
+            provider.inspect("pod_1")
+        self.cloud.get_change = lambda pod: pod
+        with self.assertRaises(AcquisitionUncertainError):
+            self.acquire(provider)
+        self.assertEqual(provider.inspect("pod_1").device_id, "pod_1")
+        self.assertEqual(self.acquire(provider).device_id, "pod_1")
+        provider.release("pod_1")
+        self.assertFalse(self.cloud.pods)
+
     def test_startup_timeout_releases_the_known_identity(self):
         self.cloud.status = "STARTING"
         p = self.provider()
