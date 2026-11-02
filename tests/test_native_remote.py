@@ -44,7 +44,7 @@ from cineforge.native_speech_integrity import NativeSpeechError, digest, native_
 from cineforge.native_speech_pins import BASE_FILES, DESIGN_FILES, RUNTIME_DISTRIBUTIONS, SDK_FILES
 from cineforge.native_speech_process import OwnedChildResult, pack, unpack
 from cineforge.runpod import RunpodPodSpec
-from cineforge.speech import SpeechArtifact
+from cineforge.speech import SpeechArtifact, SpeechError
 from cineforge.ssh_worker import SSHWorker, WorkerError
 from cineforge.worker_bundle import MAX_SOURCE_BYTES, worker_source
 from cineforge.worker_guard import WorkerGuardPlan, worker_guard_source_sha256
@@ -139,6 +139,7 @@ class RemoteFixture(unittest.TestCase):
             item.start()
             self.addCleanup(item.stop)
         args, _, _ = fixture()
+        self.arguments = args
         self.request = adapter(args).translate(utterance_id="en-line", **args)
         self.reference = inspect_pcm16_wav(args["reference_payload"])
         self.design = OriginalVoiceDesign(
@@ -459,6 +460,71 @@ class RemoteTests(RemoteFixture):
                     self.fail("overlapping native operation admitted")
         self.assertTrue(self.bridge.preview(self.design))
         self.assertEqual(self.child_count, 1)
+
+    def test_malformed_oversize_truncated_and_wrong_digest_replies_never_prove_native(self):
+        for fault in ("oversize", "base64", "truncated", "offset-bool", "digest"):
+            with self.subTest(fault=fault):
+                case = RemoteFixture("runTest")
+                case.setUp()
+                try:
+
+                    def tamper(request, reply):
+                        reply = copy.deepcopy(reply)
+                        if request["operation"] == "native_setup":
+                            if fault == "oversize":
+                                reply["size_bytes"] = 16 * 1024**2 + 1
+                            elif fault == "digest":
+                                reply["sha256"] = "b" * 64
+                        if request["operation"] == "native_fetch":
+                            if fault == "base64":
+                                reply["data"] = "not base64!"
+                            elif fault == "truncated":
+                                reply["data"] = base64.b64encode(b"truncated").decode()
+                            elif fault == "offset-bool":
+                                reply["offset"] = False
+                        return reply
+
+                    case.mutate = tamper
+                    case.static_failure(lambda: case.bridge.stage(recipe(), b"x"))
+                    self.assertTrue(case.bridge._unresolved)
+                    self.assertEqual(case.bridge._proofs, {})
+                    self.assertEqual(case.child_count, 0)
+                finally:
+                    case.doCleanups()
+
+    def test_native_cleanup_uncertainty_is_sticky_and_owns_no_success_proof(self):
+        self.prepare()
+        error = NativeSpeechError(
+            "SYNTHETIC-PRIVATE-CANARY", cleanup_uncertain=True, owned_process_id=12345
+        )
+        with patch("cineforge.native_speech.run_child", side_effect=error) as child:
+            self.static_failure(lambda: self.bridge.preview(self.design))
+            count = len(self.requests)
+            self.static_failure(lambda: self.bridge.preview(self.design))
+        self.assertEqual(child.call_count, 1)
+        self.assertEqual(len(self.requests), count)
+        self.assertTrue((self.remote / (self.bridge.last_attempt + ".consumed")).exists())
+        self.assertTrue((self.remote / "failed").exists())
+        self.assertEqual(self.bridge._proofs, {})
+
+    def test_current_rights_revocation_during_remote_invoke_prevents_artifact(self):
+        self.prepare()
+
+        def revoke_after_owned_child(*args, **kwargs):
+            result = self.child(*args, **kwargs)
+            binding = self.arguments["reference"].permission
+            self.arguments["ledger"].revoke(binding.rights, reason="synthetic current revocation")
+            return result
+
+        speech = adapter(self.arguments, runtime=self.bridge)
+        with patch("cineforge.native_speech.run_child", revoke_after_owned_child):
+            with self.assertRaises(SpeechError):
+                speech.synthesize(
+                    utterance_id="en-line", output_id="speech", output_revision=1, **self.arguments
+                )
+        self.assertEqual(self.child_count, 1)
+        # A completed native fact is historical, never a cached permission grant.
+        self.assertEqual(len(self.bridge._proofs), 1)
 
 
 class RemoteDeclarations(unittest.TestCase):

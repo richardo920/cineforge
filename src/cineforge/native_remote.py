@@ -182,7 +182,12 @@ class RemoteNativeSpeechRuntime:
         raw = bytearray()
         while len(raw) < descriptor["size_bytes"]:
             reply = self._call("native_fetch", token=token, offset=len(raw))
-            if set(reply) != {"offset", "data"} or reply["offset"] != len(raw):
+            if (
+                set(reply) != {"offset", "data"}
+                or type(reply["offset"]) is not int
+                or reply["offset"] != len(raw)
+                or type(reply["data"]) is not str
+            ):
                 raise NativeSpeechError("remote native result framing differs")
             data = base64.b64decode(reply["data"], validate=True)
             if len(data) != min(NR_CHUNK, descriptor["size_bytes"] - len(raw)):
