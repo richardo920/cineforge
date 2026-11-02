@@ -108,6 +108,11 @@ class S2VRunTests(unittest.TestCase):
     def run_scene(self, **changes):
         options = dict(allow_live=True, inspect_media=media)
         options.update(changes)
+        if 'clock' in options:
+            # A forwarded absolute deadline belongs to this same host/clock in
+            # both the run and its real SSH/Comfy admission helpers.
+            with patch('cineforge.ssh_worker.time.monotonic', options['clock']):
+                return run_s2v(self.selection, self.verification, self.driver, self.output, **options)
         return run_s2v(self.selection, self.verification, self.driver, self.output, **options)
 
     def test_success_pins_actual_fixture_bytes_and_all_lineage_without_human_authority(self):

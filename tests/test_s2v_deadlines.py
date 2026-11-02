@@ -1,7 +1,9 @@
 """Deterministic controller clocks and first-party RPC/provider paths; no SSH or GPU."""
 from __future__ import annotations
 
+import hashlib
 import json
+import time
 import unittest
 from dataclasses import replace
 from unittest.mock import patch
@@ -30,6 +32,97 @@ class PairedDeadlineTests(unittest.TestCase):
         self.clock = patch('cineforge.ssh_worker.time.monotonic', side_effect=lambda: self.now)
         self.clock.start()
         self.addCleanup(self.clock.stop)
+
+    def real_currentness_chain(self, late_review=None):
+        from test_comfy_runtime import HASH, ComfyControllerTests, comfy_subject, nr_digest
+
+        from cineforge.native_remote_plan import nr_encode
+        from cineforge.worker_guard import worker_guard_source_sha256
+
+        closed, _, _, reviewer, _, bridge = ComfyControllerTests().fixture()
+        bridge._worker = self.driver
+        bridge._deadline = 1000.0
+        bridge._expires_unix = time.time() + 1000
+        bridge._binding = dict(worker=self.driver.plan.pod_id, session=self.driver.plan.session_id,
+            scope=self.driver.selection.approval.subject_sha256, guard=worker_guard_source_sha256(),
+            source=hashlib.sha256(self.driver._source).hexdigest(), package=HASH,
+            phase_expires_unix=bridge._expires_unix)
+        del bridge.__dict__['_call']  # Exercise the real bounded bridge/RPC chain.
+        closed._prepared, closed._expires_unix = True, bridge._expires_unix
+        declaration = closed._checked.current()
+        closed._subject = comfy_subject(declaration)
+        self.driver._closed_comfy, self.driver._comfy_selection = closed, self.selection
+        verify, count = reviewer.verify, [0]
+        def review(plan):
+            result = verify(plan)
+            count[0] += 1
+            if count[0] == late_review:
+                self.now = 106.0
+            return result
+        reviewer.verify = review
+        fact = dict(subject_sha256=closed._subject, installed_sha256=nr_digest(declaration['installed']),
+            probe_sha256=HASH, execution_sha256=nr_digest(declaration['execution']),
+            jit_enabled=False, phase='after_core_startup')
+        wire = []
+        def process(*args, **kwargs):
+            body = json.loads(kwargs['payload'])
+            wire.append((body['operation'], self.now, kwargs['absolute_deadline']))
+            if body['operation'] == 'native_comfy_verify':
+                return nr_encode(fact)
+            return canonical(self.f.rpc(body, kwargs['timeout']))
+        self.driver._request = lambda body, timeout, **kw: SSHWorker._request(self.driver, body, timeout, **kw)
+        return process, wire
+
+    def test_healthy_currentness_rpc_and_pair_chunks_share_original_stage_cap(self):
+        self.now = 100.0
+        process, wire = self.real_currentness_chain()
+        with patch('cineforge.ssh_worker.run_process', process):
+            proof = self.driver.stage_s2v(self.selection, absolute_deadline=105.0)
+        self.assertEqual(proof.worker_id, 'owned-worker')
+        self.assertEqual(wire[0], ('native_comfy_verify', 100.0, 105.0))
+        self.assertEqual({cap for _, _, cap in wire}, {105.0})
+        self.assertEqual(self.f.requests[-1]['operation'], 's2v_pair_finish')
+
+    def test_slow_review_before_real_bridge_cannot_dispatch_native_rpc_or_transfer(self):
+        self.now = 100.0
+        process, wire = self.real_currentness_chain(late_review=1)
+        with patch('cineforge.ssh_worker.run_process', process), self.assertRaises(WorkerError):
+            self.driver.stage_s2v(self.selection, absolute_deadline=105.0)
+        self.assertEqual(self.now, 106.0)
+        self.assertEqual(wire, [])
+        self.assertEqual(self.f.requests, [])
+        self.assertFalse(self.driver._s2v_consumed)
+
+    def test_slow_post_rpc_validation_cannot_begin_pair_transfer(self):
+        self.now = 100.0
+        process, wire = self.real_currentness_chain(late_review=2)
+        with patch('cineforge.ssh_worker.run_process', process), self.assertRaises(WorkerError):
+            self.driver.stage_s2v(self.selection, absolute_deadline=105.0)
+        self.assertEqual(wire, [('native_comfy_verify', 100.0, 105.0)])
+        self.assertEqual(self.f.requests, [])
+        self.assertFalse(self.driver._s2v_consumed)
+
+    def test_currentness_samples_phase_and_lease_cap_before_slow_budget_callback(self):
+        for remaining, after in ((121, 103), (600, 220)):
+            self.now = 99.0
+            def budget(_):
+                self.now = after
+                return remaining
+            with (patch.object(self.driver.budget, 'remaining_seconds', budget),
+                  patch.object(self.driver._closed_comfy, 'verify') as verify,
+                  self.assertRaises(WorkerError)):
+                self.driver.verify_comfy_current(absolute_deadline=1000.0)
+            verify.assert_not_called()
+        self.assertEqual(self.f.requests, [])
+
+    def test_late_currentness_callback_cannot_return_even_if_injected_verifier_ignores_cap(self):
+        self.now = 100.0
+        def late(*args, **kwargs):
+            self.assertEqual(kwargs['deadline'], 105.0)
+            self.now = 106.0
+        with (patch.object(self.driver._closed_comfy, 'verify', late), self.assertRaises(WorkerError)):
+            self.driver.verify_comfy_current(absolute_deadline=105.0)
+        self.assertEqual(self.f.requests, [])
 
     def test_entry_expiry_and_invalid_caps_make_no_admission_or_wire_calls(self):
         with patch.object(self.driver, '_require_s2v') as admission:

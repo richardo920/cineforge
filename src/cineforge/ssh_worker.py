@@ -622,7 +622,8 @@ class SSHWorker:
             if self._prepared_s2v is None or self.plan is None:
                 raise WorkerError("S2V service model/worker preparation is required before staging")
             self._prepared_s2v.require_matches(selection)
-            self.verify_comfy_current()
+            self.verify_comfy_current(absolute_deadline=deadline)
+            window()
             media = selection.gate.media
             scope = selection.gate.service.approval.subject_sha256
             subject = selection.approved_subject_sha256
@@ -955,15 +956,30 @@ class SSHWorker:
             return
         if type(self._closed_comfy) is not ClosedComfyRuntime or self._comfy_selection is None:
             raise WorkerError("current fixed Comfy runtime proof required")
-        remaining = min(120, self.budget.remaining_seconds(self._key) - 120)
-        if remaining <= 0:
-            raise WorkerError("insufficient lease for current Comfy verification")
-        deadline = time.monotonic() + remaining
-        if absolute_deadline is not None:
-            if type(absolute_deadline) not in (int, float) or not math.isfinite(absolute_deadline):
-                raise WorkerError("invalid Comfy currentness original deadline")
-            deadline = min(deadline, absolute_deadline)
-        self._closed_comfy.verify(self, self._comfy_selection, deadline=deadline)
+        deadline = None
+        try:
+            candidate = request_deadline(120, absolute_deadline, time.monotonic)
+            sampled = time.monotonic()
+            remaining = self.budget.remaining_seconds(self._key)
+            if (type(remaining) not in (int, float) or not math.isfinite(remaining)
+                    or remaining <= 120):
+                raise ValueError
+            candidate = min(candidate, sampled + remaining - 120)
+            require_time(candidate, time.monotonic)
+            deadline = candidate
+        except (Exception, KeyboardInterrupt):
+            pass
+        if deadline is None:
+            raise WorkerError("invalid or expired current Comfy verification deadline")
+        valid = False
+        try:
+            self._closed_comfy.verify(self, self._comfy_selection, deadline=deadline)
+            require_time(deadline, time.monotonic)
+            valid = True
+        except (Exception, KeyboardInterrupt):
+            pass
+        if not valid:
+            raise WorkerError("current Comfy verification incomplete or past original deadline")
 
     def close(self) -> None:
         self._stop.set()

@@ -1008,3 +1008,111 @@ class ComfyExecutableTests(unittest.TestCase):
         changed["executables"] = []
         with self.assertRaises(ValueError):
             CheckedComfyRuntime.reviewed(changed, Reviewer())
+
+
+class ComfyLaunchDeadlineTests(unittest.TestCase):
+    def exercise(self, delay):
+        from cineforge import worker_bootstrap
+        from cineforge.worker_profiles import S2V_WORKER
+
+        with tempfile.TemporaryDirectory(prefix="cf-comfy-launch-cap-") as temporary:
+            root = Path(temporary).resolve()
+            native = root / "native"
+            native.mkdir(mode=0o700)
+            declaration = plan()
+            worker.nr_write(root / "comfy-selection.json", nr_encode(declaration))
+            for index, (name, size, checksum) in enumerate(S2V_WORKER.files):
+                worker.nr_write(
+                    native / f"comfy-model-{index}.json",
+                    nr_encode(dict(path=name, size_bytes=size, sha256=checksum)),
+                )
+            now, spawned = [100.0], []
+            exists = Path.exists
+            original_launch = launcher.launch_command
+
+            def marker(path):
+                result = exists(path)
+                if path.name == delay:
+                    now[0] = 104.0
+                return result
+
+            def command(*args):
+                result = original_launch(*args)
+                if delay == "launch-command-return" and args[-2] == "server":
+                    now[0] = 104.0
+                return result
+
+            def probe(*args):
+                if delay == "probe-return":
+                    now[0] = 104.0
+                return (
+                    {
+                        "python_version": "3.11",
+                        "torch_version": "2.8.0+cu128",
+                        "cuda_version": "12.8",
+                        "gpu_memory_mib": 32768,
+                    },
+                    {},
+                )
+
+            def spawn(argv, **options):
+                spawned.append(
+                    {
+                        "at": now[0],
+                        "cap": float(argv[-1]),
+                        "flags": argv[1:4],
+                        "jit": options["env"]["PYTORCH_JIT"],
+                        "close_fds": options["close_fds"],
+                    }
+                )
+                raise RuntimeError("blocked synthetic launch; no actual child")
+
+            request = dict(
+                plan=dict(session_id="fixture", pod_id="owned"),
+                selection=dict(hardware=dict(gpu="NVIDIA GeForce RTX 5090")),
+                image_digest=declaration["image"].split("@", 1)[1],
+            )
+            with (
+                patch.object(worker_bootstrap, "worker_root", return_value=root),
+                patch.object(worker, "current_comfy", return_value={}),
+                patch.object(worker, "verify_source"),
+                patch.object(worker_bootstrap, "bounded_process", return_value=b"{}"),
+                patch.object(launcher, "probe_result", probe),
+                patch.object(launcher, "launch_command", command),
+                patch.object(worker.time, "monotonic", lambda: now[0]),
+                patch.object(Path, "exists", marker),
+                patch("subprocess.Popen", spawn),
+            ):
+                with self.assertRaises(ValueError if delay else RuntimeError):
+                    worker.setup_comfy(request, native, 103.0)
+                before = len(spawned)
+                with self.assertRaises(FileExistsError):
+                    worker.setup_comfy(request, native, 103.0)
+                self.assertEqual(len(spawned), before)
+            self.assertTrue((native / "comfy-launch-consumed").exists())
+            self.assertFalse((root / "server-pid.json").exists())
+            return spawned
+
+    def test_healthy_fixed_launch_is_consumed_and_keeps_original_child_cap(self):
+        self.assertEqual(
+            self.exercise(None),
+            [
+                {
+                    "at": 100.0,
+                    "cap": 103.0,
+                    "flags": ["-I", "-B", "-S"],
+                    "jit": "0",
+                    "close_fds": True,
+                }
+            ],
+        )
+
+    def test_each_real_marker_read_delaying_past_cap_prevents_process_creation(self):
+        for marker in ("server-pid.json", "comfy-jit-startup.json"):
+            with self.subTest(marker=marker):
+                self.assertEqual(self.exercise(marker), [])
+
+    def test_late_probe_or_launch_preparation_cannot_create_production_process(self):
+        for delay in ("probe-return", "launch-command-return"):
+            with self.subTest(delay=delay):
+                self.assertEqual(self.exercise(delay), [])

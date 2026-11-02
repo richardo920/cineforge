@@ -318,8 +318,11 @@ def setup_comfy(request: dict[str, Any], native: Path, deadline: float) -> dict[
     if (root / "server-pid.json").exists() or (root / "comfy-jit-startup.json").exists():
         raise ValueError("closed Comfy production state was preexisting")
     import subprocess
-    process = subprocess.Popen(command, cwd=root, env=environment, stdin=subprocess.DEVNULL,
+    spawn = subprocess.Popen
+    options: dict[str, Any] = dict(cwd=root, env=environment, stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True, start_new_session=True)
+    nr_check(deadline)
+    process = spawn(command, **options)
     nr_write(root / "server-pid.json", nr_encode({"pid": process.pid, "start_ticks": _server_start(process.pid)}))
     nr_write(root / "worker-verification.json", nr_encode(verification))
     # Polling is fixed loopback health only; final14-node contracts are verified by
