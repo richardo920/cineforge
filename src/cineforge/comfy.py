@@ -17,7 +17,14 @@ from threading import RLock
 from typing import Any
 from urllib.parse import urlencode
 
-from cineforge.comfy_transport import ComfyTransport, positive_seconds
+from cineforge.comfy_transport import (
+    ComfyTransport,
+    TransportError,
+    positive_seconds,
+    request_capped,
+    request_deadline,
+    require_time,
+)
 from cineforge.contracts import Artifact, RunStatus, ShotRun
 from cineforge.providers import (
     ExecutionRequest,
@@ -96,7 +103,8 @@ class ComfyExecutionProvider:
                  max_polls: int = 120, max_result_bytes: int = 32 * 1024 * 1024,
                  clock: Callable[[], float] = time.monotonic,
                  verified_server_revision: str | None = None,
-                 verified_worker_id: str | None = None) -> None:
+                 verified_worker_id: str | None = None,
+                 absolute_deadline: float | None = None) -> None:
         if (not isinstance(workflow, WorkflowTemplate) or type(max_polls) is not int
                 or not 1 <= max_polls <= 10000 or type(max_result_bytes) is not int
                 or not 1 <= max_result_bytes <= 256 * 1024 * 1024):
@@ -111,6 +119,9 @@ class ComfyExecutionProvider:
         self._max_polls = max_polls
         self._max_result_bytes = max_result_bytes
         self._clock = clock
+        if absolute_deadline is not None:
+            request_deadline(86400, absolute_deadline, clock)
+        self._absolute_deadline = absolute_deadline
         self._atomic_cancel = verified_server_revision is not None
         self._verified_worker_id = verified_worker_id
         self._jobs: dict[str, _Job] = {}
@@ -123,26 +134,36 @@ class ComfyExecutionProvider:
 
     def _call(self, method: str, path: str, body: dict[str, object] | None = None,
               *, deadline: float, max_bytes: int = 4 * 1024 * 1024) -> bytes:
+        if self._absolute_deadline is not None:
+            deadline = min(deadline, self._absolute_deadline)
         remaining = deadline - self._clock()
         if remaining <= 0:
             raise JobDeadlineError("ComfyUI client deadline exceeded; cancel the job explicitly")
+        failed = False
+        raw = b""
         try:
-            raw = self._transport.request(method, path, body,
-                                          timeout_seconds=min(remaining, self._request_timeout),
-                                          max_bytes=max_bytes)
-        except (OSError, TimeoutError):
-            raise ProviderError("ComfyUI connection or timeout failure") from None
-        if not isinstance(raw, bytes) or len(raw) > max_bytes:
-            raise ProviderError("invalid or oversized ComfyUI response")
+            raw = request_capped(self._transport, method, path, body,
+                timeout_seconds=min(remaining, self._request_timeout), max_bytes=max_bytes,
+                absolute_deadline=deadline, clock=self._clock)
+        except (OSError, TimeoutError, TransportError):
+            failed = True
         if self._clock() >= deadline:
             raise JobDeadlineError("ComfyUI client deadline exceeded; cancel the job explicitly")
+        if failed:
+            raise TransportError("ComfyUI connection or timeout failure")
+        if not isinstance(raw, bytes) or len(raw) > max_bytes:
+            raise ProviderError("invalid or oversized ComfyUI response")
         return raw
 
     def submit(self, request: ExecutionRequest, idempotency_key: str) -> ShotRun:
+        original_cap = (None if self._absolute_deadline is None else
+                        request_deadline(self._job_timeout, self._absolute_deadline, self._clock))
         graph = self._workflow.translate(request)
         self._workflow.require_submission(request, self._verified_worker_id)
         _text(idempotency_key, "idempotency_key")
         snapshot = canonical(request.to_dict())
+        if original_cap is not None:
+            require_time(original_cap, self._clock)
         with self._lock:
             if idempotency_key in self._keys:
                 previous, identity = self._keys[idempotency_key]
@@ -153,7 +174,7 @@ class ComfyExecutionProvider:
                 return self._jobs[identity].run
             # Reserve before I/O. ComfyUI does not provide server-side idempotency.
             self._keys[idempotency_key] = (snapshot, None)
-            deadline = self._clock() + self._job_timeout
+            deadline = self._clock() + self._job_timeout if original_cap is None else original_cap
             try:
                 response = strict_object(self._call("POST", "/prompt", {"prompt": graph},
                                                     deadline=deadline))
@@ -220,6 +241,8 @@ class ComfyExecutionProvider:
             job.output = output
             # One window from the first observed success, never renewed by a retry.
             job.result_deadline = self._clock() + self._result_timeout
+            if self._absolute_deadline is not None:
+                job.result_deadline = min(job.result_deadline, self._absolute_deadline)
             job.run = replace(job.run, status=RunStatus.SUCCEEDED,
                               started_at=job.run.started_at or self._now(), finished_at=self._now(),
                               artifact_ids=(f"comfy-{identity}",))
