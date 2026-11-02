@@ -13,6 +13,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import ClassVar
 
+from codec_v1_baseline import BASELINE
 from test_characters import character, permission, reference
 
 from cineforge.characters import (
@@ -40,7 +41,6 @@ from cineforge.rights import EvidenceRef, RightsRef, SubjectRef
 from cineforge.workflows import canonical, strict_object
 
 ROOT = Path(__file__).resolve().parents[1]
-BASELINE = json.loads((ROOT / "tests/fixtures/codec-v1-hashes.json").read_text())
 
 
 @dataclass(frozen=True, slots=True)
