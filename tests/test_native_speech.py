@@ -42,7 +42,7 @@ from cineforge.native_speech_pins import (
     PCM_POLICY,
     SDK_FILES,
 )
-from cineforge.native_speech_process import pack, run_child, unpack
+from cineforge.native_speech_process import OwnedChildResult, pack, run_child, unpack
 from cineforge.speech import SpeechError
 
 CANARY = "SYNTHETIC-PRIVATE-NATIVE-CANARY"
@@ -81,6 +81,7 @@ def response(header, payload=None):
         operator_worker_id=expected["operator_worker_id"], bf16_supported=True, attention="sdpa-math")
     metadata = dict(version=1, status="provisional", input_sha256=header["input_sha256"],
         request_sha256=digest(header["request"]), operation=header["operation"],
+        seed=header["seed"], max_new_tokens=512, non_streaming_mode=True,
         selection_sha256=header["selection"]["reviewed_subject_sha256"],
         payload_sha256=hashlib.sha256(payload).hexdigest(), frames=converted.frames,
         sample_rate=converted.sample_rate, float_peak=converted.float_peak,
@@ -119,7 +120,7 @@ class NativeSpeechTests(unittest.TestCase):
         header, pcm = unpack(payload)
         if header["operation"] == "base":
             self.assertEqual(pcm, self.reference.pcm)
-        return pack(*response(header))
+        return OwnedChildResult(pack(*response(header)), 12345)
 
     def test_explicit_constructor_has_no_io_and_default_adapter_stays_fake(self):
         with patch("os.open", side_effect=AssertionError("I/O")), \
@@ -151,6 +152,8 @@ class NativeSpeechTests(unittest.TestCase):
             preview = OriginalVoiceDesign("  Original line.\n", "English", "Original fictional timbre", HASH)
             self.runtime.preview(preview)
             self.assertNotEqual(self.runtime.last_receipt["input_sha256"], receipt["input_sha256"])
+            self.assertEqual(self.runtime.receipt_for(self.request, output)["input_sha256"],
+                             receipt["input_sha256"])
         with self.assertRaises(NativeSpeechError):
             OriginalVoiceDesign("text", "auto", "description", HASH)
         with self.assertRaises(TypeError):
@@ -173,13 +176,13 @@ class NativeSpeechTests(unittest.TestCase):
             header, _ = unpack(kwargs["payload"])
             meta, data = response(header)
             meta["status"] = CANARY
-            return pack(meta, data)
+            return OwnedChildResult(pack(meta, data), 12345)
         for side_effect in (OSError(CANARY), SystemExit(CANARY)):
             with patch("cineforge.native_speech.run_child", side_effect=side_effect):
                 self.assert_static_failure()
         with patch("cineforge.native_speech.run_child", child):
             self.assert_static_failure()
-        with patch("cineforge.native_speech.run_child", return_value=CANARY.encode()):
+        with patch("cineforge.native_speech.run_child", return_value=OwnedChildResult(CANARY.encode(), 12345)):
             self.assert_static_failure()
         (self.root / "python").unlink()
         self.assert_static_failure()
@@ -199,9 +202,20 @@ class NativeSpeechTests(unittest.TestCase):
 
     def test_cleanup_uncertainty_and_interruption_remain_explicit(self):
         with patch("cineforge.native_speech.run_child", side_effect=NativeSpeechError(
-                CANARY, cleanup_uncertain=True)):
+                CANARY, cleanup_uncertain=True, owned_process_id=12345)):
             self.assert_static_failure()
         self.assertTrue(self.runtime.last_attempt.cleanup_uncertain)
+        self.assertEqual(self.runtime.last_attempt.owned_process_id, 12345)
+        previous = self.runtime.last_attempt
+        with patch("cineforge.native_speech.run_child") as child:
+            with self.assertRaises(NativeSpeechError):
+                self.runtime.synthesize(self.request, self.reference)
+            with self.assertRaises(NativeSpeechError):
+                self.runtime.preview(OriginalVoiceDesign("text", "English", "fictional", HASH))
+            child.assert_not_called()
+        self.assertIs(self.runtime.last_attempt, previous)
+        # The prior error was an injected fixture, not an actual unresolved process.
+        self.runtime = NativeSpeechRuntime(self.selection, allow_native=True, timeout_seconds=5)
         with patch("cineforge.native_speech.run_child", side_effect=KeyboardInterrupt(CANARY)):
             with self.assertRaises(KeyboardInterrupt) as caught:
                 self.runtime.synthesize(self.request, self.reference)
@@ -213,13 +227,23 @@ class NativeSpeechTests(unittest.TestCase):
         def child(command, **kwargs):
             header, _ = unpack(kwargs["payload"])
             long, _ = float_pcm([.1] * 24000, 24000)
-            return pack(*response(header, long))
+            return OwnedChildResult(pack(*response(header, long)), 12345)
         with patch("cineforge.native_speech.run_child", child), self.assertRaises(NativeSpeechError):
             self.runtime.synthesize(self.request, self.reference)
         self.assertEqual(self.runtime.last_attempt.outcome, "failed")
         self.assertIsNone(self.runtime.last_receipt)
         with self.assertRaises(NativeSpeechError):
             self.runtime.receipt_for(self.request, float_pcm([.1], 24000)[0])
+
+    def test_receipt_capacity_refuses_before_spawning_and_keeps_previous_facts(self):
+        with patch("cineforge.native_speech.run_child", self.fake_child):
+            output = self.runtime.synthesize(self.request, self.reference)
+        self.runtime._success_count = 16
+        with patch("cineforge.native_speech.run_child") as child:
+            with self.assertRaises(NativeSpeechError):
+                self.runtime.synthesize(self.request, self.reference)
+            child.assert_not_called()
+        self.assertEqual(self.runtime.receipt_for(self.request, output)["status"], "provisional")
 
     def test_existing_adapter_rechecks_revocation_during_native_call(self):
         def child(command, **kwargs):
@@ -381,9 +405,16 @@ class NativeSDKBridgeTests(unittest.TestCase):
             return Array(list(struct.unpack("<" + "h" * (len(data) // 2), data)))
 
         class Model:
+            cpu = False
+
             def __init__(self, kind):
+                parameter = SimpleNamespace(device=SimpleNamespace(type="cpu" if self.cpu else "cuda",
+                                                                   index=None if self.cpu else 0))
+                def parameters():
+                    return iter((parameter,))
                 self.model = SimpleNamespace(tts_model_type=kind,
-                    tokenizer_type="qwen3_tts_tokenizer_12hz")
+                    tokenizer_type="qwen3_tts_tokenizer_12hz", parameters=parameters,
+                    speech_tokenizer=SimpleNamespace(model=SimpleNamespace(parameters=parameters)))
 
             def create_voice_clone_prompt(self, **kwargs):
                 calls.append(("prompt", kwargs))
@@ -451,6 +482,8 @@ class NativeSDKBridgeTests(unittest.TestCase):
                 self.assertEqual(sum(row[0] == "load" for row in calls), loads)
                 with patch.object(Array, "ndim", 2), self.assertRaises(NativeSpeechError):
                     worker._generate("base", request, reference, chosen, 1)
+                with patch.object(Model, "cpu", True), self.assertRaises(NativeSpeechError):
+                    worker._generate("base", request, reference, chosen, 1)
         for row in calls:
             if row[0] == "load":
                 self.assertEqual(row[2], dict(local_files_only=True, trust_remote_code=False,
@@ -479,7 +512,7 @@ class NativeProcessTests(unittest.TestCase):
             self.assertEqual(sys.platform, "darwin")
             self.assertTrue(error.cleanup_uncertain)
         else:
-            self.assertEqual(output, b"fixture")
+            self.assertEqual(output.payload, b"fixture")
         with self.assertRaises(NativeSpeechError) as caught:
             self.execute("import sys;sys.stdin.buffer.read();raise RuntimeError('" + CANARY + "')")
         self.assertNotIn(CANARY, "".join(traceback.format_exception(caught.exception)))

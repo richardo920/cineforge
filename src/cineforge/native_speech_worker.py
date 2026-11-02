@@ -95,6 +95,14 @@ def _generate(operation: str, request: QwenBaseRequest | OriginalVoiceDesign,
     if (model.model.tts_model_type != ("base" if operation == "base" else "voice_design")
             or model.model.tokenizer_type != "qwen3_tts_tokenizer_12hz"):
         raise NativeSpeechError("unsupported native speech model capability")
+    for module in (model.model, model.model.speech_tokenizer.model):
+        found = False
+        for parameter in module.parameters():
+            found = True
+            if parameter.device.type != "cuda" or parameter.device.index != 0:
+                raise NativeSpeechError("native speech cannot offload model parameters to CPU or MPS")
+        if not found:
+            raise NativeSpeechError("native speech model placement is unavailable")
     with torch.inference_mode():
         if isinstance(request, QwenBaseRequest):
             waveform = numpy.frombuffer(reference, dtype="<i2").astype(numpy.float32) / 32768
@@ -165,6 +173,7 @@ def handle(header: dict[str, Any], reference: bytes) -> tuple[dict[str, Any], by
         raise NativeSpeechError("native speech work deadline exhausted")
     return {"version": 1, "status": "provisional", "input_sha256": identity,
             "request_sha256": digest(header["request"]), "operation": header["operation"],
+            "seed": header["seed"], "max_new_tokens": 512, "non_streaming_mode": True,
             "selection_sha256": selection.subject_sha256(),
             "payload_sha256": hashlib.sha256(payload).hexdigest(), **asdict(conversion),
             "pcm_policy": PCM_POLICY, "network_policy": network,

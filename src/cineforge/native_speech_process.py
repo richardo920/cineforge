@@ -9,6 +9,7 @@ import signal
 import struct
 import subprocess
 import time
+from dataclasses import dataclass, field
 from typing import Any
 
 from cineforge.json_codec import strict_loads
@@ -17,6 +18,16 @@ from cineforge.native_speech_integrity import NativeSpeechError
 MAX_HEADER = 16 * 1024**2
 MAX_INPUT = MAX_HEADER + 16 * 1024**2 + 4
 MAX_OUTPUT = 17 * 1024**2
+
+
+@dataclass(frozen=True, slots=True)
+class OwnedChildResult:
+    payload: bytes = field(repr=False)
+    process_id: int
+
+    def __post_init__(self) -> None:
+        if type(self.payload) is not bytes or type(self.process_id) is not int or self.process_id <= 0:
+            raise NativeSpeechError("invalid owned speech child result")
 
 
 def pack(header: dict[str, Any], payload: bytes) -> bytes:
@@ -79,11 +90,12 @@ def _finish(process: subprocess.Popen[bytes] | None, selector: selectors.BaseSel
 
 
 def run_child(command: tuple[str, ...], *, payload: bytes, env: dict[str, str],
-              cwd: str, deadline: float) -> bytes:
+              cwd: str, deadline: float) -> OwnedChildResult:
     """The original absolute deadline includes a two-second cleanup reserve.
 
-    A completed frame alone is insufficient: parent exit0 and confirmed cleanup
-    are required. OS refusal is explicit uncertainty, never an approval or success.
+    A completed frame alone is insufficient: require parent exit0/reap and no known
+    cleanup-call failures. Group signaling does not independently measure every
+    descendant's terminal state. OS refusal is explicit uncertainty, never success.
     """
     process: subprocess.Popen[bytes] | None = None
     selector: selectors.BaseSelector | None = None
@@ -144,9 +156,11 @@ def run_child(command: tuple[str, ...], *, payload: bytes, env: dict[str, str],
         uncertain = _finish(process, selector, deadline)
     if uncertain:
         raise NativeSpeechError("native speech cleanup incomplete or unconfirmed",
-                                cleanup_uncertain=True) from None
+                                cleanup_uncertain=True,
+                                owned_process_id=None if process is None else process.pid) from None
     if cancelled:
         raise KeyboardInterrupt from None
     if failed or result is None or process is None or process.returncode != 0:
-        raise NativeSpeechError("bounded native speech child failed") from None
-    return result
+        raise NativeSpeechError("bounded native speech child failed",
+                                owned_process_id=None if process is None else process.pid) from None
+    return OwnedChildResult(result, process.pid)

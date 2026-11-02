@@ -27,9 +27,14 @@ _MAX_TREE_BYTES = 64 * 1024**3
 class NativeSpeechError(ValueError):
     """Only static diagnostics; cleanup uncertainty never becomes a success."""
 
-    def __init__(self, message: str, *, cleanup_uncertain: bool = False) -> None:
+    def __init__(self, message: str, *, cleanup_uncertain: bool = False,
+                 owned_process_id: int | None = None) -> None:
+        if owned_process_id is not None and (type(owned_process_id) is not int or owned_process_id <= 0):
+            raise ValueError("invalid owned process provenance")
         super().__init__(message)
         self.cleanup_uncertain = cleanup_uncertain
+        # Diagnostic provenance only; a historical PID is never future signal authority.
+        self.owned_process_id = owned_process_id
 
 
 def digest(value: object) -> str:
