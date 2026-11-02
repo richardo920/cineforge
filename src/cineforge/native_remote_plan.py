@@ -12,7 +12,7 @@ from cineforge.native_speech_pins import BASE_FILES, DESIGN_FILES, RUNTIME_DISTR
 
 NR_CHUNK = 32768
 NR_BLOB_MAX = 16 * 1024**2
-NR_POLICY = "native-fixed-wheel-unpack-v3-root-metadata"
+NR_POLICY = "native-fixed-wheel-unpack-v4-model-role"
 
 
 def nr_encode(value: Any) -> bytes:
