@@ -96,6 +96,7 @@ def execute_comfy(
     output_dir: str | Path, *, allow_live: bool = False,
     endpoint: str = "http://127.0.0.1:8188", timeout_seconds: float = 600,
     request_timeout_seconds: float = 10, poll_interval_seconds: float = 1,
+    result_timeout_seconds: float | None = None,
     max_polls: int = 600, max_result_bytes: int = 32 * 1024 * 1024,
     transport: ComfyTransport | None = None, clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
@@ -105,12 +106,18 @@ def execute_comfy(
     Worker records and reviewed selection are operator-trusted declarations, separate
     from the creative plan. Runtime bounds do not enforce cloud rental/billing limits.
     A failure may leave active GPU work; run.json records bounded cancellation results.
+    The absolute timeout includes setup, inference, transfer and cancellation. Reserve
+    transfer time inside it (default: min(request timeout, half the total)).
     """
     failed = False
     provider = None
     bounded = None
     request = None
     deadline = 0.0
+    run_id = ""
+    key = ""
+    record: dict[str, Any] | None = None
+    prepared_record: bytes | None = None
     try:
         if (allow_live is not True or not isinstance(plan, ProjectPlan)
                 or len(plan.shots) != 1 or not isinstance(selection, ApprovedComfySelection)
@@ -123,38 +130,50 @@ def execute_comfy(
         request = selection.request(plan.shots[0])
         timeout_seconds = positive_seconds(timeout_seconds)
         request_timeout_seconds = positive_seconds(request_timeout_seconds)
+        result_timeout_seconds = (min(request_timeout_seconds, timeout_seconds / 2)
+                                  if result_timeout_seconds is None
+                                  else positive_seconds(result_timeout_seconds))
+        if result_timeout_seconds >= timeout_seconds:
+            raise ComfyRunError("result timeout must leave a positive inference budget")
         if (type(poll_interval_seconds) not in (int, float)
                 or not math.isfinite(poll_interval_seconds)
                 or not 0 <= poll_interval_seconds <= 60):
             raise ComfyRunError("invalid polling interval")
         native = ComfyHTTPTransport(endpoint, allow_live=True)
         deadline = clock() + timeout_seconds
-        bounded = _BoundedTransport(native if transport is None else transport, deadline, clock)
+        inference_deadline = deadline - result_timeout_seconds
+        bounded = _BoundedTransport(native if transport is None else transport,
+                                    inference_deadline, clock)
         provider = ComfyExecutionProvider(
             bounded, selection.workflow, request_timeout_seconds=request_timeout_seconds,
-            job_timeout_seconds=timeout_seconds, max_polls=max_polls,
+            job_timeout_seconds=timeout_seconds - result_timeout_seconds,
+            result_timeout_seconds=result_timeout_seconds, max_polls=max_polls,
             max_result_bytes=max_result_bytes, clock=clock,
             verified_server_revision=worker.record["server_revision"],
             verified_worker_id=worker.record["worker_id"],
         )
+        # Translation rechecks current rights; record/approval access and JSON
+        # preparation must also reject statically before claiming private storage.
+        run_id = "comfy-" + uuid.uuid4().hex
+        key = run_id + "-shot"
+        record = {
+            "schema_version": 1, "run_id": run_id, "outcome": "prepared",
+            "plan": plan.to_dict(), "request": request.to_dict(), "idempotency_key": key,
+            "translated_workflow": selection.workflow.translate(request),
+            "selection_subject_sha256": selection.declarations["approval"]["model_workflow"][
+                "approved_subject_sha256"],
+            "worker_verification": worker.record, "known_run": None, "server_output": None,
+            "cloud_cost": {"status": "not_measured", "approved_setup_limit_usd":
+                           selection.declarations["approval"]["spend_limit_usd"]},
+            "cancellation": {"attempted": False, "confirmed_terminal": False},
+        }
+        prepared_record = canonical(record)
     except (Exception, KeyboardInterrupt):
         failed = True
-    if failed or provider is None or bounded is None or request is None:
+    if (failed or provider is None or bounded is None or request is None
+            or record is None or prepared_record is None):
         raise ComfyRunError("ComfyUI single-shot preflight rejected")
 
-    run_id = "comfy-" + uuid.uuid4().hex
-    key = run_id + "-shot"
-    record: dict[str, Any] = {
-        "schema_version": 1, "run_id": run_id, "outcome": "prepared",
-        "plan": plan.to_dict(), "request": request.to_dict(), "idempotency_key": key,
-        "translated_workflow": selection.workflow.translate(request),
-        "selection_subject_sha256": selection.declarations["approval"]["model_workflow"][
-            "approved_subject_sha256"],
-        "worker_verification": worker.record, "known_run": None,
-        "cloud_cost": {"status": "not_measured", "approved_setup_limit_usd":
-                       selection.declarations["approval"]["spend_limit_usd"]},
-        "cancellation": {"attempted": False, "confirmed_terminal": False},
-    }
     run: ShotRun | None = None
     completed: RunManifest | None = None
     failed = False
@@ -162,7 +181,7 @@ def execute_comfy(
         with PrivateRunDirectory(output_dir) as store:
             try:
                 # Persist intent before any request; never replay this directory on restart.
-                store.checkpoint(canonical(record))
+                store.checkpoint(prepared_record)
                 _verify_nodes(bounded, selection, request_timeout_seconds)
                 record["outcome"] = "submitting"
                 store.checkpoint(canonical(record))
@@ -172,15 +191,19 @@ def execute_comfy(
                 while run.status not in TERMINAL:
                     run = provider.status(run.job_id)
                     record.update(outcome="awaiting_artifact" if run.status == RunStatus.SUCCEEDED
-                                  else "submitted", known_run=run.to_dict())
+                                  else "submitted", known_run=run.to_dict(),
+                                  server_output=provider.output_descriptor(run.job_id))
                     store.checkpoint(canonical(record))
                     if run.status not in TERMINAL:
-                        remaining = deadline - clock()
+                        remaining = inference_deadline - clock()
                         if remaining <= 0:
                             raise JobDeadlineError("single-shot deadline exceeded")
                         sleep(min(poll_interval_seconds, remaining))
                 if run.status != RunStatus.SUCCEEDED:
                     raise ComfyRunError("ComfyUI shot did not succeed")
+                # Only retrieval can use the reserved window; the original absolute
+                # cap still includes it and remains inside any caller's lease cutoff.
+                bounded.deadline = deadline
                 result = provider.result(run.job_id)
                 artifact = store.put(result)
                 completed = RunManifest(run_id, plan, (result.run,), (artifact,))
@@ -193,13 +216,17 @@ def execute_comfy(
                 # acknowledgement/history never becomes a fabricated cancelled state.
                 if run is not None and run.status not in TERMINAL:
                     record["cancellation"]["attempted"] = True
-                    bounded.deadline = clock() + request_timeout_seconds
+                    # Best-effort cancellation may use remaining reserved time, but
+                    # cannot renew the total cap or consume the caller's lease reserve.
+                    bounded.deadline = min(deadline, clock() + request_timeout_seconds)
                     try:
                         run = provider.cancel(run.job_id)
                         record["cancellation"]["confirmed_terminal"] = run.status in TERMINAL
                     except (Exception, KeyboardInterrupt):
                         pass
                 record.update(outcome="incomplete", known_run=None if run is None else run.to_dict())
+                if run is not None:
+                    record["server_output"] = provider.output_descriptor(run.job_id)
                 try:
                     store.checkpoint(canonical(record))
                 except (Exception, KeyboardInterrupt):

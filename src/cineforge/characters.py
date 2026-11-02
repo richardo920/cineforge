@@ -40,6 +40,10 @@ class _CharacterContract(Contract):
 
     @classmethod
     def from_dict(cls, data: object) -> Self:
+        # Preserve the existing direct array diagnostic before the private wrapper.
+        if isinstance(data, dict) and any(name in data and not isinstance(data[name], list)
+                                          for name in cls._tuple_fields):
+            raise CharacterError("character references must be arrays")
         try:
             return super().from_dict(data)
         except (ContractError, TypeError, UnicodeError, RecursionError):
@@ -133,6 +137,8 @@ class ReferenceArtifact(_CharacterContract):
 
 @dataclass(frozen=True, slots=True)
 class Wardrobe(_CharacterContract):
+    _tuple_fields: ClassVar[tuple[str, ...]] = ("reference_ids",)
+
     wardrobe_id: str
     description: str = field(repr=False)
     reference_ids: tuple[str, ...] = ()
@@ -146,26 +152,11 @@ class Wardrobe(_CharacterContract):
             _identifier(value, "wardrobe reference ID")
         _unique(self.reference_ids, "wardrobe reference IDs")
 
-    @classmethod
-    def from_dict(cls, data: object) -> Self:
-        # slots=True replaces the class; no-arg super captures the old class on 3.11/3.12.
-        return super(Wardrobe, cls).from_dict(_string_tuple(data, "reference_ids"))
-
-
-def _string_tuple(data: object, name: str) -> object:
-    if not isinstance(data, dict):
-        return data
-    values = dict(data)
-    if name in values:
-        if not isinstance(values[name], list):
-            raise CharacterError("character references must be arrays")
-        values[name] = tuple(values[name])
-    return values
-
-
 @dataclass(frozen=True, slots=True)
 class ConditioningHint(_CharacterContract):
     """Descriptive pins only; adapters must independently verify support."""
+
+    _tuple_fields: ClassVar[tuple[str, ...]] = ("reference_ids",)
 
     mode: str
     model_id: str
@@ -188,11 +179,6 @@ class ConditioningHint(_CharacterContract):
             _identifier(value, "conditioning reference ID")
         _unique(self.reference_ids, "conditioning reference IDs")
 
-    @classmethod
-    def from_dict(cls, data: object) -> Self:
-        return super(ConditioningHint, cls).from_dict(_string_tuple(data, "reference_ids"))
-
-
 @dataclass(frozen=True, slots=True)
 class CharacterReview(_CharacterContract):
     _objects: ClassVar[dict[str, type[Contract]]] = {"evidence": EvidenceRef}
@@ -211,6 +197,8 @@ class CharacterReview(_CharacterContract):
 @dataclass(frozen=True, slots=True)
 class CharacterRevision(_CharacterContract):
     _objects: ClassVar[dict[str, type[Contract]]] = {"wardrobe": Wardrobe}
+    _optional_objects: ClassVar[dict[str, type[Contract]]] = {"likeness": RightsBinding,
+                                                          "review": CharacterReview}
     _sequences: ClassVar[dict[str, type[Contract]]] = {"references": ReferenceArtifact,
                                                    "conditioning": ConditioningHint}
 
@@ -260,15 +248,6 @@ class CharacterRevision(_CharacterContract):
                 raise CharacterError("missing or incompatible conditioning reference")
         if self.review is not None:
             _instance(self.review, CharacterReview, "character review")
-
-    @classmethod
-    def from_dict(cls, data: object) -> Self:
-        if isinstance(data, dict):
-            data = dict(data)
-            for name, kind in (("likeness", RightsBinding), ("review", CharacterReview)):
-                if name in data and data[name] is not None:
-                    data[name] = kind.from_dict(data[name])
-        return super(CharacterRevision, cls).from_dict(data)
 
     def declaration_digest(self) -> str:
         return hashlib.sha256(replace(self, review=None).to_json().encode()).hexdigest()

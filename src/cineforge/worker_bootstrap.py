@@ -1,4 +1,4 @@
-"""Copyable stdlib worker setup for the reviewed disposable Wan smoke only.
+"""Stdlib worker setup bundled with fixed reviewed profiles for disposable Wan workers.
 
 Account credentials are never inputs. The separately copied guard owns shutdown.
 Only selected version/hash/size fields leave this process; tool diagnostics do not.
@@ -27,24 +27,19 @@ import zlib
 from pathlib import Path
 from typing import Any
 
-REVISION = "6d352802d8f8b9133f664a1757d6c6d26390c335"  # pragma: allowlist secret - public source revision
-GPU = "NVIDIA GeForce RTX 4090"
-MODEL_REVISION = "123acf1cc74bccbb9bfff8ac1ee72edc08c2341d"  # pragma: allowlist secret - public model revision
+from cineforge.worker_profiles import I2V_WORKER, T2V_WORKER, WorkerProfile
 
-M4_PROFILE = "m4-wan22-ti2v5b-5090-v1"
-M4_GPU = "NVIDIA GeForce RTX 5090"
+# Existing inspection names remain available; operational data is immutable and shared.
+REVISION = T2V_WORKER.runner_revision
+GPU = T2V_WORKER.gpu
+MODEL_REVISION = T2V_WORKER.model_revision
+M4_PROFILE = I2V_WORKER.profile_id
+M4_GPU = I2V_WORKER.gpu
 M4_RESOURCE_FIELDS = {"host_memory_bytes", "host_available_memory_bytes", "cgroup_limits",
                       "memory_accounting", "memory_limit_bytes", "available_memory_bytes",
                       "filesystem_total_bytes", "filesystem_free_bytes"}
-M4_REVISION = 'ee6f4a40737a995bf5818954cfce6d59443b0f04'  # pragma: allowlist secret - public model revision
-M4_FILES = {
-    'split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors': (9999658848,
-        '456f901338bd9eadbded3828b819109a9b68e8a525ca5cf8d0049a69fcfeca1e'),  # pragma: allowlist secret - public weight digest
-    'split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors': (6735906897,
-        'c3355d30191f1f066b26d93fba017ae9809dce6c627dda5f6a66eaa651204f68'),  # pragma: allowlist secret - public weight digest
-    'split_files/vae/wan2.2_vae.safetensors': (1409400960,
-        'e40321bd36b9709991dae2530eb4ac303dd168276980d3e9bc4b6e2b75fed156'),  # pragma: allowlist secret - public weight digest
-}
+M4_REVISION = I2V_WORKER.model_revision
+M4_FILES = {path: (size, digest) for path, size, digest in I2V_WORKER.files}
 
 
 class BootstrapError(ValueError):
@@ -442,24 +437,31 @@ def resource_evidence(root: Path, *, proc: Path = Path("/proc"),
 
 
 def validate_m4_runtime(runtime: dict[str, Any]) -> None:
+    requirements = I2V_WORKER.reference_runtime
+    if requirements is None:
+        raise BootstrapError("reference runtime profile unavailable")
     fields = {"python_version", "torch_version", "torchvision_version", "cuda_version",
               "gpu_raw_name", "gpu_memory_mib", "cuda_available", "arch_list", "capability",
               "cuda_kernel_ok", "device_count", "nvml_total_mib",
               "nvml_reserved_mib", "driver_version"} | M4_RESOURCE_FIELDS
-    if (set(runtime) != fields or runtime["gpu_raw_name"] != M4_GPU
+    if (set(runtime) != fields or runtime["gpu_raw_name"] != I2V_WORKER.gpu
             or runtime["cuda_available"] is not True or runtime["cuda_kernel_ok"] is not True
             or type(runtime["gpu_memory_mib"]) is not int
-            or not 30720 <= runtime["gpu_memory_mib"] <= 32768
+            or not I2V_WORKER.minimum_memory_mib <= runtime["gpu_memory_mib"]
+            <= requirements.maximum_memory_mib
             or type(runtime["device_count"]) is not int or runtime["device_count"] != 1
-            or runtime["capability"] != [12, 0]
+            or runtime["capability"] != list(requirements.capability)
             or any(type(v) is not int for v in runtime["capability"])
-            or runtime["torch_version"] != "2.8.0+cu128" or runtime["cuda_version"] != "12.8"
-            or not isinstance(runtime["arch_list"], list) or "sm_120" not in runtime["arch_list"]
+            or runtime["torch_version"] != requirements.torch_version
+            or runtime["cuda_version"] != I2V_WORKER.cuda_version
+            or not isinstance(runtime["arch_list"], list)
+            or requirements.architecture not in runtime["arch_list"]
             or len(runtime["arch_list"]) > 64
             or any(not isinstance(v, str) or re.fullmatch(r"(?:sm|compute)_[0-9a-z]{2,8}", v)
                    is None for v in runtime["arch_list"])
             or type(runtime["nvml_total_mib"]) is not int
-            or not runtime["gpu_memory_mib"] <= runtime["nvml_total_mib"] <= 32768
+            or not runtime["gpu_memory_mib"] <= runtime["nvml_total_mib"]
+            <= requirements.maximum_memory_mib
             or type(runtime["nvml_reserved_mib"]) is not int
             or not 0 <= runtime["nvml_reserved_mib"] < runtime["nvml_total_mib"]
             or any(not isinstance(runtime[k], str) or re.fullmatch(r"[A-Za-z0-9.+_-]{1,80}",
@@ -470,11 +472,12 @@ def validate_m4_runtime(runtime: dict[str, Any]) -> None:
     accounting = memory_accounting(runtime["host_memory_bytes"], runtime["host_available_memory_bytes"],
                                    runtime["cgroup_limits"], runtime["memory_accounting"])
     if (any(runtime[key] != value for key, value in accounting.items())
-            or runtime["memory_limit_bytes"] < 64_000_000_000
-            or runtime["available_memory_bytes"] < 32*1024**3
+            or runtime["memory_limit_bytes"] < requirements.minimum_effective_ram_bytes
+            or runtime["available_memory_bytes"] < requirements.minimum_available_ram_bytes
             or type(runtime["filesystem_free_bytes"]) is not int
             or type(runtime["filesystem_total_bytes"]) is not int
-            or not 30*1024**3 <= runtime["filesystem_free_bytes"] <= runtime["filesystem_total_bytes"]):
+            or not requirements.minimum_filesystem_free_bytes <= runtime["filesystem_free_bytes"]
+            <= runtime["filesystem_total_bytes"]):
         raise BootstrapError("M4 container memory or filesystem headroom insufficient")
 
 
@@ -493,10 +496,16 @@ def checked_profile(value: Any) -> dict[str, Any] | None:
         raise BootstrapError("invalid bound reference metadata")
     return value
 
+
+def _configuration(value: Any) -> WorkerProfile:
+    return T2V_WORKER if checked_profile(value) is None else I2V_WORKER
+
+
 def runtime_probe(timeout: float, python: str = sys.executable, *,
                   profile: dict[str, Any] | None = None, resource_root: Path | None = None) \
         -> dict[str, Any]:
-    checked_profile(profile)
+    configured = _configuration(profile)
+    requirements = configured.reference_runtime
     deadline = time.monotonic() + timeout
     code = ("import json,platform,torch,importlib.metadata as m;"
             "p=torch.cuda.get_device_properties(0);"
@@ -504,7 +513,7 @@ def runtime_probe(timeout: float, python: str = sys.executable, *,
             "torch_version=torch.__version__,torchvision_version=m.version('torchvision'),"
             "cuda_version=torch.version.cuda,gpu_raw_name=p.name,"
             "gpu_memory_mib=p.total_memory//1048576,cuda_available=torch.cuda.is_available())))")
-    if profile is not None:
+    if requirements is not None:
         code = ("import json,os,platform,torch,importlib.metadata as m;"
                 "p=torch.cuda.get_device_properties(0);"
                 "x=torch.ones((1,1,2,16),device='cuda');"
@@ -517,23 +526,26 @@ def runtime_probe(timeout: float, python: str = sys.executable, *,
                 "device_count=torch.cuda.device_count(),"
                 "cuda_kernel_ok=bool(torch.isfinite(y).all().item()))))")
     runtime = _json(bounded_process([python, "-c", code], timeout=timeout))
-    if (runtime["cuda_available"] is not True or runtime["gpu_raw_name"] != (M4_GPU if profile is not None else GPU)
+    if (runtime["cuda_available"] is not True or runtime["gpu_raw_name"] != configured.gpu
             or type(runtime["gpu_memory_mib"]) is not int
-            or runtime["gpu_memory_mib"] < (30720 if profile is not None else 24082)):
+            or runtime["gpu_memory_mib"] < configured.minimum_memory_mib):
         raise BootstrapError("worker runtime incompatible")
     for name in ("python_version", "torch_version", "torchvision_version", "cuda_version"):
         if re.fullmatch(r"[A-Za-z0-9.+_-]{1,80}", runtime[name]) is None:
             raise BootstrapError("invalid worker runtime version")
     if (re.fullmatch(r"\d{1,2}\.\d{1,2}", runtime["cuda_version"]) is None
-            or tuple(map(int, runtime["cuda_version"].split("."))) < (12, 8)):
+            or tuple(map(int, runtime["cuda_version"].split(".")))
+            < tuple(map(int, configured.cuda_version.split(".")))):
         raise BootstrapError("worker CUDA runtime incompatible")
-    if profile is not None and (runtime.get("torch_version") != "2.8.0+cu128"
-            or runtime.get("cuda_version") != "12.8" or runtime.get("capability") != [12, 0]
+    if requirements is not None and (runtime.get("torch_version") != requirements.torch_version
+            or runtime.get("cuda_version") != configured.cuda_version
+            or runtime.get("capability") != list(requirements.capability)
             or runtime.get("device_count") != 1 or type(runtime.get("device_count")) is not int
-            or not isinstance(runtime.get("arch_list"), list) or "sm_120" not in runtime["arch_list"]
+            or not isinstance(runtime.get("arch_list"), list)
+            or requirements.architecture not in runtime["arch_list"]
             or runtime.get("cuda_kernel_ok") is not True):
         raise BootstrapError("M4 worker stack or kernel incompatible")
-    if profile is not None:
+    if requirements is not None:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise BootstrapError("M4 runtime probe deadline exceeded")
@@ -545,7 +557,8 @@ def runtime_probe(timeout: float, python: str = sys.executable, *,
                 or not re.fullmatch(r"[0-9.]{3,32}", values[2].strip())):
             raise BootstrapError("M4 NVML memory evidence unavailable")
         total, reserved = (int(v.strip()) for v in values[:2])
-        if not runtime["gpu_memory_mib"] <= total <= 32768 or not 0 <= reserved < total:
+        if (not runtime["gpu_memory_mib"] <= total <= requirements.maximum_memory_mib
+                or not 0 <= reserved < total):
             raise BootstrapError("M4 NVML and CUDA memory evidence incompatible")
         runtime.update(nvml_total_mib=total, nvml_reserved_mib=reserved,
                        driver_version=values[2].strip())
@@ -603,17 +616,17 @@ class _DownloadRedirect(urllib.request.HTTPRedirectHandler):
 
 def download(root: Path, asset: dict[str, Any], deadline: float, *,
              profile: dict[str, Any] | None = None) -> dict[str, Any]:
-    checked_profile(profile)
-    revision = M4_REVISION if profile is not None else MODEL_REVISION
-    distribution = "Wan-2.2" if profile is not None else "Wan-2.1"
+    configured = _configuration(profile)
+    revision, distribution = configured.model_revision, configured.distribution
     path = asset["path"]
     if (not isinstance(path, str) or re.fullmatch(r"split_files/(diffusion_models|text_encoders|vae)"
             r"/[A-Za-z0-9._-]+\.safetensors", path) is None
             or asset["revision"] != revision
             or asset["url"] != "https://huggingface.co/Comfy-Org/" + distribution + "/resolve/"
             + revision + "/" + path or type(asset["size_bytes"]) is not int
-            or not 0 < asset["size_bytes"] <= (10_000_000_000 if profile is not None else 8 * 1024 ** 3)
-            or profile is not None and M4_FILES.get(path) != (asset["size_bytes"], asset["sha256"])
+            or not 0 < asset["size_bytes"] <= configured.maximum_asset_bytes
+            or configured.files and (path, asset["size_bytes"], asset["sha256"])
+            not in configured.files
             or re.fullmatch(r"[0-9a-f]{64}", asset["sha256"]) is None):
         raise BootstrapError("unapproved worker model asset", reason="setup_rejected")
     _, folder, filename = path.split("/")
@@ -678,9 +691,10 @@ def _setup(request: dict[str, Any], deadline: float,
 
     plan, selection = request["plan"], request["selection"]
     profile = checked_profile(request.get("profile"))
-    revision = M4_REVISION if profile is not None else MODEL_REVISION
+    configured = _configuration(profile)
+    revision = configured.model_revision
     root = worker_root(plan["session_id"])
-    if (selection["runner"]["revision"] != REVISION
+    if (selection["runner"]["revision"] != configured.runner_revision
             or selection["runner"]["custom_nodes"] != []
             or selection["model"]["revision"] != revision
             or request["image_digest"] != request["image_digest"].strip()
@@ -701,9 +715,9 @@ def _setup(request: dict[str, Any], deadline: float,
     run(["git", "init", str(comfy)])
     run(["git", "-C", str(comfy), "remote", "add", "origin",
          "https://github.com/Comfy-Org/ComfyUI.git"])
-    run(["git", "-C", str(comfy), "fetch", "--depth", "1", "origin", REVISION])
+    run(["git", "-C", str(comfy), "fetch", "--depth", "1", "origin", configured.runner_revision])
     run(["git", "-C", str(comfy), "checkout", "--detach", "FETCH_HEAD"])
-    if run(["git", "-C", str(comfy), "rev-parse", "HEAD"]).decode().strip() != REVISION:
+    if run(["git", "-C", str(comfy), "rev-parse", "HEAD"]).decode().strip() != configured.runner_revision:
         raise BootstrapError("worker source revision differs", reason="setup_rejected")
     stage("environment")
     run([sys.executable, "-m", "venv", "--system-site-packages", str(venv)], 60)
@@ -723,15 +737,17 @@ def _setup(request: dict[str, Any], deadline: float,
         raise BootstrapError("worker GPU stack changed", reason="setup_rejected")
     stage("metadata")
     freeze = run([python, "-m", "pip", "--isolated", "freeze", "--all"], 30)
-    private_write(root, "environment.json", encode({"source_revision": REVISION,
+    private_write(root, "environment.json", encode({"source_revision": configured.runner_revision,
         "requirements_sha256": hashlib.sha256((comfy / "requirements.txt").read_bytes()).hexdigest(),
         "freeze_sha256": hashlib.sha256(freeze).hexdigest(),
         "dependency_policy": "source-pinned requirements; GPU stack constrained; resolved versions recorded",
         "resolved_packages": freeze.decode()}))
-    if profile is not None:
-        if (shutil.disk_usage(root).free < 30*1024**3
-                or len(selection["model"]["files"]) != 3
-                or {a["path"] for a in selection["model"]["files"]} != set(M4_FILES)):
+    requirements = configured.reference_runtime
+    if requirements is not None:
+        if (shutil.disk_usage(root).free < requirements.minimum_filesystem_free_bytes
+                or len(selection["model"]["files"]) != len(configured.files)
+                or {a["path"] for a in selection["model"]["files"]}
+                != {path for path, _, _ in configured.files}):
             raise BootstrapError("M4 disk or weight manifest incompatible", reason="setup_rejected")
     files = []
     roles = {"diffusion_models": "diffusion_model", "text_encoders": "text_encoder", "vae": "vae"}
@@ -741,7 +757,7 @@ def _setup(request: dict[str, Any], deadline: float,
                      else download(root, asset, deadline))
     stage("verification")
     verification = {"schema_version": 1, "operator_verified": True, "worker_id": plan["pod_id"],
-        "server_revision": REVISION, "image_digest": request["image_digest"],
+        "server_revision": configured.runner_revision, "image_digest": request["image_digest"],
         **{name: runtime[name] for name in ("python_version", "torch_version", "cuda_version")},
         "gpu": {"name": selection["hardware"]["gpu"], "backend": "cuda",
                 "memory_mib": runtime["gpu_memory_mib"]},

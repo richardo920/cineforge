@@ -77,6 +77,7 @@ class _Job:
     deadline: float
     polls: int = 0
     output: dict[str, str] | None = None
+    result_deadline: float | None = None
     result: ExecutionResult | None = None
 
 
@@ -91,6 +92,7 @@ class ComfyExecutionProvider:
 
     def __init__(self, transport: ComfyTransport, workflow: WorkflowTemplate, *,
                  request_timeout_seconds: float = 10, job_timeout_seconds: float = 60,
+                 result_timeout_seconds: float = 10,
                  max_polls: int = 120, max_result_bytes: int = 32 * 1024 * 1024,
                  clock: Callable[[], float] = time.monotonic,
                  verified_server_revision: str | None = None,
@@ -105,6 +107,7 @@ class ComfyExecutionProvider:
         self._workflow = workflow
         self._request_timeout = positive_seconds(request_timeout_seconds)
         self._job_timeout = positive_seconds(job_timeout_seconds)
+        self._result_timeout = positive_seconds(result_timeout_seconds)
         self._max_polls = max_polls
         self._max_result_bytes = max_result_bytes
         self._clock = clock
@@ -215,6 +218,8 @@ class ComfyExecutionProvider:
                 raise ProviderError("incomplete ComfyUI success history")
             output = self._output(item.get("outputs"))
             job.output = output
+            # One window from the first observed success, never renewed by a retry.
+            job.result_deadline = self._clock() + self._result_timeout
             job.run = replace(job.run, status=RunStatus.SUCCEEDED,
                               started_at=job.run.started_at or self._now(), finished_at=self._now(),
                               artifact_ids=(f"comfy-{identity}",))
@@ -296,14 +301,21 @@ class ComfyExecutionProvider:
                 raise JobStateUncertainError("cancellation outcome is not confirmed")
             return job.run
 
+    def output_descriptor(self, job_id: str) -> dict[str, str] | None:
+        """Copy validated server metadata without I/O or a claim of retrieved bytes."""
+        with self._lock:
+            output = self._job(job_id).output
+            return None if output is None else dict(output)
+
     def result(self, job_id: str) -> ExecutionResult:
         with self._lock:
             job = self._job(job_id)
-            if job.run.status != RunStatus.SUCCEEDED or job.output is None:
+            if (job.run.status != RunStatus.SUCCEEDED or job.output is None
+                    or job.result_deadline is None):
                 raise ResultNotReadyError("ComfyUI job has no succeeded result")
             if job.result is None:
                 path = "/view?" + urlencode(job.output)
-                raw = self._call("GET", path, deadline=job.deadline,
+                raw = self._call("GET", path, deadline=job.result_deadline,
                                  max_bytes=self._max_result_bytes)
                 artifact = Artifact(
                     artifact_id=job.run.artifact_ids[0], shot_id=job.request.shot.shot_id,
