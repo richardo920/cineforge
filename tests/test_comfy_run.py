@@ -13,14 +13,14 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
-from cineforge.comfy import SUPPORTED_SERVER_REVISION
+from cineforge.comfy import SUPPORTED_SERVER_REVISION, ComfyExecutionProvider, JobDeadlineError
 from cineforge.comfy_policy import (
     ApprovedComfySelection,
     ComfyPolicyError,
     WorkerVerification,
     load_comfy_selection,
 )
-from cineforge.comfy_run import ComfyRunError, execute_comfy
+from cineforge.comfy_run import ComfyRunError, _BoundedTransport, execute_comfy
 from cineforge.contracts import Project, ProjectPlan, RunManifest, RunStatus, Scene, Shot
 from cineforge.private_store import ArtifactStoreError, PrivateRunDirectory, read_private_input
 from cineforge.providers import FakeExecutionProvider
@@ -407,6 +407,125 @@ class ComfyRunTests(unittest.TestCase):
         self.assertEqual(record["known_run"]["status"], "cancelled")
         self.assertTrue(record["cancellation"]["confirmed_terminal"])
         self.assertTrue(all(0 < call[3] <= 0.25 for call in self.wire.calls))
+
+    def test_reserved_transfer_survives_inference_cutoff_and_checkpoints_output_first(self):
+        now = [0.0]
+        original_request = self.wire.request
+        checkpoint = PrivateRunDirectory.checkpoint
+
+        def observed_checkpoint(store, payload):
+            checkpoint(store, payload)
+            if json.loads(payload)["outcome"] == "awaiting_artifact":
+                now[0] = 6.1
+
+        def request(method, path, body=None, **kwargs):
+            raw = original_request(method, path, body, **kwargs)
+            if path.startswith("/history/"):
+                now[0] = 5.9
+            if path.startswith("/view?"):
+                record = json.loads((self.output / "run.json").read_bytes())
+                self.assertEqual(record["server_output"]["filename"], "fixture.webm")
+                self.assertEqual(record["known_run"]["status"], "succeeded")
+                self.assertLessEqual(kwargs["timeout_seconds"], 3.8 + 1e-10)
+                now[0] += 3
+            return raw
+
+        self.wire.request = request
+        with patch.object(PrivateRunDirectory, "checkpoint", observed_checkpoint):
+            manifest = self.execute(timeout_seconds=10, result_timeout_seconds=4,
+                                    request_timeout_seconds=10, clock=lambda: now[0])
+        self.assertEqual(manifest.shot_runs[0].status, RunStatus.SUCCEEDED)
+        self.assertEqual(sum(c[1].startswith("/view?") for c in self.wire.calls), 1)
+        self.assertLess(now[0], 10)
+
+    def test_transfer_failure_retains_output_and_never_exceeds_either_deadline(self):
+        for succeeded_at, transfer_delay, expected_bound in ((5.9, 4.1, 4), (1, 4.1, 4)):
+            with self.subTest(succeeded_at=succeeded_at):
+                self.output = self.root / ("transfer-" + str(succeeded_at))
+                wire = WireFixture(self.selection)
+                now = [0.0]
+                original_request = wire.request
+
+                def request(method, path, body=None, **kwargs):
+                    raw = original_request(method, path, body, **kwargs)
+                    if path.startswith("/history/"):
+                        now[0] = succeeded_at
+                    if path.startswith("/view?"):
+                        self.assertLessEqual(kwargs["timeout_seconds"], expected_bound)
+                        now[0] += transfer_delay
+                    return raw
+
+                wire.request = request
+                with self.assertRaises(ComfyRunError):
+                    self.execute(timeout_seconds=10, result_timeout_seconds=4,
+                                 request_timeout_seconds=10, transport=wire, clock=lambda: now[0])
+                record = json.loads((self.output / "run.json").read_bytes())
+                self.assertEqual(record["outcome"], "incomplete")
+                self.assertEqual(record["known_run"]["job_id"], IDENTITY)
+                self.assertEqual(record["known_run"]["status"], "succeeded")
+                self.assertEqual(record["server_output"],
+                                 {"filename": "fixture.webm", "subfolder": "", "type": "output"})
+                self.assertEqual(record["request"], self.selection.request(self.plan.shots[0]).to_dict())
+                self.assertFalse(record["cancellation"]["attempted"])
+                self.assertNotIn("manifest", record)
+                self.assertEqual(sum(c[1] == "/prompt" for c in wire.calls), 1)
+                self.assertEqual(sum(c[1].startswith("/view?") for c in wire.calls), 1)
+                self.assertFalse(list(self.output.glob("artifact-*")))
+
+    def test_invalid_transfer_reserve_rejects_without_io(self):
+        for value in (0, True, float("nan"), float("inf"), 10, 11):
+            with self.subTest(value=value), self.assertRaises(ComfyRunError):
+                self.execute(timeout_seconds=10, result_timeout_seconds=value)
+            self.assertEqual(self.wire.calls, [])
+            self.assertFalse(self.output.exists())
+
+    def test_outer_transport_caps_a_longer_provider_transfer_without_losing_metadata(self):
+        now = [0.0]
+        original_request = self.wire.request
+
+        def request(method, path, body=None, **kwargs):
+            raw = original_request(method, path, body, **kwargs)
+            if path.startswith("/view?"):
+                self.assertEqual(kwargs["timeout_seconds"], 1)
+                now[0] = 10.1
+            return raw
+
+        self.wire.request = request
+        provider = ComfyExecutionProvider(
+            _BoundedTransport(self.wire, 10, lambda: now[0]), self.selection.workflow,
+            job_timeout_seconds=8, result_timeout_seconds=10, clock=lambda: now[0])
+        run = provider.submit(self.selection.request(self.plan.shots[0]), "synthetic-key")
+        now[0] = 7.9
+        provider.status(run.job_id)
+        now[0] = 9
+        with self.assertRaises(JobDeadlineError):
+            provider.result(run.job_id)
+        count = len(self.wire.calls)
+        with self.assertRaises(JobDeadlineError):
+            provider.result(run.job_id)
+        self.assertEqual(len(self.wire.calls), count)
+        self.assertEqual(provider.status(run.job_id).status, RunStatus.SUCCEEDED)
+        self.assertEqual(provider.output_descriptor(run.job_id)["filename"], "fixture.webm")
+
+    def test_tiny_default_timeout_reserves_half_without_extending_total(self):
+        now = [0.0]
+        original_request = self.wire.request
+
+        def request(method, path, body=None, **kwargs):
+            raw = original_request(method, path, body, **kwargs)
+            if path == "/prompt":
+                self.assertEqual(kwargs["timeout_seconds"], .5)
+            if path.startswith("/history/"):
+                now[0] = .49
+            if path.startswith("/view?"):
+                self.assertLessEqual(kwargs["timeout_seconds"], .5)
+                now[0] = .9
+            return raw
+
+        self.wire.request = request
+        manifest = self.execute(timeout_seconds=1, clock=lambda: now[0])
+        self.assertEqual(manifest.shot_runs[0].status, RunStatus.SUCCEEDED)
+        self.assertLess(now[0], 1)
 
     def test_connection_failure_after_submit_preserves_identity_without_error_leak(self):
         secret = "synthetic-private-status"  # pragma: allowlist secret - synthetic rejection fixture
