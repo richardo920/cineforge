@@ -15,7 +15,9 @@ from typing import Any
 
 from cineforge.comfy_runtime_plan import (
     COMFY_SOURCE,
+    COMFY_WHEEL_NOTICE_MAX,
     _files,
+    _wheel,
     comfy_plan,
     comfy_subject,
     notice_bytes,
@@ -31,6 +33,7 @@ def install_wheel(path: Path, target: Path, wheel: dict[str, Any],
                   shared_files: tuple[dict[str, Any], ...] = ()) -> None:
     # Validate reviewed bytes, headers, tags, notices and all destination conflicts
     # before the shared RECORD verifier/exclusive writer sees any extraction target.
+    _wheel(wheel)
     verify_binary(NativeBinary(str(path), wheel["size_bytes"], wheel["sha256"]), deadline)
     with zipfile.ZipFile(path) as archive:
         if len(archive.infolist()) > 100000:
@@ -80,12 +83,33 @@ def install_wheel(path: Path, target: Path, wheel: dict[str, Any],
                     or sorted(headers.get_all("Tag", [])) != wheel["tags"]):
                 raise ValueError("closed Comfy wheel tags differ")
         for name, size, sha in wheel["notices"]:
-            info = archive.getinfo(name)
-            if info.file_size != size or size > 4 * 1024**2:
-                raise ValueError("closed Comfy notice identity differs")
-            if hashlib.sha256(archive.read(name)).hexdigest() != sha:
-                raise ValueError("closed Comfy notice bytes differ")
+            _verify_notice(archive, name, size, sha, deadline)
+    nr_check(deadline)
     _install_wheel(path, target, wheel, manifest, deadline, comfy_layout=True)
+    nr_check(deadline)
+
+
+def _verify_notice(archive: zipfile.ZipFile, name: str, size: int, sha: str, deadline: float) -> None:
+    info = archive.getinfo(name)
+    if (type(size) is not int or not 0 <= size <= COMFY_WHEEL_NOTICE_MAX
+            or info.file_size != size):
+        raise ValueError("closed Comfy notice identity differs")
+    nr_check(deadline)
+    actual, count = hashlib.sha256(), 0
+    with archive.open(info) as stream:
+        while True:
+            nr_check(deadline)
+            block = stream.read(65536)
+            nr_check(deadline)
+            if not block:
+                break
+            count += len(block)
+            if count > size:
+                raise ValueError("closed Comfy notice exceeds declaration")
+            actual.update(block)
+    nr_check(deadline)
+    if count != size or actual.hexdigest() != sha:
+        raise ValueError("closed Comfy notice bytes differ")
     nr_check(deadline)
 
 

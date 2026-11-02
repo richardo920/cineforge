@@ -80,13 +80,12 @@ def wheel(
     output = io.BytesIO()
     with zipfile.ZipFile(output, "w") as archive:
         for path, raw in bodies.items():
+            info = zipfile.ZipInfo(path, date_time=(1980, 1, 1, 0, 0, 0))
+            info.create_system = 3
+            info.external_attr = 0o600 << 16
             if special and path == special[0]:
-                info = zipfile.ZipInfo(path)
-                info.create_system = 3
                 info.external_attr = special[1] << 16
-                archive.writestr(info, raw)
-            else:
-                archive.writestr(path, raw)
+            archive.writestr(info, raw)
     raw = output.getvalue()
     filename = name.replace("-", "_") + "-" + version + "-py3-none-any.whl"
     declaration = dict(
@@ -158,6 +157,34 @@ class Reviewer:
                 for key in ("artifacts", "dependencies", "licenses", "advisories", "abi")
             ),
         )
+
+
+class SyntheticWheelFixtureTests(unittest.TestCase):
+    def test_clock_boundary_does_not_change_zip_identity_or_special_file_modes(self):
+        inputs = dict(
+            additional={"fixture/special": b"inert synthetic link body"},
+            special=("fixture/special", stat.S_IFLNK | 0o700),
+        )
+        with patch.object(
+            zipfile.time, "localtime", return_value=(2026, 1, 1, 0, 0, 0, 3, 1, 0)
+        ) as clock:
+            first, declaration, _ = wheel(**inputs)
+            clock.assert_not_called()
+        with patch.object(
+            zipfile.time, "localtime", return_value=(2026, 1, 1, 0, 0, 2, 3, 1, 0)
+        ) as clock:
+            second, repeated, _ = wheel(**inputs)
+            clock.assert_not_called()
+        self.assertEqual(first, second)
+        self.assertEqual(declaration, repeated)
+        with zipfile.ZipFile(io.BytesIO(first)) as archive:
+            self.assertTrue(
+                all(info.date_time == (1980, 1, 1, 0, 0, 0) for info in archive.infolist())
+            )
+            self.assertEqual(archive.getinfo("fixture/__init__.py").external_attr >> 16, 0o600)
+            self.assertEqual(
+                archive.getinfo("fixture/special").external_attr >> 16, stat.S_IFLNK | 0o700
+            )
 
 
 class ComfyPlanTests(unittest.TestCase):
