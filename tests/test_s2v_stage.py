@@ -121,6 +121,7 @@ class PairTransferTests(unittest.TestCase):
         self.driver._request = lost
         runtime = object.__new__(ClosedComfyRuntime)  # Explicit trusted synthetic RPC stand-in.
         runtime._admit = lambda *args: None
+        runtime._poison = lambda: None
         runtime.prepare = lambda driver, selection, **kw: driver._request({
             "operation": "native_comfy_setup", "selection": selection.declarations}, 10)
         self.static_failure(lambda: self.driver.prepare(self.selection, runtime=runtime))
@@ -139,6 +140,7 @@ class PairTransferTests(unittest.TestCase):
         self.driver._request = reply
         runtime = object.__new__(ClosedComfyRuntime)  # Does not claim actual runtime proof.
         runtime._admit = lambda *args: None
+        runtime._poison = lambda: None
         runtime.prepare = lambda driver, selection, **kw: driver._request({
             "operation": "native_comfy_setup", "selection": selection.declarations}, 10)
         self.static_failure(lambda: self.driver.prepare(self.selection, runtime=runtime))

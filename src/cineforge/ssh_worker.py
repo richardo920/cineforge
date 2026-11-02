@@ -403,50 +403,70 @@ class SSHWorker:
     def prepare(self, selection: S2VSelection | None = None, *,
                 runtime: ClosedComfyRuntime | None = None,
                 absolute_deadline: float | None = None) -> WorkerVerification:
+        if type(self.selection) is not S2VServiceContext and (runtime is not None or absolute_deadline is not None):
+            raise WorkerError("closed runtime parameters apply only to the M5 service")
+        # Capture M5's cap before source hashing, rights or external review callbacks.
+        deadline = (request_deadline(1200, absolute_deadline, time.monotonic)
+                    if type(self.selection) is S2VServiceContext else None)
         self.check()
         if self.plan is None:
             raise WorkerError("worker guard not armed")
         timeout = min(1200, self.budget.remaining_seconds(self._key) - 120)
         if timeout <= 0:
             raise WorkerError("insufficient lease time for setup and shot retrieval")
-        declarations = self.selection.declarations
         if type(self.selection) is S2VServiceContext:
             if type(runtime) is not ClosedComfyRuntime:
                 raise WorkerError("M5 requires a separately checked closed Comfy runtime")
             if self._s2v_setup_attempted:
                 raise WorkerError("M5 service setup already attempted; inspect owned worker state")
+            assert deadline is not None
+            deadline = min(deadline, time.monotonic() + timeout)
             self._require_s2v(selection)
             assert selection is not None
-            declarations = selection.declarations
-            deadline = time.monotonic() + timeout
-            if absolute_deadline is not None:
-                if type(absolute_deadline) not in (int, float) or not math.isfinite(absolute_deadline):
-                    raise WorkerError("invalid M5 preparation absolute deadline")
-                deadline = min(deadline, absolute_deadline)
+            runtime._admit(self, deadline)
             if time.monotonic() >= deadline:
                 raise WorkerError("M5 preparation original deadline exhausted")
-            runtime._admit(self, deadline)
-            # Consume before any model setup/download request; a lost ACK is uncertain.
             self._s2v_setup_attempted = True
-            reply = runtime.prepare(self, selection, deadline=deadline)
-            worker_bootstrap.validate_s2v_runtime(reply["runtime"])
-        else:
-            reply = self._request({"operation": "setup", "plan": self.plan.to_dict(),
-                "selection": declarations, "image_digest": self.spec.image.split("@", 1)[1]}, timeout)
+            return self._prepare_closed_comfy(selection, runtime, deadline)
+        # Legacy M3/M4 policy and response declarations remain unchanged.
+        reply = self._request({"operation": "setup", "plan": self.plan.to_dict(),
+            "selection": self.selection.declarations, "image_digest": self.spec.image.split("@", 1)[1]}, timeout)
         result = WorkerVerification.from_dict(reply["verification"])
         result.require_matches(self.selection)
         if self._profile is not None:
-            self.runtime_evidence = self._runtime_evidence(reply["runtime"],
-                s2v=type(self.selection) is S2VServiceContext)
+            self.runtime_evidence = self._runtime_evidence(reply["runtime"])
         if (result.record["worker_id"] != self.plan.pod_id
                 or result.record["image_digest"] != self.spec.image.split("@", 1)[1]):
             raise WorkerError("worker verification identity differs")
-        if type(self.selection) is S2VServiceContext:
+        return result
+
+    def _prepare_closed_comfy(self, selection: S2VSelection, runtime: ClosedComfyRuntime,
+                              deadline: float) -> WorkerVerification:
+        result = None
+        failed = False
+        observed = None
+        try:
+            reply = runtime.prepare(self, selection, deadline=deadline)
+            worker_bootstrap.validate_s2v_runtime(reply["runtime"])
+            result = WorkerVerification.from_dict(reply["verification"])
+            result.require_matches(self.selection)
+            observed = self._runtime_evidence(reply["runtime"], s2v=True)
+            assert self.plan is not None
+            if (result.record["worker_id"] != self.plan.pod_id
+                    or result.record["image_digest"] != self.spec.image.split("@", 1)[1]):
+                raise ValueError
             self._require_s2v(selection)
+            self.check()
             if time.monotonic() >= deadline:
-                raise WorkerError("M5 preparation exceeded original deadline")
-            self._closed_comfy, self._comfy_selection = runtime, selection
-            self._prepared_s2v = result
+                raise ValueError
+        except BaseException:
+            failed = True
+            runtime._poison()
+        if failed or result is None or observed is None:
+            raise WorkerError("M5 Comfy preparation incomplete or unconfirmed; never replay")
+        self.runtime_evidence = observed
+        self._closed_comfy, self._comfy_selection = runtime, selection
+        self._prepared_s2v = result
         return result
 
     @staticmethod
@@ -866,7 +886,8 @@ class SupervisedComfyTransport:
         clock = time.monotonic if clock is None else clock
         deadline = request_deadline(timeout_seconds, absolute_deadline, clock)
         self.worker.check()
-        if method == "POST" and path == "/prompt":
+        if (type(self.worker.selection) is S2VServiceContext
+                and method == "POST" and path == "/prompt"):
             self.worker.verify_comfy_current(absolute_deadline=deadline)
         reserve = 120 if type(self.worker.selection) is S2VServiceContext else 0
         remaining = min(require_time(deadline, clock),

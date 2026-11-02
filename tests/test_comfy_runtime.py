@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import csv
 import hashlib
 import io
@@ -22,6 +23,7 @@ from cineforge import comfy_runtime_worker as worker
 from cineforge.comfy_runtime import CheckedComfyRuntime, ClosedComfyRuntime, ComfyClosureReview
 from cineforge.comfy_runtime_plan import (
     COMFY_ABI,
+    COMFY_EXECUTION,
     COMFY_FIXED,
     COMFY_POLICY,
     COMFY_REQUIREMENTS_SHA256,
@@ -115,7 +117,7 @@ def plan():
     for name in sorted(COMFY_ROOTS | set(COMFY_FIXED)):
         _, declaration, bodies = wheel(name, COMFY_FIXED.get(name, "1"))
         wheels.append(declaration)
-        manifest.update(bodies)
+        manifest.update({"site/" + name: body for name, body in bodies.items()})
     files = [[name, 1, HASH] for name in ("LICENSE", "comfy/cli_args.py", "main.py", "nodes.py")]
     files.append(["requirements.txt", 529, COMFY_REQUIREMENTS_SHA256])
     return dict(
@@ -131,6 +133,10 @@ def plan():
         review={
             key: HASH for key in ("artifacts", "dependencies", "licenses", "advisories", "abi")
         },
+        notices=[],
+        execution=dict(COMFY_EXECUTION),
+        shared_files=[],
+        executables=[],
     )
 
 
@@ -243,11 +249,13 @@ class ComfyExtractionTests(unittest.TestCase):
     def test_whole_wheel_record_headers_notices_and_exclusive_manifest_are_verified(self):
         raw, declaration, bodies = wheel()
         manifest = self.install(raw, declaration)
-        self.assertEqual(manifest, {name: (len(body), sha(body)) for name, body in bodies.items()})
+        self.assertEqual(
+            manifest, {"site/" + name: (len(body), sha(body)) for name, body in bodies.items()}
+        )
         with self.assertRaises(ValueError):
             self.install(raw, declaration, manifest)
         self.assertTrue(
-            all((self.target / name).read_bytes() == body for name, body in bodies.items())
+            all((self.target / "site" / name).read_bytes() == body for name, body in bodies.items())
         )
 
     def test_nested_vendor_distribution_and_pth_are_retained_as_data_without_execution(self):
@@ -261,9 +269,9 @@ class ComfyExtractionTests(unittest.TestCase):
             },
         )
         result = self.install(raw, declaration)
-        self.assertIn("distutils-precedence.pth", result)
+        self.assertIn("site/distutils-precedence.pth", result)
         self.assertEqual(
-            (self.target / "distutils-precedence.pth").read_bytes(),
+            (self.target / "site/distutils-precedence.pth").read_bytes(),
             bodies["distutils-precedence.pth"],
         )
         # Native108's default remains strict, not relaxed to accept Comfy's extras.
@@ -407,6 +415,9 @@ class ComfyControllerTests(unittest.TestCase):
                         "subject_sha256": comfy_subject(declaration),
                         "installed_sha256": nr_digest(declaration["installed"]),
                         "probe_sha256": HASH,
+                        "execution_sha256": nr_digest(declaration["execution"]),
+                        "jit_enabled": False,
+                        "phase": "after_core_startup",
                     },
                 )
             return {}
@@ -503,6 +514,9 @@ class ComfyBoundaryTests(unittest.TestCase):
             root = Path(temporary).resolve()
             runtime = root / "comfy-runtime"
             runtime.mkdir(mode=0o700)
+            (root / "comfy-notices").mkdir(mode=0o700)
+            (root / "comfy-notices-manifest.json").write_bytes(nr_encode([]))
+            (root / "comfy-notices-manifest.json").chmod(0o600)
             declaration = plan()
             manifest = {}
             for selected in declaration["wheels"]:
@@ -557,9 +571,10 @@ class ComfyBoundaryTests(unittest.TestCase):
             (ambient / "executable.pth").write_text(code)
             runtime = root / "comfy-runtime"
             runtime.mkdir(mode=0o700)
+            (runtime / "site").mkdir(mode=0o700)
             # Executable startup code is retained as a file, never benign or dropped.
-            (runtime / "executable.pth").write_text(code)
-            (runtime / "torch.py").write_text(code)
+            (runtime / "site/executable.pth").write_text(code)
+            (runtime / "site/torch.py").write_text(code)
             declaration = plan()
             executable = Path(sys.executable).resolve()
             declaration["interpreter"] = dict(
@@ -685,3 +700,285 @@ class ComfyBoundaryTests(unittest.TestCase):
                     self.assertTrue((fixture.remote / "failed").exists())
             finally:
                 fixture.doCleanups()
+
+
+class ComfyNoticeAndExecutionTests(unittest.TestCase):
+    def test_external_notice_bytes_are_bound_without_url_fetch_or_import_namespace(self):
+        declaration = plan()
+        selected = declaration["wheels"][0]
+        selected["notices"] = []
+        body = b"Synthetic notice, no distribution or ABI clearance.\n"
+        notice = {
+            "source_uri": "https://example.test/repository/immutable/LICENSE",
+            "source_revision": "a" * 40,
+            "packages": [{"name": selected["name"], "version": selected["version"]}],
+            "size_bytes": len(body),
+            "sha256": sha(body),
+            "content_base64": base64.b64encode(body).decode(),
+        }
+        declaration["notices"] = [notice]
+        with (
+            patch("urllib.request.build_opener", side_effect=AssertionError("network")),
+            patch("subprocess.Popen", side_effect=AssertionError("child")),
+        ):
+            checked = CheckedComfyRuntime.reviewed(declaration, Reviewer())
+            self.assertEqual(checked.current()["notices"], [notice])
+        original = comfy_subject(declaration)
+        for field, bad in (
+            ("sha256", "b" * 64),
+            ("size_bytes", True),
+            ("source_uri", "https://user:secret@example.test/LICENSE"),
+            ("source_revision", "PRIVATE-CANARY/path"),
+            ("content_base64", "INVALID"),
+            ("packages", [{"name": selected["name"], "version": "unreviewed"}]),
+        ):
+            changed = copy.deepcopy(declaration)
+            changed["notices"][0][field] = bad
+            reviewer = Reviewer()
+            with self.assertRaises(ValueError) as caught:
+                CheckedComfyRuntime.reviewed(changed, reviewer)
+            self.assertEqual(reviewer.calls, 0)
+            self.assertIsNone(caught.exception.__context__)
+            self.assertNotIn("secret", str(caught.exception))
+        changed = copy.deepcopy(declaration)
+        changed["notices"][0]["source_revision"] = "b" * 40
+        self.assertNotEqual(comfy_subject(changed), original)
+
+    def test_jit_off_is_fixed_preimport_policy_and_actual_state_must_be_false(self):
+        declaration = plan()
+        command, environment = launcher.launch_command(
+            declaration, Path("/fixture"), Path("/native"), "probe", time.monotonic() + 5
+        )
+        self.assertEqual(environment["PYTORCH_JIT"], "0")
+        self.assertIn("-S", command)
+        torch = SimpleNamespace(jit=SimpleNamespace(_state=SimpleNamespace(_enabled=False)))
+        with patch.dict(os.environ, {"PYTORCH_JIT": "0"}):
+            launcher._require_jit_disabled(torch)
+            torch.jit._state._enabled = True
+            with self.assertRaises(ValueError):
+                launcher._require_jit_disabled(torch)
+        torch.jit._state._enabled = False
+        with patch.dict(os.environ, {"PYTORCH_JIT": "1"}):
+            with self.assertRaises(ValueError):
+                launcher._require_jit_disabled(torch)
+        changed = copy.deepcopy(declaration)
+        changed["execution"]["PYTORCH_JIT"] = "1"
+        reviewer = Reviewer()
+        with self.assertRaises(ValueError):
+            CheckedComfyRuntime.reviewed(changed, reviewer)
+        self.assertEqual(reviewer.calls, 0)
+        value = {
+            "runtime": {},
+            "imports": {},
+            "codecs": {},
+            "abi": COMFY_ABI,
+            "native_files": {},
+            "execution_sha256": nr_digest(COMFY_EXECUTION),
+            "jit_enabled_before": False,
+            "jit_enabled_after": True,
+        }
+        with patch("cineforge.worker_bootstrap.resource_evidence") as resources:
+            with self.assertRaises(ValueError):
+                launcher.probe_result(value, Path("/fixture"), declaration, time.monotonic() + 5)
+            resources.assert_not_called()
+
+    def test_only_explicit_empty_nvidia_namespace_can_be_shared_without_overwrite(self):
+        from cineforge.comfy_runtime_plan import COMFY_SHARED_EMPTY_SHA256, COMFY_SHARED_OWNERS
+
+        shared = {
+            "path": "nvidia/__init__.py",
+            "size_bytes": 0,
+            "sha256": COMFY_SHARED_EMPTY_SHA256,
+            "owners": list(COMFY_SHARED_OWNERS),
+        }
+        with tempfile.TemporaryDirectory(prefix="cf-comfy-shared-") as temporary:
+            root = Path(temporary).resolve()
+            target = root / "runtime"
+            target.mkdir(mode=0o700)
+            manifest = {}
+            inode = None
+            for name in COMFY_SHARED_OWNERS[:2]:
+                raw, declaration, _ = wheel(name, additional={"nvidia/__init__.py": b""})
+                path = root / declaration["filename"]
+                path.write_bytes(raw)
+                path.chmod(0o600)
+                worker.install_wheel(
+                    path,
+                    target,
+                    declaration,
+                    manifest,
+                    time.monotonic() + 5,
+                    shared_files=(shared,),
+                )
+                current = (target / "site/nvidia/__init__.py").stat().st_ino
+                if inode is not None:
+                    self.assertEqual(
+                        current, inode
+                    )  # Existing owned file was verified, not overwritten.
+                inode = current
+            (target / "site/nvidia/__init__.py").write_bytes(b"tamper")
+            name = COMFY_SHARED_OWNERS[2]
+            raw, declaration, _ = wheel(name, additional={"nvidia/__init__.py": b""})
+            path = root / declaration["filename"]
+            path.write_bytes(raw)
+            path.chmod(0o600)
+            with self.assertRaises(ValueError):
+                worker.install_wheel(
+                    path,
+                    target,
+                    declaration,
+                    manifest,
+                    time.monotonic() + 5,
+                    shared_files=(shared,),
+                )
+        declaration = plan()
+        declaration["shared_files"] = [shared]
+        with self.assertRaises(ValueError):  # Missing exact owners cannot declare a shared target.
+            CheckedComfyRuntime.reviewed(declaration, Reviewer())
+
+
+class ComfyPreimportTests(unittest.TestCase):
+    def test_unsupported_actual_abi_refuses_before_any_third_party_import(self):
+        import importlib
+        import sys
+
+        with (
+            patch.object(sys, "version_info", (3, 14, 0)),
+            patch.object(importlib, "import_module") as imports,
+        ):
+            with self.assertRaises(ValueError):
+                launcher._observe(Path("/fixture"), time.monotonic() + 5)
+            imports.assert_not_called()
+
+    def test_exact_manpage_is_retained_outside_site_and_other_data_schemes_refuse(self):
+        with tempfile.TemporaryDirectory(prefix="cf-comfy-data-") as temporary:
+            root = Path(temporary).resolve()
+            target = root / "runtime"
+            target.mkdir(mode=0o700)
+            member = "sympy-1.14.0.data/data/share/man/man1/isympy.1"
+            raw, declaration, bodies = wheel(
+                "sympy", "1.14.0", additional={member: b"synthetic manpage"}
+            )
+            path = root / declaration["filename"]
+            path.write_bytes(raw)
+            path.chmod(0o600)
+            manifest = {}
+            worker.install_wheel(path, target, declaration, manifest, time.monotonic() + 5)
+            data = target / "data/sympy-1.14.0/isympy.1"
+            self.assertEqual(data.read_bytes(), bodies[member])
+            self.assertIn("data/sympy-1.14.0/isympy.1", manifest)
+            self.assertFalse((target / "site" / member).exists())
+            for member in ("sympy-1.14.0.data/scripts/exec", "sympy-1.14.0.data/data/foreign.py"):
+                raw, declaration, _ = wheel("sympy", "1.14.0", additional={member: b"unapproved"})
+                path = root / "unsupported.whl"
+                path.write_bytes(raw)
+                path.chmod(0o600)
+                with self.assertRaises(ValueError):
+                    worker.install_wheel(path, target, declaration, {}, time.monotonic() + 5)
+
+    def test_real_child_positive_control_executes_pth_but_product_path_does_not(self):
+        import subprocess
+        import sys
+
+        from cineforge.native_remote_package import native_package
+        from cineforge.native_remote_plan import nr_json
+
+        with tempfile.TemporaryDirectory(prefix="cf-comfy-pth-") as temporary:
+            root = Path(temporary).resolve()
+            site = root / "comfy-runtime/site"
+            site.mkdir(parents=True, mode=0o700)
+            marker = root / "executable-pth-ran"
+            code = "import pathlib;pathlib.Path(" + repr(str(marker)) + ").write_text('ran')\n"
+            (site / "executable.pth").write_text(code)
+            control = subprocess.run(
+                [
+                    sys.executable,
+                    "-I",
+                    "-B",
+                    "-S",
+                    "-c",
+                    "import site,sys;site.addsitedir(sys.argv[1])",
+                    str(site),
+                ],
+                capture_output=True,
+                timeout=5,
+            )
+            self.assertEqual(control.returncode, 0)
+            self.assertTrue(marker.exists())
+            marker.unlink()
+            package = root / "firstparty/cineforge"
+            package.mkdir(parents=True, mode=0o700)
+            for name, body in nr_json(native_package()[0]).items():
+                (package / name).write_bytes(base64.b64decode(body))
+            declaration = plan()
+            (root / "comfy-selection.json").write_bytes(nr_encode(declaration))
+            (root / "comfy-selection.json").chmod(0o600)
+            # Synthetic first-party import-order fixture only: integrity/ABI have
+            # separate real-file tests; no SDK/GPU/module is imported or attested.
+            probe = (
+                "import os,sys;sys.path.insert(0,sys.argv[1]);"
+                "from cineforge import comfy_runtime_launcher as l,comfy_runtime_worker as w;"
+                "l._require_abi=lambda:None;w.verify_runtime=lambda *a:None;w.verify_source=lambda *a:None;"
+                "l._observe=lambda *a:dict(synthetic_first_party=True);"
+                "sys.argv=['fixture',sys.argv[1],sys.argv[2],'probe',sys.argv[3]];os._exit(l.main())"
+            )
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-I",
+                    "-B",
+                    "-S",
+                    "-c",
+                    probe,
+                    str(root / "firstparty"),
+                    str(root),
+                    str(time.monotonic() + 5),
+                ],
+                capture_output=True,
+                timeout=8,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(nr_json(result.stdout), {"synthetic_first_party": True})
+            self.assertFalse(marker.exists())
+
+
+class ComfyExecutableTests(unittest.TestCase):
+    def test_only_pinned_known_elf_helpers_get_owner_execute_and_modes_are_rechecked(self):
+        declaration = plan()
+        header = bytearray(64)
+        header[:6] = b"\x7fELF\x02\x01"
+        header[16:18] = (2).to_bytes(2, "little")
+        header[18:20] = (62).to_bytes(2, "little")
+        body = bytes(header)  # Synthetic header, deliberately never executed.
+        relative = "site/torch/bin/torch_shm_manager"
+        declaration["installed"].append([relative, len(body), sha(body)])
+        declaration["installed"].sort()
+        declaration["executables"] = [
+            {"path": relative, "size_bytes": len(body), "sha256": sha(body), "mode": 0o700}
+        ]
+        with tempfile.TemporaryDirectory(prefix="cf-comfy-executable-") as temporary:
+            root = Path(temporary).resolve()
+            path = root / "comfy-runtime" / relative
+            path.parent.mkdir(parents=True, mode=0o700)
+            path.write_bytes(body)
+            path.chmod(0o600)
+            with patch("subprocess.Popen", side_effect=AssertionError("execution")):
+                worker.set_executables(declaration, root, time.monotonic() + 5)
+            self.assertEqual(path.stat().st_mode & 0o7777, 0o700)
+            path.write_bytes(b"wrong executable identity")
+            with self.assertRaises(ValueError):
+                worker.set_executables(declaration, root, time.monotonic() + 5)
+        for name, bad in (
+            ("mode", 0o4755),
+            ("mode", True),
+            ("sha256", "b" * 64),
+            ("path", "site/arbitrary.py"),
+        ):
+            changed = copy.deepcopy(declaration)
+            changed["executables"][0][name] = bad
+            with self.assertRaises(ValueError):
+                CheckedComfyRuntime.reviewed(changed, Reviewer())
+        changed = copy.deepcopy(declaration)
+        changed["executables"] = []
+        with self.assertRaises(ValueError):
+            CheckedComfyRuntime.reviewed(changed, Reviewer())

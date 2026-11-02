@@ -1,6 +1,8 @@
 """Closed M5 Comfy declarations; artifact/ABI review is a separate trusted input."""
 from __future__ import annotations
 
+import base64
+import hashlib
 import re
 from typing import Any
 from urllib.parse import urlsplit
@@ -11,6 +13,17 @@ from cineforge.s2v_profile import IMAGE
 from cineforge.worker_profiles import S2V_WORKER
 
 COMFY_POLICY = "m5-closed-wheel-runtime-v1"
+COMFY_EXECUTION = {"PYTORCH_JIT": "0", "TORCH_COMPILE_DISABLE": "1",
+                   "attention": "pytorch-sdpa", "serialized_jit": "forbidden",
+                   "model_format": "four-fixed-safetensors", "custom_nodes": False,
+                   "import_layout": "site-only-fixed-sympy-manpage-v1"}
+COMFY_SHARED_OWNERS = tuple(sorted("nvidia-" + name + "-cu12" for name in (
+    "cublas", "cuda-cupti", "cuda-nvrtc", "cuda-runtime", "cufft", "cufile", "curand",
+    "cusolver", "cusparse", "nvjitlink", "nvtx")))
+COMFY_SHARED_EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"  # pragma: allowlist secret - public empty-body hash
+COMFY_EXECUTABLES = frozenset({"site/torch/bin/protoc", "site/torch/bin/protoc-3.13.0.0",
+    "site/torch/bin/torch_shm_manager", "site/triton/backends/nvidia/bin/cuobjdump",
+    "site/triton/backends/nvidia/bin/nvdisasm", "site/triton/backends/nvidia/bin/ptxas"})
 COMFY_ABI = "cpython311-linux-x86_64-glibc2.28"
 COMFY_SOURCE = S2V_WORKER.runner_revision
 COMFY_REQUIREMENTS_SHA256 = "86abf78ac24e7dfd6ba66c8fc031b253be0eb4f3c6f048e7f32d5405986eb991"  # pragma: allowlist secret - public source hash
@@ -89,17 +102,41 @@ def _wheel(value: Any) -> None:
     expected_tags = sorted(f"{p}-{abi}-{t}" for p in python.split(".") for t in platform.split("."))
     if value["tags"] != expected_tags:
         raise ValueError("closed Comfy filename and WHEEL tags disagree")
-    _files(value["notices"], "/closed-comfy/notices")
-    if not value["notices"]:
-        raise ValueError("closed Comfy wheel notices missing")
+    if type(value["notices"]) is not list:
+        raise ValueError("closed Comfy wheel notice declaration missing")
+    if value["notices"]:
+        _files(value["notices"], "/closed-comfy/notices")
+
+
+def notice_bytes(value: Any) -> bytes:
+    _keys(value, {"source_uri", "source_revision", "packages", "size_bytes", "sha256", "content_base64"})
+    if (type(value["size_bytes"]) is not int or not 1 <= value["size_bytes"] <= 1024**2
+            or type(value["content_base64"]) is not str or len(value["content_base64"]) > 1400000
+            or type(value["source_revision"]) is not str
+            or re.fullmatch(r"[A-Za-z0-9._-]{1,128}", value["source_revision"]) is None
+            or value["source_revision"].lower() in {"unknown", "pending", "unreviewed", "main", "master", "head", "latest"}):
+        raise ValueError("invalid fixed Comfy notice addendum")
+    nr_hash(value["sha256"])
+    uri = urlsplit(value["source_uri"]) if type(value["source_uri"]) is str else None
+    if (uri is None or len(value["source_uri"]) > 4096 or uri.scheme != "https"
+            or not uri.hostname or uri.username or uri.password or not uri.path
+            or uri.query or uri.fragment):
+        raise ValueError("invalid captured Comfy notice provenance")
+    raw = base64.b64decode(value["content_base64"], validate=True)
+    if (len(raw) != value["size_bytes"] or hashlib.sha256(raw).hexdigest() != value["sha256"]
+            or base64.b64encode(raw).decode() != value["content_base64"] or "\x00" in raw.decode("utf-8")):
+        raise ValueError("captured Comfy notice bytes differ")
+    return raw
 
 
 def comfy_plan(value: Any) -> dict[str, Any]:
     _keys(value, {"version", "policy", "image", "abi", "source", "wheels", "installed",
-                  "interpreter", "native", "review"})
+                  "interpreter", "native", "review", "notices", "execution", "shared_files", "executables"})
+    _keys(value["execution"], set(COMFY_EXECUTION))
     if (type(value["version"]) is not int or value["version"] != 1
             or value["policy"] != COMFY_POLICY or value["image"] != IMAGE
-            or value["abi"] != COMFY_ABI):
+            or value["abi"] != COMFY_ABI or value["execution"] != COMFY_EXECUTION
+            or any(type(value["execution"].get(k)) is not type(v) for k, v in COMFY_EXECUTION.items())):
         raise ValueError("unsupported closed Comfy recipe")
     source = value["source"]
     _keys(source, {"revision", "size_bytes", "sha256", "files"})
@@ -121,9 +158,50 @@ def comfy_plan(value: Any) -> dict[str, Any]:
     if (names != sorted(set(names)) or not COMFY_ROOTS | set(COMFY_FIXED) <= set(names)
             or sum(w["size_bytes"] for w in wheels) > 8 * 1024**3):
         raise ValueError("closed Comfy dependency set differs")
+    expected_shared = [{"path": "nvidia/__init__.py", "size_bytes": 0,
+        "sha256": COMFY_SHARED_EMPTY_SHA256, "owners": list(COMFY_SHARED_OWNERS)}]
+    shared = value["shared_files"]
+    if (type(shared) is not list or shared not in ([], expected_shared)
+            or bool(set(names) & set(COMFY_SHARED_OWNERS)) != bool(shared)
+            or shared and (not set(COMFY_SHARED_OWNERS) <= set(names)
+                           or type(shared[0]["size_bytes"]) is not int)):
+        raise ValueError("closed Comfy shared namespace declaration differs")
+    if type(value["notices"]) is not list or len(value["notices"]) > 256:
+        raise ValueError("incomplete captured Comfy notices")
+    covered = set()
+    total_notices = 0
+    for notice in value["notices"]:
+        total_notices += len(notice_bytes(notice))
+        packages = notice["packages"]
+        if type(packages) is not list or not packages or len(packages) > 256:
+            raise ValueError("Comfy notice version mapping missing")
+        selected = {w["name"]: w["version"] for w in wheels}
+        for package in packages:
+            _keys(package, {"name", "version"})
+            if package["name"] not in selected or package["version"] != selected[package["name"]]:
+                raise ValueError("Comfy notice version mapping differs")
+            covered.add(package["name"])
+    if total_notices > 4 * 1024**2 or any(not w["notices"] and w["name"] not in covered for w in wheels):
+        raise ValueError("Comfy package notices incomplete or excessive")
     installed = _files(value["installed"], "/closed-comfy/runtime")
-    if "comfyui_frontend_package/static/index.html" not in {p for p, _, _, _ in installed}:
+    if "site/comfyui_frontend_package/static/index.html" not in {p for p, _, _, _ in installed}:
         raise ValueError("closed Comfy installed manifest missing")
+    indexed_installed = {p: (size, sha) for p, size, _, sha in installed}
+    executables = value["executables"]
+    if type(executables) is not list:
+        raise ValueError("closed Comfy executable declaration missing")
+    executable_paths = []
+    for executable in executables:
+        _keys(executable, {"path", "size_bytes", "sha256", "mode"})
+        if (type(executable["path"]) is not str or executable["path"] not in COMFY_EXECUTABLES
+                or type(executable["mode"]) is not int or executable["mode"] != 0o700
+                or type(executable["size_bytes"]) is not int
+                or indexed_installed.get(executable["path"]) != (executable["size_bytes"], executable["sha256"])):
+            raise ValueError("closed Comfy executable identity differs")
+        executable_paths.append(executable["path"])
+    if (executable_paths != sorted(set(executable_paths))
+            or set(executable_paths) != COMFY_EXECUTABLES & set(indexed_installed)):
+        raise ValueError("closed Comfy executable closure incomplete")
     _keys(value["interpreter"], {"path", "size_bytes", "sha256"})
     NativeBinary(**value["interpreter"])
     if type(value["native"]) is not list or not 1 <= len(value["native"]) <= 256:

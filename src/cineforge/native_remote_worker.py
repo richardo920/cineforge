@@ -106,13 +106,15 @@ def _parts(name: str) -> tuple[str, ...]:
     return tuple(name.split("/"))
 
 
-def _destination(name: str) -> str:
+def _destination(name: str, *, comfy_layout: bool = False) -> str:
     parts = _parts(name)
+    if comfy_layout and parts == ("sympy-1.14.0.data", "data", "share", "man", "man1", "isympy.1"):
+        return "data/sympy-1.14.0/isympy.1"
     if parts[0].endswith(".data"):
         if len(parts) < 3 or parts[1] not in ("purelib", "platlib"):
             raise ValueError("unsupported native wheel relocation")
-        return "/".join(parts[2:])
-    return name
+        name = "/".join(parts[2:])
+    return "site/" + name if comfy_layout else name
 
 
 def _parent(root: Path, relative: str) -> Path:
@@ -132,7 +134,7 @@ def _install_wheel(
     declaration: dict[str, Any],
     manifest: dict[str, tuple[int, str]],
     deadline: float,
-    *, top_level_metadata: bool = False,
+    *, top_level_metadata: bool = False, comfy_layout: bool = False,
 ) -> None:
     nr_private(path)
     with zipfile.ZipFile(path) as archive:
@@ -189,7 +191,7 @@ def _install_wheel(
             mode = info.external_attr >> 16
             if mode and stat.S_IFMT(mode) not in (0, stat.S_IFREG):
                 raise ValueError("native wheel special file rejected")
-            relative = _destination(info.filename)
+            relative = _destination(info.filename, comfy_layout=comfy_layout)
             target = _parent(root, relative)
             if info.file_size > 16 * 1024**3 or total + info.file_size > 64 * 1024**3:
                 raise ValueError("native runtime exceeds manifest bound")

@@ -50,9 +50,16 @@ class CheckedComfyRuntime:
 
     @classmethod
     def reviewed(cls, plan: dict[str, Any], verifier: ComfyClosureVerifier) -> CheckedComfyRuntime:
-        raw = nr_encode(comfy_plan(plan))
-        if not 1 <= len(raw) <= NR_BLOB_MAX:
-            raise ValueError("closed Comfy declaration exceeds bound")
+        raw = None
+        try:
+            encoded = nr_encode(comfy_plan(plan))
+            if not 1 <= len(encoded) <= NR_BLOB_MAX:
+                raise ValueError
+            raw = encoded
+        except BaseException:
+            pass
+        if raw is None:
+            raise ValueError("invalid closed Comfy declaration")
         result = object.__new__(cls)
         object.__setattr__(result, "_declaration", raw)
         object.__setattr__(result, "_verifier", verifier)
@@ -94,6 +101,10 @@ class ClosedComfyRuntime:
         self._prepared = False
         self._subject: str | None = None
         self._expires_unix: float | None = None
+
+    def _poison(self) -> None:
+        self._unresolved = True
+        self._bridge._unresolved = True
 
     def _admit(self, worker: Any, deadline: float) -> dict[str, Any]:
         if (self._unresolved or self._bridge._worker is not worker
@@ -157,17 +168,20 @@ class ClosedComfyRuntime:
             self._prepared = True
             return {"verification": reply["verification"], "runtime": reply["runtime"]}
         except BaseException:
-            self._unresolved = True
-            self._bridge._unresolved = True
+            self._poison()
             raise ValueError("closed Comfy setup incomplete or unconfirmed; never replay") from None
 
     def _check_fact(self, fact: Any) -> None:
-        if (type(fact) is not dict or set(fact) != {"subject_sha256", "installed_sha256", "probe_sha256"}
-                or fact["subject_sha256"] != self._subject):
+        if (type(fact) is not dict or set(fact) != {"subject_sha256", "installed_sha256", "probe_sha256",
+                                                 "execution_sha256", "jit_enabled", "phase"}
+                or fact["subject_sha256"] != self._subject or fact["jit_enabled"] is not False
+                or fact["phase"] != "after_core_startup"):
             raise ValueError("closed Comfy worker facts differ")
-        for sha in fact.values():
-            nr_hash(sha)
-        if fact["installed_sha256"] != hashlib.sha256(nr_encode(self._checked.current()["installed"])).hexdigest():
+        for name in ("subject_sha256", "installed_sha256", "probe_sha256", "execution_sha256"):
+            nr_hash(fact[name])
+        plan = self._checked.current()
+        if (fact["installed_sha256"] != hashlib.sha256(nr_encode(plan["installed"])).hexdigest()
+                or fact["execution_sha256"] != hashlib.sha256(nr_encode(plan["execution"])).hexdigest()):
             raise ValueError("closed Comfy installed closure differs")
 
     def verify(self, worker: Any, selection: Any, *, deadline: float) -> None:
@@ -183,6 +197,5 @@ class ClosedComfyRuntime:
             if time.monotonic() >= deadline:
                 raise ValueError
         except BaseException:
-            self._unresolved = True
-            self._bridge._unresolved = True
+            self._poison()
             raise ValueError("closed Comfy current verification failed") from None
