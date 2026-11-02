@@ -29,7 +29,8 @@ from cineforge.workflows import canonical, strict_object
 def inspect_s2v_media(path: Path, *, absolute_deadline: float | None = None,
                       clock: Callable[[], float] = time.monotonic) -> dict[str, Any]:
     """Fixed local Matroska/VP9 probe; no network protocols or arbitrary media URL."""
-    result = None
+    candidate = None
+    deadline = 0.0
     try:
         deadline = request_deadline(10, absolute_deadline, clock)
         binary = shutil.which("ffprobe")
@@ -57,15 +58,21 @@ def inspect_s2v_media(path: Path, *, absolute_deadline: float | None = None,
         duration = float(data["format"]["duration"])
         if not math.isfinite(duration) or abs(duration - profile.DURATION) > 1 / profile.FPS:
             raise ValueError
-        result = {"media_type": "video/webm", "codec": "vp9", "pixel_format": "yuv420p",
+        candidate = {"media_type": "video/webm", "codec": "vp9", "pixel_format": "yuv420p",
             "width": profile.WIDTH, "height": profile.HEIGHT, "decoded_frames": profile.FRAMES,
             "fps": float(profile.FPS), "duration_seconds": duration}
+    except (Exception, KeyboardInterrupt):
+        candidate = None
+    # run_process has completed all owned-process cleanup before this checkout.
+    # Never retain a candidate as success after any caught finalization failure.
+    failed = False
+    try:
         require_time(deadline, clock)
     except (Exception, KeyboardInterrupt):
-        pass
-    if result is None:
+        failed = True
+    if failed or candidate is None:
         raise S2VError("bounded local S2V video inspection unavailable or rejected")
-    return result
+    return candidate
 
 
 def technical_result(selection: S2VSelection, manifest: RunManifest, directory: Path,
@@ -122,8 +129,14 @@ def technical_result(selection: S2VSelection, manifest: RunManifest, directory: 
             "visible_lip_sync": "not_assessed", "identity_review": "pending_human_review",
             "language_intelligibility": "not_assessed", "export_authority": "none"}
     except (Exception, KeyboardInterrupt):
-        pass
-    if result is None:
+        result = None
+    failed = False
+    try:
+        if absolute_deadline is not None:
+            require_time(absolute_deadline, clock)
+    except (Exception, KeyboardInterrupt):
+        failed = True
+    if failed or result is None:
         raise S2VError("actual S2V video or paired speech timing contract rejected")
     return result
 
@@ -162,6 +175,8 @@ def run_s2v(selection: S2VSelection, verification: WorkerVerification, driver: S
     Requires already checked paired staging; no private workflow reaches an unproven
     forward. Existing execute_comfy owns atomic cancellation and bounded result reserve.
     Any attempted run consumes this nonserialized intent, including lost acknowledgements.
+    The durable journal retains generated evidence, never review readiness. Only the
+    returned copy is finalized after all owned cleanup and fresh current admission.
     """
     record = None
     try:
@@ -221,8 +236,10 @@ def run_s2v(selection: S2VSelection, verification: WorkerVerification, driver: S
                 measured = technical_result(selection, manifest, directory / "shot", inspect_media,
                                             absolute_deadline=deadline, clock=clock)
                 _admit(selection, verification, driver, deadline, clock)
-                record.update(outcome="pending_human_review", technical_result=measured,
-                              human_review="pending_human_review")
+                # A durable candidate is historical evidence, not a finalized run.
+                # In particular, closing this directory can still fail or be late.
+                record.update(outcome="generated", technical_candidate=measured,
+                              human_review="unavailable")
                 checkpoint(store)
             except (Exception, KeyboardInterrupt):
                 failed = True
@@ -234,6 +251,21 @@ def run_s2v(selection: S2VSelection, verification: WorkerVerification, driver: S
                     pass
     except (Exception, KeyboardInterrupt):
         failed = True
-    if failed:
+    finalized = None
+    if not failed:
+        try:
+            # This is deliberately outside the storage context and every owned
+            # finalizer. Never repair/reopen a closed journal to grant readiness.
+            _admit(selection, verification, driver, deadline, clock)
+            finalized = strict_object(canonical(record))
+            candidate = finalized.pop("technical_candidate")
+            finalized.update(outcome="pending_human_review", technical_result=candidate,
+                             human_review="pending_human_review")
+            finalized = strict_object(canonical(finalized))
+            # Last observed checkout follows callbacks, validation and copying.
+            _window(driver, deadline, clock)
+        except (Exception, KeyboardInterrupt):
+            finalized = None
+    if failed or finalized is None:
         raise S2VError("S2V run incomplete; inspect private run/shot state before any new request")
-    return record
+    return finalized

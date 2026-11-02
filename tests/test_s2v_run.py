@@ -5,6 +5,7 @@ import copy
 import json
 import unittest
 from dataclasses import replace
+from pathlib import Path
 from unittest.mock import patch
 
 import test_s2v_stage as stage_fixtures
@@ -16,7 +17,7 @@ from cineforge import s2v_profile as profile
 from cineforge.comfy_run import execute_comfy
 from cineforge.private_store import PrivateRunDirectory
 from cineforge.s2v import S2VError
-from cineforge.s2v_run import run_s2v
+from cineforge.s2v_run import inspect_s2v_media, run_s2v
 from cineforge.ssh_worker import SupervisedComfyTransport
 
 
@@ -66,6 +67,29 @@ class S2VWire(WireFixture):
         return reply
 
 
+class S2VInspectionBoundaryTests(unittest.TestCase):
+    def test_direct_inspector_rejects_metadata_returned_after_actual_probe_finally(self):
+        now, events = [100.0], []
+        payload = json.dumps({"streams": [{"codec_type": "video", "codec_name": "vp9",
+            "pix_fmt": "yuv420p", "width": 832, "height": 480, "nb_read_frames": "77",
+            "avg_frame_rate": "16/1"}], "format": {"duration": "4.8125"}}).encode()
+        def process(*args, **kwargs):
+            self.assertEqual(kwargs["timeout"], 3)
+            try:
+                return payload
+            finally:
+                events.append("probe process cleanup completed")
+                now[0] = 104
+        with patch("cineforge.s2v_run.shutil.which", return_value="/synthetic/ffprobe"), \
+                patch("cineforge.s2v_run.run_process", side_effect=process):
+            with self.assertRaises(S2VError) as caught:
+                inspect_s2v_media(Path("/synthetic/clip.webm"),
+                                 absolute_deadline=103, clock=lambda: now[0])
+        self.assertEqual(events, ["probe process cleanup completed"])
+        self.assertIsNone(caught.exception.__context__)
+
+
+
 class S2VRunTests(unittest.TestCase):
     def setUp(self):
         self.fixture = stage_fixtures.PairTransferTests(
@@ -98,7 +122,14 @@ class S2VRunTests(unittest.TestCase):
         artifact = result["manifest"]["artifacts"][0]
         self.assertEqual((self.output / "shot" / artifact["uri"]).read_bytes(), PAYLOAD)
         self.assertEqual(sum(call[1] == "/prompt" for call in self.wire.calls), 1)
-        self.assertEqual(json.loads((self.output / "run.json").read_text()), result)
+        durable = json.loads((self.output / "run.json").read_text())
+        self.assertEqual((durable["outcome"], durable["human_review"]), ("generated", "unavailable"))
+        self.assertEqual(durable["technical_candidate"], result["technical_result"])
+        self.assertNotIn("technical_result", durable)
+        self.assertNotIn("technical_candidate", result)
+        historical = dict(result, outcome="generated", human_review="unavailable")
+        historical["technical_candidate"] = historical.pop("technical_result")
+        self.assertEqual(durable, historical)
         new = self.fixture.root / "duplicate"
         with self.assertRaises(S2VError):
             run_s2v(self.selection, self.verification, self.driver, new,
@@ -275,7 +306,8 @@ class S2VRunTests(unittest.TestCase):
         original, late = PrivateRunDirectory.checkpoint, []
         def checkpoint(store, payload):
             original(store, payload)
-            if json.loads(payload).get("outcome") == "pending_human_review":
+            value = json.loads(payload)
+            if value.get("outcome") == "generated" and "technical_candidate" in value:
                 late.append(now[0])
                 now[0] = 161
         with patch.object(PrivateRunDirectory, "checkpoint", checkpoint), self.assertRaises(S2VError):
@@ -283,6 +315,124 @@ class S2VRunTests(unittest.TestCase):
         self.assertEqual(late, [100])
         outer = json.loads((self.output / "run.json").read_text())
         self.assertEqual((outer["outcome"], outer["human_review"]), ("incomplete", "unavailable"))
+        self.assertIn("manifest", outer)
+        self.assertNotIn("technical_result", outer)
+
+    def test_real_outer_directory_close_then_expiry_keeps_durable_candidate_unavailable(self):
+        now = self._absolute_fixture()
+        original, closed = PrivateRunDirectory.__exit__, []
+        def close(store, *args):
+            original(store, *args)  # Real descriptor close, not a mocked cleanup.
+            closed.append((store.path, store._directory))
+            if store.path == self.output:
+                now[0] = 161
+        with patch.object(PrivateRunDirectory, "__exit__", close), self.assertRaises(S2VError):
+            self.run_scene(clock=lambda: now[0])
+        self.assertEqual(closed, [(self.output / "shot", -1), (self.output, -1)])
+        outer = json.loads((self.output / "run.json").read_text())
+        self.assertEqual((outer["outcome"], outer["human_review"]), ("generated", "unavailable"))
+        self.assertIn("technical_candidate", outer)
+        self.assertNotIn("technical_result", outer)
+        self.assertEqual(outer["manifest"]["shot_runs"][0]["status"], "succeeded")
+        self.assertEqual(self.driver.budget.remaining_seconds("lease"), 119)
+        self.assertEqual(sum(call[1] == "/prompt" for call in self.wire.calls), 1)
+
+    def test_real_outer_close_failure_preserves_generated_evidence_without_readiness(self):
+        now = self._absolute_fixture()
+        original = PrivateRunDirectory.__exit__
+        def close(store, *args):
+            original(store, *args)
+            if store.path == self.output:
+                raise OSError("CANARY final close failure")
+        with patch.object(PrivateRunDirectory, "__exit__", close), self.assertRaises(S2VError) as caught:
+            self.run_scene(clock=lambda: now[0])
+        self.assertIsNone(caught.exception.__context__)
+        self.assertNotIn("CANARY", str(caught.exception))
+        outer = json.loads((self.output / "run.json").read_text())
+        self.assertEqual((outer["outcome"], outer["human_review"]), ("generated", "unavailable"))
+        self.assertIn("manifest", outer)
+        self.assertIn("technical_candidate", outer)
+        self.assertNotIn("technical_result", outer)
+
+    def test_fresh_post_close_proof_delay_cannot_finalize_cached_technical_candidate(self):
+        now = self._absolute_fixture()
+        original, closed, delayed = PrivateRunDirectory.__exit__, [False], []
+        native = self.selection.gate.verify_speech
+        def proof(*args):
+            value = native(*args)
+            if closed[0] and not delayed:
+                delayed.append(now[0])
+                now[0] = 161
+            return value
+        self.selection = replace(self.selection, gate=replace(self.selection.gate, verify_speech=proof))
+        def close(store, *args):
+            original(store, *args)
+            if store.path == self.output:
+                closed[0] = True
+        with patch.object(PrivateRunDirectory, "__exit__", close), self.assertRaises(S2VError):
+            self.run_scene(clock=lambda: now[0])
+        self.assertEqual(delayed, [100])
+        outer = json.loads((self.output / "run.json").read_text())
+        self.assertEqual((outer["outcome"], outer["human_review"]), ("generated", "unavailable"))
+        self.assertIn("technical_candidate", outer)
+
+    def test_fresh_post_close_rights_revocation_blocks_finalized_return(self):
+        now = self._absolute_fixture()
+        original, closed = PrivateRunDirectory.__exit__, [False]
+        native = self.selection.gate.verify_speech
+        def proof(*args):
+            value = native(*args)
+            if closed[0]:
+                self.selection.gate.ledger.revoke(self.selection.gate.utterance.voice.permission.rights,
+                                                 reason="CANARY after cleanup")
+            return value
+        self.selection = replace(self.selection, gate=replace(self.selection.gate, verify_speech=proof))
+        def close(store, *args):
+            original(store, *args)
+            if store.path == self.output:
+                closed[0] = True
+        with patch.object(PrivateRunDirectory, "__exit__", close), self.assertRaises(S2VError):
+            self.run_scene(clock=lambda: now[0])
+        outer = json.loads((self.output / "run.json").read_text())
+        self.assertEqual((outer["outcome"], outer["human_review"]), ("generated", "unavailable"))
+        self.assertIn("manifest", outer)
+
+    def test_final_candidate_copy_latency_is_before_last_original_cap_checkout(self):
+        from cineforge.workflows import strict_object
+        now = self._absolute_fixture()
+        original, closed = PrivateRunDirectory.__exit__, [False]
+        def close(store, *args):
+            original(store, *args)
+            if store.path == self.output:
+                closed[0] = True
+        def copy(raw):
+            value = strict_object(raw)
+            if closed[0] and "technical_candidate" in value:
+                now[0] = 161
+            return value
+        with patch.object(PrivateRunDirectory, "__exit__", close), \
+                patch("cineforge.s2v_run.strict_object", side_effect=copy), self.assertRaises(S2VError):
+            self.run_scene(clock=lambda: now[0])
+        outer = json.loads((self.output / "run.json").read_text())
+        self.assertEqual((outer["outcome"], outer["human_review"]), ("generated", "unavailable"))
+
+    def test_failed_late_checkpoint_correction_never_leaves_durable_readiness(self):
+        now = self._absolute_fixture()
+        original, candidate_written = PrivateRunDirectory.checkpoint, []
+        def checkpoint(store, payload):
+            value = json.loads(payload)
+            if value.get("outcome") == "incomplete":
+                raise OSError("CANARY correction unavailable")
+            original(store, payload)
+            if "technical_candidate" in value:
+                candidate_written.append(now[0])
+                now[0] = 161
+        with patch.object(PrivateRunDirectory, "checkpoint", checkpoint), self.assertRaises(S2VError):
+            self.run_scene(clock=lambda: now[0])
+        self.assertEqual(candidate_written, [100])
+        outer = json.loads((self.output / "run.json").read_text())
+        self.assertEqual((outer["outcome"], outer["human_review"]), ("generated", "unavailable"))
+        self.assertIn("technical_candidate", outer)
         self.assertIn("manifest", outer)
         self.assertNotIn("technical_result", outer)
 
