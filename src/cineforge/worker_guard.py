@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
 import json
 import math
 import os
@@ -193,6 +194,51 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+class _DeadlineHTTPSConnection(http.client.HTTPSConnection):
+    """Refuse HTTP bytes after slow DNS/connect/TLS exhausts the request deadline."""
+
+    def __init__(self, host: str, *, deadline: float,
+                 monotonic: Callable[[], float], **options: Any) -> None:
+        self.deadline, self.monotonic = deadline, monotonic
+        super().__init__(host, **options)
+
+    def _remaining(self) -> float:
+        remaining = self.deadline - self.monotonic()
+        if not _finite(remaining) or remaining <= 0:
+            self.close()
+            raise WorkerGuardError("worker request deadline exceeded")
+        return remaining
+
+    def connect(self) -> None:
+        self.timeout = self._remaining()
+        super().connect()
+        remaining = self._remaining()
+        if self.sock is not None:
+            self.sock.settimeout(remaining)
+
+    def send(self, data: Any) -> None:
+        if self.sock is None:
+            self.connect()
+        remaining = self._remaining()
+        if self.sock is not None:
+            self.sock.settimeout(remaining)
+        super().send(data)
+
+
+class _DeadlineHTTPSHandler(urllib.request.HTTPSHandler):
+    def __init__(self, monotonic: Callable[[], float]) -> None:
+        self.monotonic = monotonic
+        self.context = ssl.create_default_context()
+        super().__init__(context=self.context)
+        self.deadline = 0.0
+
+    def https_open(self, req: Any) -> Any:
+        def connection(host: str, **options: Any) -> _DeadlineHTTPSConnection:
+            return _DeadlineHTTPSConnection(host, deadline=self.deadline,
+                                             monotonic=self.monotonic, **options)
+        return self.do_open(connection, req, context=self.context)
+
+
 def worker_credential(plan: WorkerGuardPlan) -> str:
     """Existing worker environment/PID1 pair only; never creates or exports credentials."""
     values: Mapping[str, str] = os.environ
@@ -218,19 +264,34 @@ def worker_credential(plan: WorkerGuardPlan) -> str:
     return key
 
 
-def _worker_request(plan: WorkerGuardPlan) -> Callable[[str, bool], dict[str, Any]]:
+def _worker_request(plan: WorkerGuardPlan, *, deadline: float | None = None,
+                    monotonic: Callable[[], float] | None = None) \
+        -> Callable[[str, bool, float], dict[str, Any]]:
+    clock = time.monotonic if monotonic is None else monotonic
+    if not callable(clock) or deadline is not None and not _finite(deadline):
+        raise WorkerGuardError("invalid worker request deadline")
     key = worker_credential(plan)
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect(),
-        urllib.request.HTTPSHandler(context=ssl.create_default_context()))
+    https = _DeadlineHTTPSHandler(clock)
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect(), https)
     url = "https://api.runpod.io/v2/pods/" + plan.pod_id
 
-    def request(method: str, stop: bool = False) -> dict[str, Any]:
+    def request(method: str, stop: bool = False,
+                timeout_seconds: float = 3) -> dict[str, Any]:
+        if not _finite(timeout_seconds) or not 0 < timeout_seconds <= 3:
+            raise WorkerGuardError("invalid worker request bound")
+        now = clock()
+        if not _finite(now):
+            raise WorkerGuardError("invalid worker request clock")
+        https.deadline = min(now + timeout_seconds, deadline) if deadline is not None \
+            else now + timeout_seconds
+        if not _finite(https.deadline) or https.deadline <= now:
+            raise WorkerGuardError("worker request deadline exceeded")
         req = urllib.request.Request(url + ("/action" if stop else ""),
             data=b'{"action":"stop"}' if stop else None, method=method,
             headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"})
-        with opener.open(req, timeout=3) as reply:
+        with opener.open(req, timeout=min(timeout_seconds, https.deadline - now)) as reply:
             data = reply.read(65537)
-            if len(data) > 65536:
+            if len(data) > 65536 or clock() >= https.deadline:
                 raise ValueError
             return _strict_json(data)
     return request
@@ -253,27 +314,85 @@ def verify_own_pod(plan: WorkerGuardPlan, *, allow_live: bool = False) -> bool:
     if allow_live is not True:
         raise WorkerGuardError("worker verification needs explicit live opt-in")
     try:
-        return _owned(_worker_request(plan)("GET", False), plan)
+        return _owned(_worker_request(plan)("GET", False, 3), plan)
     except (Exception, KeyboardInterrupt):
         return False
 
 
-def stop_own_pod(plan: WorkerGuardPlan, *, allow_live: bool = False) -> bool:
-    """GET ownership -> own-ID STOP -> GET terminal lifecycle. No DELETE or foreign ID."""
+def stop_own_pod(plan: WorkerGuardPlan, *, allow_live: bool = False,
+                 timeout_seconds: float = 5,
+                 absolute_deadline: float | None = None,
+                 monotonic: Callable[[], float] = time.monotonic,
+                 sleep: Callable[[float], None] = time.sleep) -> bool:
+    """Bound GET/STOP/poll by one attempt cap, retaining any caller's absolute deadline.
+
+    EXITED proves compute stop only; a delayed native entry cannot renew the cap.
+    """
     if allow_live is not True:
         raise WorkerGuardError("worker shutdown needs explicit live opt-in")
+    if (not _finite(timeout_seconds) or not 0 < timeout_seconds <= 10
+            or absolute_deadline is not None and not _finite(absolute_deadline)
+            or not callable(monotonic) or not callable(sleep)):
+        raise WorkerGuardError("invalid worker shutdown bound")
     try:
-        request = _worker_request(plan)
-        pod = request("GET", False)
+        started = monotonic()
+        if not _finite(started):
+            return False
+        deadline = started + timeout_seconds
+        if absolute_deadline is not None:
+            deadline = min(deadline, absolute_deadline)
+        if deadline <= started:
+            return False
+        previous = started
+        native = _worker_request(plan, deadline=deadline, monotonic=monotonic)
+
+        def remaining() -> float:
+            nonlocal previous
+            now = monotonic()
+            if not _finite(now) or now < previous or now >= deadline:
+                raise WorkerGuardError("worker shutdown deadline exceeded")
+            previous = now
+            return deadline - now
+
+        def request(method: str, stop: bool = False) -> dict[str, Any]:
+            timeout = min(3, remaining())
+            answers: queue.Queue[dict[str, Any] | None] = queue.Queue(maxsize=1)
+
+            def invoke() -> None:
+                answer = None
+                try:
+                    # A delayed thread must not start another request after expiry.
+                    bound = min(timeout, remaining())
+                    answer = native(method, stop, bound)
+                except (Exception, KeyboardInterrupt):
+                    pass
+                answers.put(answer)
+
+            Thread(target=invoke, daemon=True).start()
+            answer = answers.get(timeout=min(timeout, remaining()))
+            remaining()  # A late response cannot schedule a POST or prove shutdown.
+            if not isinstance(answer, dict):
+                raise WorkerGuardError("worker shutdown request failed")
+            return answer
+
+        pod = request("GET")
         if not _owned(pod, plan):
             return False
-        if not pod_exited(pod.get("status")) and pod.get("status") != "TERMINATED":
+        if pod_exited(pod.get("status")):
+            return True
+        if pod.get("status") != "STOPPING":
             if "stop" not in pod.get("actions", []):
                 return False
             request("POST", True)
-            pod = request("GET", False)
-        return (_owned(pod, plan) and (pod_exited(pod.get("status"))
-                                     or pod.get("status") == "TERMINATED"))
+        # Deadline plus finite count also bounds frozen clocks or injected sleeps.
+        for _ in range(41):
+            pod = request("GET")
+            if not _owned(pod, plan):
+                return False
+            if pod_exited(pod.get("status")):
+                return True
+            sleep(min(.25, remaining()))
+        return False
     except (Exception, KeyboardInterrupt):
         return False
 
@@ -283,18 +402,24 @@ def run_guard(plan: WorkerGuardPlan, heartbeat: Callable[[], float],
               monotonic: Callable[[], float] = time.monotonic,
               sleep: Callable[[float], None] = time.sleep,
               poll_seconds: float = 1, max_stop_attempts: int = 3,
-              attempt_timeout_seconds: float = 5) -> dict[str, Any]:
+              attempt_timeout_seconds: float = 5,
+              bounded_stop: Callable[[float, float], bool] | None = None) -> dict[str, Any]:
     """Independent process; absent/invalid heartbeats, rollback or expiry request STOP.
 
     A heartbeat means the orchestrator is still supervising startup/generation; it
     must continue during long model downloads and inference. It never extends the
     absolute lease deadline. Timed-out stop threads can finish late, but only stop
     this same worker; they cannot create resources or mutate another Pod.
+    Native callbacks receive remaining time and the absolute attempt deadline;
+    injected no-argument stop callbacks keep their existing interface.
+    DNS/connect cannot be forcibly preempted; expiry blocks later HTTP sends and
+    controller follow-up, but cannot recall an already-sent STOP or response read.
     """
     if (not isinstance(plan, WorkerGuardPlan) or not callable(heartbeat) or not callable(stop)
             or not _finite(poll_seconds) or not 0 < poll_seconds <= 30
             or type(max_stop_attempts) is not int or not 1 <= max_stop_attempts <= 5
-            or not _finite(attempt_timeout_seconds) or not 0 < attempt_timeout_seconds <= 10):
+            or not _finite(attempt_timeout_seconds) or not 0 < attempt_timeout_seconds <= 10
+            or bounded_stop is not None and not callable(bounded_stop)):
         raise WorkerGuardError("invalid worker guard bounds")
     started_wall, started_mono = clock(), monotonic()
     if not _finite(started_wall) or not _finite(started_mono):
@@ -328,26 +453,49 @@ def run_guard(plan: WorkerGuardPlan, heartbeat: Callable[[], float],
             reason = "idle"
             break
         sleep(min(poll_seconds, max(0, stop_mono - mono)))
+    shutdown_started = monotonic()
+    if not _finite(shutdown_started):
+        return {"status": "compute_stop_unconfirmed", "reason": reason,
+                "attempts": 0, "resource_deleted": False}
+    shutdown_deadline = shutdown_started + max_stop_attempts * attempt_timeout_seconds \
+        + max_stop_attempts - 1
+    attempts = 0
     for attempt in range(max_stop_attempts):
+        mono = monotonic()
+        if not _finite(mono) or mono < shutdown_started or mono >= shutdown_deadline:
+            break
+        timeout = min(attempt_timeout_seconds, shutdown_deadline - mono)
+        attempt_deadline = mono + timeout
+        attempts += 1
         answers: queue.Queue[bool] = queue.Queue(maxsize=1)
 
-        def invoke(destination: queue.Queue[bool] = answers) -> None:
+        def invoke(destination: queue.Queue[bool] = answers,
+                   deadline: float = attempt_deadline) -> None:
             try:
-                destination.put(stop() is True)
+                remaining = deadline - monotonic()
+                destination.put(remaining > 0 and (
+                    stop() if bounded_stop is None else bounded_stop(remaining, deadline)) is True)
             except (Exception, KeyboardInterrupt):
                 destination.put(False)
 
         Thread(target=invoke, daemon=True).start()
         try:
-            if answers.get(timeout=attempt_timeout_seconds):
+            wait = attempt_deadline - monotonic()
+            confirmed = answers.get(timeout=min(timeout, wait)) \
+                if _finite(wait) and wait > 0 else False
+            now = monotonic()
+            if confirmed and _finite(now) and shutdown_started <= now < attempt_deadline:
                 return {"status": "compute_stop_confirmed", "reason": reason,
                         "attempts": attempt + 1, "resource_deleted": False}
         except queue.Empty:
             pass
         if attempt + 1 < max_stop_attempts:
-            sleep(1)
+            remaining = shutdown_deadline - monotonic()
+            if not _finite(remaining) or remaining <= 0:
+                break
+            sleep(min(1, remaining))
     return {"status": "compute_stop_unconfirmed", "reason": reason,
-            "attempts": max_stop_attempts, "resource_deleted": False}
+            "attempts": attempts, "resource_deleted": False}
 
 
 def main() -> int:
@@ -369,7 +517,10 @@ def main() -> int:
             print(json.dumps({"status": "own_pod_verified" if verified else "guard_failed"}))
             return 0 if verified else 2
         answer = run_guard(plan, lambda: read_heartbeat(args.heartbeat, plan),
-                           lambda: stop_own_pod(plan, allow_live=True))
+                           lambda: stop_own_pod(plan, allow_live=True),
+                           bounded_stop=lambda remaining, deadline: stop_own_pod(
+                               plan, allow_live=True, timeout_seconds=remaining,
+                               absolute_deadline=deadline))
     except (Exception, KeyboardInterrupt):
         failed = True
     if failed or answer is None:
