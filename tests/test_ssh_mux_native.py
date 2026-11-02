@@ -68,6 +68,9 @@ class Master:
                     if self.mode == "version":
                         stream.sendall(packet(1, 999))
                         continue
+                    if self.mode == "format":
+                        stream.sendall(packet(2, 4))
+                        continue
                     stream.sendall(packet(1, 4))
                     request = read_packet(stream)
                     kind, rid = struct.unpack(">II", request[:8])
@@ -119,7 +122,7 @@ class NativeMuxTests(unittest.TestCase):
         self.worker._control_identity = (info.st_dev, info.st_ino)
 
     def test_native_hello_failure_cannot_fall_back_to_loopback_network(self):
-        for mode in ("eof", "version"):
+        for mode in ("eof", "version", "format"):
             for operation in ("check", "forward"):
                 with self.subTest(mode=mode, operation=operation):
                     monitor = socket.socket()

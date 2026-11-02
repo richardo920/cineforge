@@ -16,7 +16,7 @@ from test_cloud_budget import selection
 from test_runpod import spec
 from test_ssh_worker import Budget, Transport
 
-from cineforge.ssh_worker import SSHWorker, WorkerError
+from cineforge.ssh_worker import MAX_CONTROL_NAMESPACES, SSHWorker, WorkerError
 from cineforge.workflows import canonical
 
 
@@ -180,6 +180,16 @@ class TunnelTests(unittest.TestCase):
                                 self.root / "state", allow_live=True)
         self.worker.plan, self.worker._key = self.budget.plan, "first"
         self.worker._host, self.worker._port = "8.8.8.8", 22000
+        self.addCleanup(self.remove_fixture_namespaces)
+
+    def remove_fixture_namespaces(self):
+        # Only synthetic fixture paths, after Harness has stopped its mock children.
+        self.assertIsNone(self.worker._tunnel)
+        for directory in self.worker.retained_control_namespace_paths:
+            for child in directory.iterdir():
+                self.assertEqual(child.name, "c")
+                child.unlink()
+            directory.rmdir()
 
     def harness(self, **options):
         fixture = Harness(self.worker, **options)
@@ -206,7 +216,8 @@ class TunnelTests(unittest.TestCase):
             self.worker.close()
             self.assertEqual(fixture.kills, [fixture.processes[0].pid])
             self.assertEqual(fixture.processes[0].waits, [2])
-            self.assertFalse(control.parent.exists())
+            self.assertTrue(control.parent.exists())
+            self.assertEqual(self.worker.retained_control_namespace_paths, (control.parent,))
             self.worker.close()
             self.assertEqual(len(fixture.kills), 1)
 
@@ -231,7 +242,9 @@ class TunnelTests(unittest.TestCase):
                 self.assertEqual(self.worker._endpoint, "")
             self.assertEqual(fixture.kills, [p.pid for p in fixture.processes])
             self.assertTrue(all(p.waits == [2] for p in fixture.processes))
-            self.assertTrue(all(not p.path.parent.exists() for p in fixture.processes))
+            self.assertEqual(self.worker.retained_control_namespace_paths,
+                             tuple(p.path.parent for p in fixture.processes))
+            self.assertTrue(all(p.path.parent.exists() for p in fixture.processes))
 
     def test_exit_interrupt_and_check_failures_reap_owned_attempt(self):
         with self.harness(exited=True) as fixture:
@@ -368,7 +381,7 @@ class TunnelTests(unittest.TestCase):
                         foreign.close()
                     control.unlink()
                     self.worker.close()
-                self.assertFalse(control.parent.exists())
+                self.assertTrue(control.parent.exists())
 
     def test_replaced_control_directory_is_never_recursively_removed(self):
         with self.harness() as fixture:
@@ -391,7 +404,65 @@ class TunnelTests(unittest.TestCase):
                 original.rmdir()
                 moved.rename(original)
                 self.worker.close()
-            self.assertFalse(original.exists())
+            self.assertTrue(original.exists())
+
+    def test_socket_replaced_after_final_check_is_retained_without_deletion(self):
+        with self.harness() as fixture:
+            self.worker.endpoint()
+            control = fixture.processes[0].path
+            original = self.worker._control_ready
+            def replace_after_check():
+                ready = original()
+                control.unlink()
+                control.write_bytes(b"foreign-after-final-check")
+                return ready
+            with patch.object(self.worker, "_control_ready", side_effect=replace_after_check):
+                self.worker.close()
+            self.assertEqual(control.read_bytes(), b"foreign-after-final-check")
+            self.assertEqual(self.worker.retained_control_namespace_paths, (control.parent,))
+            self.assertIsNone(self.worker._tunnel)
+            self.assertEqual(fixture.processes[0].waits, [2])
+
+    def test_directory_replaced_after_final_check_is_retained_without_deletion(self):
+        with self.harness(ready=False) as fixture:
+            self.budget.remaining = .1
+            original = self.worker._control_ready
+            moved = []
+            def replace_after_check():
+                ready = original()
+                # Only replace during cleanup, once the child is reaped.
+                if self.worker._tunnel is None:
+                    directory = self.worker._control_dir
+                    target = directory.with_name(directory.name + "-fixture-moved")
+                    directory.rename(target)
+                    directory.mkdir(mode=0o700)
+                    moved.append(target)
+                return ready
+            try:
+                with patch.object(self.worker, "_control_ready", side_effect=replace_after_check):
+                    with self.assertRaises(WorkerError):
+                        self.worker.endpoint()
+                directory = fixture.processes[0].path.parent
+                self.assertTrue(directory.is_dir())
+                self.assertEqual(list(directory.iterdir()), [])
+                self.assertEqual(self.worker.retained_control_namespace_paths, (directory,))
+                self.assertTrue(moved[0].is_dir())
+            finally:
+                for target in moved:
+                    target.rmdir()
+
+    def test_namespace_retention_is_bounded_and_never_reuses_old_paths(self):
+        self.budget.remaining = .1
+        with self.harness(ready=False) as fixture:
+            for _ in range(MAX_CONTROL_NAMESPACES + 2):
+                with self.assertRaises(WorkerError):
+                    self.worker.endpoint()
+            paths = self.worker.retained_control_namespace_paths
+            self.assertEqual(len(paths), MAX_CONTROL_NAMESPACES)
+            self.assertEqual(len(set(paths)), MAX_CONTROL_NAMESPACES)
+            self.assertEqual(len(fixture.processes), MAX_CONTROL_NAMESPACES)
+            self.assertEqual(fixture.kills, [p.pid for p in fixture.processes])
+            self.assertTrue(all(p.waits == [2] for p in fixture.processes))
 
     def test_wrong_service_json_is_static_and_never_cached(self):
         with self.harness() as fixture:
@@ -402,7 +473,7 @@ class TunnelTests(unittest.TestCase):
             self.assertEqual(self.worker._endpoint, "")
             self.assertIsNone(self.worker._tunnel)
 
-    def test_failed_spawn_cleans_its_private_namespace_and_is_static(self):
+    def test_failed_spawn_retains_its_private_namespace_and_is_static(self):
         with self.harness() as fixture:
             controls = []
             def fail(command, **options):
@@ -412,7 +483,8 @@ class TunnelTests(unittest.TestCase):
                 with self.assertRaises(WorkerError) as cm:
                     self.worker.endpoint()
             self.assertNotIn("private-spawn", "".join(traceback.format_exception(cm.exception)))
-            self.assertFalse(controls[0].parent.exists())
+            self.assertTrue(controls[0].parent.exists())
+            self.assertEqual(self.worker.retained_control_namespace_paths, (controls[0].parent,))
             self.assertIsNone(self.worker._tunnel)
             self.assertEqual(fixture.processes, [])
 

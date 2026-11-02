@@ -35,6 +35,9 @@ class WorkerError(ValueError):
     """Only fixed local diagnostics; never expose SSH/remote/API exception strings."""
 
 
+MAX_CONTROL_NAMESPACES = 8
+
+
 def private_file(path: str | Path, *, max_bytes: int, read: bool = True) -> bytes:
     """External owned0600 input, no links or Git ancestors; never log path or bytes."""
     descriptor = -1
@@ -107,7 +110,7 @@ def ssh_public_key(private_key: str | Path) -> str:
 
 
 class SSHWorker:
-    """One lease/driver. First-contact host keys use isolated TOFU, never global config."""
+    """One lease/driver; isolated TOFU and bounded retained control namespaces."""
 
     def __init__(self, spec: RunpodPodSpec, selection: ApprovedComfySelection,
                  budget: CloudBudgetSession, transport: CloudTransport, private_key: str | Path,
@@ -130,6 +133,8 @@ class SSHWorker:
         self._control_dir: Path | None = None
         self._control_identity: tuple[int, int] | None = None
         self._control_socket_identity: tuple[int, int] | None = None
+        self._retired_controls: list[
+            tuple[Path, tuple[int, int] | None, tuple[int, int] | None]] = []
         self._endpoint = ""
         self._claimed: PrivateRunDirectory | None = None
         self._enforce: Callable[[], tuple[str, ...]] | None = None
@@ -432,16 +437,25 @@ class SSHWorker:
                     failed = True
             if self._tunnel is None and self._control_dir is not None:
                 try:
-                    if self._control_ready():
-                        (self._control_dir / "c").unlink()
-                    # Never recursively remove unexpected/replaced path contents.
-                    self._control_dir.rmdir()
+                    self._control_ready()
+                    # POSIX unlink/rmdir cannot condition deletion on an inode.
+                    # Retain every namespace: even a replacement after this check
+                    # is never deleted, traversed or reused by the driver.
+                    self._retired_controls.append((self._control_dir,
+                        self._control_identity, self._control_socket_identity))
                     self._control_dir = None
                     self._control_identity = self._control_socket_identity = None
                 except (Exception, KeyboardInterrupt):
                     failed = True
         if failed:
             raise WorkerError("owned SSH tunnel cleanup is not confirmed") from None
+
+    @property
+    def retained_control_namespace_paths(self) -> tuple[Path, ...]:
+        """Private residual paths for operator cleanup, not current ownership proof."""
+        with self._tunnel_lock:
+            paths = tuple(record[0] for record in self._retired_controls)
+            return paths + ((self._control_dir,) if self._control_dir is not None else ())
 
     def _tunnel_remaining(self, deadline: float) -> float:
         self.check()
@@ -488,6 +502,8 @@ class SSHWorker:
                     raise ValueError
                 deadline = time.monotonic() + min(10, remaining)
                 with self._tunnel_lock:
+                    if len(self._retired_controls) >= MAX_CONTROL_NAMESPACES:
+                        raise ValueError
                     self._control_dir = Path(tempfile.mkdtemp(
                         prefix="cf-ssh-" + self.spec.session_id + "-", dir="/tmp"))
                     info = self._control_dir.lstat()
