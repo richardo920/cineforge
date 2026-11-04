@@ -128,10 +128,10 @@ class RemoteFixture(unittest.TestCase):
         self.worker.runtime_evidence = dict(runtime_fixture(), compute_precision="bf16")
         self.worker.check = lambda: None
         self.worker._request = self.rpc
-        if self.gpu_id == profile.L40S_GPU_ID:
+        if self.gpu_id != profile.GPU_ID:
             self.worker.runtime_evidence.update(python_version="3.11.14", gpu_raw_name=self.gpu_id,
                 gpu_memory_mib=46000, nvml_total_mib=46068, nvml_reserved_mib=68,
-                capability=[8, 9], arch_list=["sm_86"])
+                capability=list(profile.worker(self.gpu_id).reference_runtime.capability), arch_list=["sm_86"])
         expected = self.worker.runtime_evidence
         self.selected = selection(self.root, hardware=NativeHardware("synthetic-worker", self.gpu_id,
             expected["gpu_memory_mib"], tuple(expected["capability"])))

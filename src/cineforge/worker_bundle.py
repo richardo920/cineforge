@@ -37,7 +37,7 @@ def worker_source() -> bytes:
         assignments = {target.id for node in definitions if isinstance(node, ast.Assign)
                        for target in node.targets if isinstance(target, ast.Name)}
         if (not {"ReferenceRuntime", "WorkerProfile"} <= classes
-                or not {"T2V_WORKER", "I2V_WORKER", "S2V_WORKER", "S2V_L40S_WORKER", "S2V_PROFILE_IDS"} <= assignments):
+                or not {"T2V_WORKER", "I2V_WORKER", "S2V_WORKER", "S2V_L40S_WORKER", "S2V_A40_WORKER", "S2V_PROFILE_IDS"} <= assignments):
             raise ValueError
         helpers = b""
         for name, imports in (

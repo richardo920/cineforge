@@ -81,7 +81,12 @@ S2V_L40S_WORKER = S2V_WORKER._replace(
     reference_runtime=ReferenceRuntime("2.8.0+cu128", 49152, (8, 9), "sm_89",
                                        64_000_000_000, 32 * 1024**3, 30 * 1024**3),
 )
-S2V_PROFILE_IDS = (S2V_WORKER.profile_id, S2V_L40S_WORKER.profile_id)
+S2V_A40_WORKER = S2V_WORKER._replace(
+    profile_id="m5-wan22-s2v14b-a40-v1", gpu="NVIDIA A40",
+    reference_runtime=ReferenceRuntime("2.8.0+cu128", 49152, (8, 6), "sm_86",
+                                       64_000_000_000, 32 * 1024**3, 30 * 1024**3),
+)
+S2V_PROFILE_IDS = (S2V_WORKER.profile_id, S2V_L40S_WORKER.profile_id, S2V_A40_WORKER.profile_id)
 
 
 def s2v_worker(profile_id: str = S2V_WORKER.profile_id) -> WorkerProfile:
@@ -89,6 +94,8 @@ def s2v_worker(profile_id: str = S2V_WORKER.profile_id) -> WorkerProfile:
         return S2V_WORKER
     if profile_id == S2V_L40S_WORKER.profile_id:
         return S2V_L40S_WORKER
+    if profile_id == S2V_A40_WORKER.profile_id:
+        return S2V_A40_WORKER
     raise ValueError("unsupported closed M5 worker profile")
 
 

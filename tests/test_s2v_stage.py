@@ -62,9 +62,10 @@ class PairTransferTests(unittest.TestCase):
         self.budget = SimpleNamespace(approval=self.gate.service.approval,
             remaining_seconds=lambda _: self.remaining, guard_plan=lambda _: self.plan)
         self.runtime = dict(runtime_fixture(), compute_precision="bf16")
-        if self.gpu_id == profile.L40S_GPU_ID:
+        if self.gpu_id != profile.GPU_ID:
             self.runtime.update(python_version="3.11.14", gpu_raw_name=self.gpu_id, gpu_memory_mib=46000,
-                nvml_total_mib=46068, nvml_reserved_mib=68, capability=[8, 9], arch_list=["sm_86"])
+                nvml_total_mib=46068, nvml_reserved_mib=68,
+                capability=list(profile.worker(self.gpu_id).reference_runtime.capability), arch_list=["sm_86"])
         self.requests = []
         self.loss = None
         self.fault = None

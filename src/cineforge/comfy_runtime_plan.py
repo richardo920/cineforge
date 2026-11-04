@@ -10,7 +10,13 @@ from urllib.parse import urlsplit
 from cineforge.native_remote_plan import nr_digest, nr_hash
 from cineforge.native_speech_integrity import NativeBinary, NativeTree
 from cineforge.s2v_profile import IMAGE
-from cineforge.worker_profiles import S2V_L40S_WORKER, S2V_WORKER, WorkerProfile, s2v_worker
+from cineforge.worker_profiles import (
+    S2V_A40_WORKER,
+    S2V_L40S_WORKER,
+    S2V_WORKER,
+    WorkerProfile,
+    s2v_worker,
+)
 
 COMFY_POLICY = "m5-closed-wheel-runtime-v1"
 COMFY_EXECUTION = {"PYTORCH_JIT": "0", "TORCH_COMPILE_DISABLE": "1",
@@ -135,8 +141,8 @@ def notice_bytes(value: Any) -> bytes:
 
 
 def comfy_worker(value: dict[str, Any]) -> WorkerProfile:
-    # Absence preserves the exact legacy5090 plan; L40S is an explicit new subject.
-    if "profile_id" in value and value["profile_id"] != S2V_L40S_WORKER.profile_id:
+    # Absence preserves the exact legacy5090 plan; other profiles are explicit subjects.
+    if "profile_id" in value and value["profile_id"] not in (S2V_L40S_WORKER.profile_id, S2V_A40_WORKER.profile_id):
         raise ValueError("unsupported explicit Comfy GPU profile")
     return s2v_worker(value.get("profile_id", S2V_WORKER.profile_id))
 
