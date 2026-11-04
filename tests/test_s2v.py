@@ -43,7 +43,7 @@ from cineforge.skills import (
 from cineforge.workflows import InputBinding, WorkflowTemplate, canonical
 
 
-def context(root, *, language="en", actor_png=None):
+def context(root, *, language="en", actor_png=None, gpu_id=profile.GPU_ID):
     args, actor, _ = fixture()
     payload = png(width=832, height=480) if actor_png is None else actor_png
     actor_sha = hashlib.sha256(payload).hexdigest()
@@ -76,7 +76,7 @@ def context(root, *, language="en", actor_png=None):
     speech_adapter = adapter(args, runtime=Runtime(payload=wav_bytes(frames=24000)))
     speech = speech_adapter.synthesize(utterance_id=line.utterance_id, output_id="speech-" + language,
                                       output_revision=1, **args)
-    service = S2VServiceContext(S2VBudgetApproval.for_scope(str(root / "budget"), "EU-RO-1", EVIDENCE))
+    service = S2VServiceContext(S2VBudgetApproval.for_scope(str(root / "budget"), "EU-RO-1", EVIDENCE, gpu_id=gpu_id))
     source = SourcePin(profile.SOURCE_REPOSITORY, profile.SOURCE_REVISION, profile.SOURCE_PATH,
                        profile.SOURCE_SHA256)
     entry = CatalogEntry("s2v-workflow", "r1", "workflow", "Synthetic source review", source,
@@ -125,7 +125,8 @@ def worker(gate):
         "worker_id": "owned-worker", "server_revision": profile.RUNNER_REVISION,
         "image_digest": profile.IMAGE.split("@", 1)[1], "python_version": "3.11.5",
         "torch_version": "2.8.0+cu128", "cuda_version": "12.8",
-        "gpu": {"name": profile.GPU_ID, "backend": "cuda", "memory_mib": 32286},
+        "gpu": {"name": gate.service.approval.gpu_id, "backend": "cuda",
+                "memory_mib": 46000 if gate.service.approval.gpu_id == profile.L40S_GPU_ID else 32286},
         "model_files": [{key: asset[key] for key in ("path", "size_bytes", "sha256")}
                         for asset in profile.model_files()], "custom_nodes_disabled": True})
 

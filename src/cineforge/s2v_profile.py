@@ -8,7 +8,7 @@ from typing import Any
 from cineforge.conditioning_profile import IMAGE as IMAGE
 from cineforge.conditioning_profile import WORKFLOW_LICENSE as WORKFLOW_LICENSE
 from cineforge.devices import Backend, ModelSpec, Precision
-from cineforge.worker_profiles import S2V_WORKER
+from cineforge.worker_profiles import S2V_L40S_WORKER, S2V_WORKER, WorkerProfile
 from cineforge.workflows import canonical, strict_object
 
 PROFILE_ID = "m5-wan22-s2v14b-5090-v1"
@@ -25,6 +25,8 @@ MODEL_CARD_SHA256 = "c5f31703b82a568ca7aaa49482d1698e74f665e1cf92b47148ad22c0130
 MODEL_TERMS_URI = "https://raw.githubusercontent.com/Wan-Video/Wan2.2/1ea34ff48f87168174e12956e200b1d908b1c5ff/LICENSE.txt"
 MODEL_TERMS_SHA256 = "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"  # pragma: allowlist secret - public terms digest
 GPU_ID = "NVIDIA GeForce RTX 5090"
+L40S_GPU_ID = "NVIDIA L40S"
+L40S_PROFILE_ID = "m5-wan22-s2v14b-l40s-v1"
 MEMORY_MIB = 30720  # Conservative admission floor, not measured model fit.
 MIN_RAM_PER_GPU_GB = 64
 DURATION = 77 / 16
@@ -34,6 +36,14 @@ COMPUTE_PRECISION = "bf16"
 FILES = S2V_WORKER.files
 
 _CANDIDATE = '{\n  "147": {\n    "class_type": "CLIPLoader",\n    "inputs": {\n      "clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",\n      "device": "cpu",\n      "type": "wan"\n    }\n  },\n  "148": {\n    "class_type": "VAEDecode",\n    "inputs": {\n      "samples": [\n        "152",\n        0\n      ],\n      "vae": [\n        "150",\n        0\n      ]\n    }\n  },\n  "149": {\n    "class_type": "CLIPTextEncode",\n    "inputs": {\n      "clip": [\n        "147",\n        0\n      ],\n      "text": "blurred face, covered mouth, profile, duplicate actor, subtitles"\n    }\n  },\n  "150": {\n    "class_type": "VAELoader",\n    "inputs": {\n      "vae_name": "wan_2.1_vae.safetensors"\n    }\n  },\n  "151": {\n    "class_type": "AudioEncoderLoader",\n    "inputs": {\n      "audio_encoder_name": "wav2vec2_large_english_fp16.safetensors"\n    }\n  },\n  "152": {\n    "class_type": "KSampler",\n    "inputs": {\n      "cfg": 6,\n      "denoise": 1.0,\n      "latent_image": [\n        "153",\n        2\n      ],\n      "model": [\n        "154",\n        0\n      ],\n      "negative": [\n        "153",\n        1\n      ],\n      "positive": [\n        "153",\n        0\n      ],\n      "sampler_name": "uni_pc",\n      "scheduler": "simple",\n      "seed": 5201,\n      "steps": 20\n    }\n  },\n  "153": {\n    "class_type": "WanSoundImageToVideo",\n    "inputs": {\n      "audio_encoder_output": [\n        "173",\n        0\n      ],\n      "batch_size": 1,\n      "height": 480,\n      "length": 77,\n      "negative": [\n        "149",\n        0\n      ],\n      "positive": [\n        "159",\n        0\n      ],\n      "ref_image": [\n        "160",\n        0\n      ],\n      "vae": [\n        "150",\n        0\n      ],\n      "width": 832\n    }\n  },\n  "154": {\n    "class_type": "ModelSamplingSD3",\n    "inputs": {\n      "model": [\n        "161",\n        0\n      ],\n      "shift": 8\n    }\n  },\n  "159": {\n    "class_type": "CLIPTextEncode",\n    "inputs": {\n      "clip": [\n        "147",\n        0\n      ],\n      "text": "An original adult fictional actor faces the camera and speaks calmly. The mouth remains visible. Minimal head movement."\n    }\n  },\n  "160": {\n    "class_type": "LoadImage",\n    "inputs": {\n      "image": "m52_actor_pending_approval.png"\n    }\n  },\n  "161": {\n    "class_type": "UNETLoader",\n    "inputs": {\n      "unet_name": "wan2.2_s2v_14B_fp8_scaled.safetensors",\n      "weight_dtype": "default"\n    }\n  },\n  "162": {\n    "class_type": "LoadAudio",\n    "inputs": {\n      "audio": "m52_speech_pending_approval.wav"\n    }\n  },\n  "168": {\n    "class_type": "SaveWEBM",\n    "inputs": {\n      "codec": "vp9",\n      "crf": 18.0,\n      "filename_prefix": "m52_5bf322ca_candidate",\n      "fps": 16.0,\n      "images": [\n        "148",\n        0\n      ]\n    }\n  },\n  "173": {\n    "class_type": "AudioEncoderEncode",\n    "inputs": {\n      "audio": [\n        "162",\n        0\n      ],\n      "audio_encoder": [\n        "151",\n        0\n      ]\n    }\n  }\n}\n'
+
+
+def worker(gpu_id: str = GPU_ID) -> WorkerProfile:
+    if gpu_id == GPU_ID:
+        return S2V_WORKER
+    if gpu_id == L40S_GPU_ID:
+        return S2V_L40S_WORKER
+    raise ValueError("unsupported closed S2V GPU selection")
 
 
 def model() -> ModelSpec:
@@ -60,16 +70,17 @@ def graph(actor_sha256: str, speech_sha256: str, language: str) -> dict[str, Any
     return value
 
 
-def service_declarations() -> dict[str, Any]:
+def service_declarations(gpu_id: str = GPU_ID) -> dict[str, Any]:
     """No workflow/unknown speech placeholder; exact installed service capability only."""
-    return {"schema_version": 1, "profile_id": PROFILE_ID,
+    selected = worker(gpu_id)
+    return {"schema_version": 1, "profile_id": selected.profile_id,
         "model": {"model_id": MODEL_ID, "revision": MODEL_REVISION,
             "distribution": "Comfy-Org/Wan_2.2_ComfyUI_Repackaged", "task": "speech-to-video",
             "allowed_backends": ["cuda"], "minimum_memory_mib": MEMORY_MIB,
             "required_precision": COMPUTE_PRECISION, "storage_precision": STORAGE_PRECISION,
             "license": "Apache-2.0", "commercial_use": True, "files": model_files()},
         "runner": {"revision": RUNNER_REVISION, "custom_nodes": []},
-        "hardware": {"gpu": GPU_ID, "min_ram_per_gpu_gb": MIN_RAM_PER_GPU_GB},
+        "hardware": {"gpu": selected.gpu, "min_ram_per_gpu_gb": MIN_RAM_PER_GPU_GB},
         "component_notices": {"wan_code_weights_vae": "Apache-2.0; retain origin/repack notices",
             "text_encoder": "google/umt5-xxl; Apache-2.0; scaled repack",
             "audio_encoder": "jonatasgrosman/wav2vec2-large-xlsr-53-english; Apache-2.0 repack",
@@ -78,8 +89,8 @@ def service_declarations() -> dict[str, Any]:
             "codec": "Existing PyAV/FFmpeg build-specific notices; no codec certification"}}
 
 
-def recipe_sha256() -> str:
-    return hashlib.sha256(canonical({"service": service_declarations(),
+def recipe_sha256(gpu_id: str = GPU_ID) -> str:
+    return hashlib.sha256(canonical({"service": service_declarations(gpu_id),
         "candidate_sha256": CANDIDATE_SHA256, "template_sha256": SOURCE_SHA256,
         "qwen_sdk_revision": "022e286b98fbec7e1e916cb940cdf532cd9f488e",  # pragma: allowlist secret - public source revision
         "qwen_base_revision": "fd4b254389122332181a7c3db7f27e918eec64e3",  # pragma: allowlist secret - public model revision

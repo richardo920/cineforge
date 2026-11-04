@@ -41,18 +41,20 @@ def reapprove(gate, **changes):
 
 
 class PairTransferTests(unittest.TestCase):
+    gpu_id = profile.GPU_ID
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="cf-s2v-stage-")
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name).resolve()
-        self.gate, self.calls = context(self.root)
+        self.gate, self.calls = context(self.root, gpu_id=self.gpu_id)
         self.selection = select_s2v(self.gate)
         self.remote = self.root / "worker"
         (self.remote / "ComfyUI" / "input").mkdir(parents=True, mode=0o700)
         self.key = self.root / "synthetic-key"
         self.key.write_bytes(b"synthetic fixture, not real credential")
         self.key.chmod(0o600)
-        self.spec = RunpodPodSpec("s2v-synthetic", profile.IMAGE, profile.GPU_ID, "EU-RO-1",
+        self.spec = RunpodPodSpec("s2v-synthetic", profile.IMAGE, self.gpu_id, "EU-RO-1",
             legacy_spec().ssh_public_key, max_hourly_usd=1.25, min_ram_per_gpu_gb=64, disk_gb=150)
         self.remaining = 600
         self.plan = WorkerGuardPlan("owned-worker", self.spec.session_id, "a" * 32,
@@ -60,6 +62,9 @@ class PairTransferTests(unittest.TestCase):
         self.budget = SimpleNamespace(approval=self.gate.service.approval,
             remaining_seconds=lambda _: self.remaining, guard_plan=lambda _: self.plan)
         self.runtime = dict(runtime_fixture(), compute_precision="bf16")
+        if self.gpu_id == profile.L40S_GPU_ID:
+            self.runtime.update(python_version="3.11.14", gpu_raw_name=self.gpu_id, gpu_memory_mib=46000,
+                nvml_total_mib=46068, nvml_reserved_mib=68, capability=[8, 9], arch_list=["sm_86"])
         self.requests = []
         self.loss = None
         self.fault = None

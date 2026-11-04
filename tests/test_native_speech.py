@@ -54,7 +54,7 @@ def pin(path, payload):
     return (path, len(payload), "sha256", hashlib.sha256(payload).hexdigest())
 
 
-def selection(root):
+def selection(root, *, hardware=None):
     binary = root / "python"
     binary.write_bytes(b"synthetic interpreter; never executed")
     binary.chmod(0o600)
@@ -63,7 +63,7 @@ def selection(root):
     trees = [NativeTree(str(root / name), files) for name, files in (
         ("runtime", (pin("example.dist-info/METADATA", b"Name: example\nVersion: 1\n"),)),
         ("sdk", SDK_FILES), ("base", BASE_FILES), ("design", DESIGN_FILES))]
-    hardware = NativeHardware("synthetic-worker", "Synthetic CUDA", 32768, (12, 0))
+    hardware = hardware or NativeHardware("synthetic-worker", "Synthetic CUDA", 32768, (12, 0))
     subject = native_subject(python, python, *trees, hardware)
     return NativeSpeechSelection(python, python, *trees, hardware, subject, HASH)
 

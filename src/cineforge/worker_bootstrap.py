@@ -27,7 +27,14 @@ import zlib
 from pathlib import Path
 from typing import Any
 
-from cineforge.worker_profiles import I2V_WORKER, S2V_WORKER, T2V_WORKER, WorkerProfile
+from cineforge.worker_profiles import (
+    I2V_WORKER,
+    S2V_PROFILE_IDS,
+    S2V_WORKER,
+    T2V_WORKER,
+    WorkerProfile,
+    s2v_worker,
+)
 
 # Existing inspection names remain available; operational data is immutable and shared.
 REVISION = T2V_WORKER.runner_revision
@@ -452,26 +459,27 @@ def resource_evidence(root: Path, *, proc: Path = Path("/proc"),
     return {**result, "filesystem_total_bytes": disk.total, "filesystem_free_bytes": disk.free}
 
 
-def validate_m4_runtime(runtime: dict[str, Any]) -> None:
-    requirements = I2V_WORKER.reference_runtime
+def _validate_reference_runtime(runtime: dict[str, Any], configured: WorkerProfile) -> None:
+    requirements = configured.reference_runtime
     if requirements is None:
         raise BootstrapError("reference runtime profile unavailable")
     fields = {"python_version", "torch_version", "torchvision_version", "cuda_version",
               "gpu_raw_name", "gpu_memory_mib", "cuda_available", "arch_list", "capability",
               "cuda_kernel_ok", "device_count", "nvml_total_mib",
               "nvml_reserved_mib", "driver_version"} | M4_RESOURCE_FIELDS
-    if (set(runtime) != fields or runtime["gpu_raw_name"] != I2V_WORKER.gpu
+    if (set(runtime) != fields or runtime["gpu_raw_name"] != configured.gpu
             or runtime["cuda_available"] is not True or runtime["cuda_kernel_ok"] is not True
             or type(runtime["gpu_memory_mib"]) is not int
-            or not I2V_WORKER.minimum_memory_mib <= runtime["gpu_memory_mib"]
+            or not configured.minimum_memory_mib <= runtime["gpu_memory_mib"]
             <= requirements.maximum_memory_mib
             or type(runtime["device_count"]) is not int or runtime["device_count"] != 1
             or runtime["capability"] != list(requirements.capability)
             or any(type(v) is not int for v in runtime["capability"])
             or runtime["torch_version"] != requirements.torch_version
-            or runtime["cuda_version"] != I2V_WORKER.cuda_version
+            or runtime["cuda_version"] != configured.cuda_version
             or not isinstance(runtime["arch_list"], list)
-            or requirements.architecture not in runtime["arch_list"]
+            or not (requirements.architecture in runtime["arch_list"]
+                or configured.profile_id == S2V_PROFILE_IDS[1] and "sm_86" in runtime["arch_list"])
             or len(runtime["arch_list"]) > 64
             or any(not isinstance(v, str) or re.fullmatch(r"(?:sm|compute)_[0-9a-z]{2,8}", v)
                    is None for v in runtime["arch_list"])
@@ -497,10 +505,13 @@ def validate_m4_runtime(runtime: dict[str, Any]) -> None:
         raise BootstrapError("M4 container memory or filesystem headroom insufficient")
 
 
+def validate_m4_runtime(runtime: dict[str, Any]) -> None:
+    _validate_reference_runtime(runtime, I2V_WORKER)
+
 def checked_profile(value: Any) -> dict[str, Any] | None:
     if value is None:
         return None
-    if isinstance(value, dict) and value.get("id") == S2V_WORKER.profile_id:
+    if isinstance(value, dict) and value.get("id") in S2V_PROFILE_IDS:
         if (set(value) != {"id", "scope_sha256"} or type(value["scope_sha256"]) is not str
                 or re.fullmatch(r"[0-9a-f]{64}", value["scope_sha256"]) is None):
             raise BootstrapError("invalid closed M5 service scope")
@@ -521,34 +532,41 @@ def checked_profile(value: Any) -> dict[str, Any] | None:
 def _configuration(value: Any) -> WorkerProfile:
     checked = checked_profile(value)
     return T2V_WORKER if checked is None else (
-        S2V_WORKER if checked["id"] == S2V_WORKER.profile_id else I2V_WORKER)
+        s2v_worker(checked["id"]) if checked["id"] in S2V_PROFILE_IDS else I2V_WORKER)
 
 
-def validate_s2v_runtime(runtime: dict[str, Any]) -> None:
-    """Same reviewed5090 resources plus an actual BF16 attention-kernel probe."""
+def validate_s2v_runtime(runtime: dict[str, Any], *,
+                         profile_id: str = S2V_WORKER.profile_id) -> None:
+    """Exact selected M5 resources plus the observed BF16 attention-kernel probe."""
+    configured = s2v_worker(profile_id)
+    if (profile_id == S2V_PROFILE_IDS[1] and (type(runtime.get("python_version")) is not str
+            or re.fullmatch(r"3\.11\.[0-9]{1,3}", runtime["python_version"]) is None)):
+        raise BootstrapError("M5 fixed interpreter ABI unavailable")
     if runtime.get("compute_precision") != "bf16":
         raise BootstrapError("M5 BF16 compute capability unavailable")
-    validate_m4_runtime({key: value for key, value in runtime.items()
-                         if key != "compute_precision"})
+    _validate_reference_runtime({key: value for key, value in runtime.items()
+                                 if key != "compute_precision"}, configured)
 
 
-def validate_s2v_admission(runtime: dict[str, Any]) -> None:
+def validate_s2v_admission(runtime: dict[str, Any], *,
+                           profile_id: str = S2V_WORKER.profile_id) -> None:
     """NVML/stdlib hardware only; no claim that unreviewed Python imports are ready."""
+    configured = s2v_worker(profile_id)
     if "admission_status" not in runtime:
-        validate_s2v_runtime(runtime)
+        validate_s2v_runtime(runtime, profile_id=profile_id)
         return
     fields = {"admission_status", "python_version", "gpu_raw_name", "gpu_memory_mib",
               "capability", "device_count", "nvml_total_mib", "nvml_reserved_mib",
               "driver_version"} | M4_RESOURCE_FIELDS
-    requirements = S2V_WORKER.reference_runtime
+    requirements = configured.reference_runtime
     if (requirements is None or set(runtime) != fields
             or runtime["admission_status"] != "hardware_only_unverified_runtime"
-            or runtime["gpu_raw_name"] != S2V_WORKER.gpu
-            or runtime["capability"] != [12, 0]
+            or runtime["gpu_raw_name"] != configured.gpu
+            or runtime["capability"] != list(requirements.capability)
             or any(type(v) is not int for v in runtime["capability"])
             or type(runtime["device_count"]) is not int or runtime["device_count"] != 1
             or type(runtime["gpu_memory_mib"]) is not int
-            or not S2V_WORKER.minimum_memory_mib <= runtime["gpu_memory_mib"] <= requirements.maximum_memory_mib
+            or not configured.minimum_memory_mib <= runtime["gpu_memory_mib"] <= requirements.maximum_memory_mib
             or runtime["nvml_total_mib"] != runtime["gpu_memory_mib"]
             or type(runtime["nvml_reserved_mib"]) is not int
             or not 0 <= runtime["nvml_reserved_mib"] < runtime["nvml_total_mib"]
@@ -569,7 +587,9 @@ def validate_s2v_admission(runtime: dict[str, Any]) -> None:
         raise BootstrapError("M5 hardware resources unavailable")
 
 
-def s2v_hardware_admission(root: Path, deadline: float) -> dict[str, Any]:
+def s2v_hardware_admission(root: Path, deadline: float, *,
+                           profile_id: str = S2V_WORKER.profile_id) -> dict[str, Any]:
+    s2v_worker(profile_id)
     import platform
     if (sys.implementation.name != "cpython" or sys.version_info[:2] != (3, 11)
             or sys.platform != "linux" or platform.machine() != "x86_64"):
@@ -585,7 +605,7 @@ def s2v_hardware_admission(root: Path, deadline: float) -> dict[str, Any]:
         gpu_raw_name=values[0].strip(), gpu_memory_mib=int(values[1]), nvml_total_mib=int(values[1]),
         nvml_reserved_mib=int(values[2]), capability=[int(v) for v in values[3].strip().split(".")],
         device_count=1, driver_version=values[4].strip(), **resource_evidence(root))
-    validate_s2v_admission(result)
+    validate_s2v_admission(result, profile_id=profile_id)
     if time.monotonic() >= deadline:
         raise BootstrapError("M5 hardware admission deadline exhausted")
     return result
@@ -595,7 +615,7 @@ def runtime_probe(timeout: float, python: str = sys.executable, *,
                   profile: dict[str, Any] | None = None, resource_root: Path | None = None) \
         -> dict[str, Any]:
     configured = _configuration(profile)
-    if configured is S2V_WORKER:
+    if configured.profile_id in S2V_PROFILE_IDS:
         raise BootstrapError("M5 imports require the closed Comfy production launcher")
     requirements = configured.reference_runtime
     deadline = time.monotonic() + timeout
@@ -617,7 +637,7 @@ def runtime_probe(timeout: float, python: str = sys.executable, *,
                 "arch_list=torch.cuda.get_arch_list(),capability=list(torch.cuda.get_device_capability()),"
                 "device_count=torch.cuda.device_count(),"
                 "cuda_kernel_ok=bool(torch.isfinite(y).all().item()))))")
-        if configured is S2V_WORKER:
+        if configured.profile_id in S2V_PROFILE_IDS:
             code = code.replace("device='cuda');", "device='cuda',dtype=torch.bfloat16);")
             code = code.replace("cuda_kernel_ok=", "compute_precision='bf16' if x.dtype == torch.bfloat16 else 'invalid',cuda_kernel_ok=")
     runtime = _json(bounded_process([python, "-c", code], timeout=timeout))
@@ -658,8 +678,8 @@ def runtime_probe(timeout: float, python: str = sys.executable, *,
         runtime.update(nvml_total_mib=total, nvml_reserved_mib=reserved,
                        driver_version=values[2].strip())
         runtime.update(resource_evidence(resource_root or Path("/workspace")))
-        if configured is S2V_WORKER:
-            validate_s2v_runtime(runtime)
+        if configured.profile_id in S2V_PROFILE_IDS:
+            validate_s2v_runtime(runtime, profile_id=configured.profile_id)
         else:
             validate_m4_runtime(runtime)
     return runtime
@@ -692,8 +712,8 @@ def arm(request: dict[str, Any], deadline: float) -> dict[str, Any]:
         raise BootstrapError("worker guard exited")
     guard_alive(root, process.pid)
     private_write(root, "guard-pid.json", encode({"pid": process.pid}))
-    runtime = (s2v_hardware_admission(root, deadline) if profile is not None
-               and profile["id"] == S2V_WORKER.profile_id else
+    runtime = (s2v_hardware_admission(root, deadline, profile_id=profile["id"]) if profile is not None
+               and profile["id"] in S2V_PROFILE_IDS else
                runtime_probe(max(.01, deadline - time.monotonic()), profile=profile, resource_root=root)
                if profile is not None else runtime_probe(max(.01, deadline - time.monotonic())))
     return {"receipt": {"plan": plan, "source_sha256": hashlib.sha256(source).hexdigest(),
@@ -719,7 +739,7 @@ def download(root: Path, asset: dict[str, Any], deadline: float, *,
     configured = _configuration(profile)
     revision, distribution = configured.model_revision, configured.distribution
     path = asset["path"]
-    folders = "diffusion_models|text_encoders|vae" + ("|audio_encoders" if configured is S2V_WORKER else "")
+    folders = "diffusion_models|text_encoders|vae" + ("|audio_encoders" if configured.profile_id in S2V_PROFILE_IDS else "")
     if (not isinstance(path, str) or re.fullmatch(r"split_files/(" + folders + r")"
             r"/[A-Za-z0-9._-]+\.safetensors", path) is None
             or asset["revision"] != revision
@@ -780,7 +800,7 @@ def setup(request: dict[str, Any], deadline: float) -> dict[str, Any]:
             reason = error.reason
         if reason not in SETUP_REASONS[progress["stage"]]:
             reason, status = "unknown", {}
-        schema = "m5-setup-failure-v1" if profile is not None and profile["id"] == S2V_WORKER.profile_id else "m4-setup-failure-v1"
+        schema = "m5-setup-failure-v1" if profile is not None and profile["id"] in S2V_PROFILE_IDS else "m4-setup-failure-v1"
         raise SetupFailure({"schema": schema, **progress,
                             "reason": reason, **status}) from None
 
@@ -796,9 +816,9 @@ def _setup(request: dict[str, Any], deadline: float,
     configured = _configuration(profile)
     revision = configured.model_revision
     root = worker_root(plan["session_id"])
-    if configured is S2V_WORKER:
+    if configured.profile_id in S2V_PROFILE_IDS:
         raise BootstrapError("M5 requires the separately reviewed fixed Comfy installer", reason="setup_rejected")
-    if configured is S2V_WORKER:
+    if configured.profile_id in S2V_PROFILE_IDS:
         subject = selection.get("approval", {}).get("model_workflow", {}).get("approved_subject_sha256")
         if type(subject) is not str or re.fullmatch(r"[0-9a-f]{64}", subject) is None:
             raise BootstrapError("M5 setup requires an exact materialized request subject")
@@ -878,7 +898,7 @@ def _setup(request: dict[str, Any], deadline: float,
     stage("server_start")
     command = [python, "main.py", "--listen", "127.0.0.1", "--port", "8188",
         "--disable-all-custom-nodes", "--disable-api-nodes", "--disable-auto-launch"]
-    if configured is S2V_WORKER:
+    if configured.profile_id in S2V_PROFILE_IDS:
         command.append("--bf16-unet")
         private_write(root, "s2v-component-notices.json", encode(selection["component_notices"]))
     process = subprocess.Popen(command, cwd=comfy,
@@ -948,7 +968,7 @@ def dispatch(request: dict[str, Any]) -> dict[str, Any]:
         raise BootstrapError("worker guardian source changed")
     guard_alive(root, pid)
     if operation.startswith("native_"):
-        if profile is None or profile["id"] != S2V_WORKER.profile_id:
+        if profile is None or profile["id"] not in S2V_PROFILE_IDS:
             raise BootstrapError("native speech requires the closed M5 service profile")
         from cineforge.native_remote_bootstrap import nr_dispatch
         return nr_dispatch(request, deadline)
@@ -960,7 +980,7 @@ def dispatch(request: dict[str, Any]) -> dict[str, Any]:
     if operation == "stage_reference":
         return stage_reference(request, root)
     if operation in ("s2v_pair_begin", "s2v_pair_chunk", "s2v_pair_finish"):
-        if profile is None or profile["id"] != S2V_WORKER.profile_id:
+        if profile is None or profile["id"] not in S2V_PROFILE_IDS:
             raise BootstrapError("paired media requires the closed M5 service profile")
         from cineforge.s2v_stage import paired_transfer
         return paired_transfer(request, root)

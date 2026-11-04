@@ -28,6 +28,7 @@ from cineforge.native_remote_plan import (
     nr_token,
 )
 from cineforge.worker_bootstrap import bounded_process
+from cineforge.worker_profiles import S2V_WORKER, s2v_worker
 
 # Replaced by worker_bundle with identities of the complete installed first party.
 NR_PACKAGE_SHA256 = ""
@@ -271,7 +272,10 @@ def nr_package(root: Path, *, install: bool = False) -> Path:
     return target
 
 
-def nr_preflight(deadline: float) -> dict[str, Any]:
+def nr_preflight(deadline: float, *, profile_id: str = S2V_WORKER.profile_id) -> dict[str, Any]:
+    configured = s2v_worker(profile_id)
+    requirements = configured.reference_runtime
+    assert requirements is not None
     # Measurements precede network staging; no Torch/SDK imports or apt fallback.
     if (
         sys.implementation.name != "cpython"
@@ -323,9 +327,9 @@ def nr_preflight(deadline: float) -> dict[str, Any]:
     gpu = probe.decode("ascii").strip().split(",")
     if (
         len(gpu) != 3
-        or gpu[0].strip() != "NVIDIA GeForce RTX 5090"
-        or int(gpu[1].strip()) < 30720
-        or gpu[2].strip() != "12.0"
+        or gpu[0].strip() != configured.gpu
+        or not configured.minimum_memory_mib <= int(gpu[1].strip()) <= requirements.maximum_memory_mib
+        or gpu[2].strip() != ".".join(str(x) for x in requirements.capability)
     ):
         raise ValueError("native GPU capability differs from guarded M5 recipe")
     result = {
@@ -409,7 +413,7 @@ def _nr_dispatch(request: dict[str, Any], deadline: float) -> tuple[dict[str, An
                     if (hashlib.sha256(captured).hexdigest() != request["capabilities_sha256"]
                             or nr_encode(nr_capabilities(deadline, binding)) != captured):
                         raise ValueError("fixed native capability facts changed before staging")
-                result = nr_preflight(deadline)
+                result = nr_preflight(deadline, profile_id=request["profile"]["id"])
                 if "capabilities_sha256" in request:
                     rows = nr_json(captured)["files"]
                     for role in ("interpreter", "seccomp"):
