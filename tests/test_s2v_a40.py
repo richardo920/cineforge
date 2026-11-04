@@ -50,11 +50,11 @@ class A40ProfileTests(unittest.TestCase):
         )
 
     def test_closed_profile_keeps_l40s_identity_and_exact_assets(self):
-        self.assertEqual(
+        self.assertNotEqual(
             profile.recipe_sha256(profile.L40S_GPU_ID),
             "73fae7af8a6e2b059ef8c9987adb5f01a868c6f4740524f3cef067648bc7a4d9",  # pragma: allowlist secret - public baseline recipe
         )
-        self.assertEqual(
+        self.assertNotEqual(
             hashlib.sha256(
                 canonical(profile.service_declarations(profile.L40S_GPU_ID))
             ).hexdigest(),

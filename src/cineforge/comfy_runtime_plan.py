@@ -7,6 +7,7 @@ import re
 from typing import Any
 from urllib.parse import urlsplit
 
+from cineforge.comfy_precision import FIRST_PARTY_NODES, PRECISION
 from cineforge.native_remote_plan import nr_digest, nr_hash
 from cineforge.native_speech_integrity import NativeBinary, NativeTree
 from cineforge.s2v_profile import IMAGE
@@ -18,11 +19,12 @@ from cineforge.worker_profiles import (
     s2v_worker,
 )
 
-COMFY_POLICY = "m5-closed-wheel-runtime-v1"
+COMFY_POLICY = "m5-closed-wheel-runtime-v2-bf16"
 COMFY_EXECUTION = {"PYTORCH_JIT": "0", "TORCH_COMPILE_DISABLE": "1",
                    "attention": "pytorch-sdpa", "serialized_jit": "forbidden",
                    "model_format": "four-fixed-safetensors", "custom_nodes": False,
-                   "import_layout": "site-only-fixed-sympy-manpage-v1"}
+                   "import_layout": "site-only-fixed-sympy-manpage-v1",
+                   "first_party_nodes": FIRST_PARTY_NODES, "model_precision": PRECISION}
 COMFY_SHARED_OWNERS = tuple(sorted("nvidia-" + name + "-cu12" for name in (
     "cublas", "cuda-cupti", "cuda-nvrtc", "cuda-runtime", "cufft", "cufile", "curand",
     "cusolver", "cusparse", "nvjitlink", "nvtx")))

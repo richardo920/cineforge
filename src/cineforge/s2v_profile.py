@@ -5,6 +5,7 @@ import hashlib
 import re
 from typing import Any
 
+from cineforge.comfy_precision import FIRST_PARTY_NODES, PRECISION
 from cineforge.conditioning_profile import IMAGE as IMAGE
 from cineforge.conditioning_profile import WORKFLOW_LICENSE as WORKFLOW_LICENSE
 from cineforge.devices import Backend, ModelSpec, Precision
@@ -67,6 +68,7 @@ def graph(actor_sha256: str, speech_sha256: str, language: str) -> dict[str, Any
             for value in (actor_sha256, speech_sha256)) or language not in ("en", "zh")):
         raise ValueError("invalid checked S2V graph input")
     value = strict_object(_CANDIDATE)
+    value["161"]["class_type"] = "CineforgeBF16UNETLoader"
     value["160"]["inputs"]["image"] = "actor-" + actor_sha256 + ".png"
     value["162"]["inputs"]["audio"] = "speech-" + speech_sha256 + ".wav"
     value["152"]["inputs"]["seed"] = {"en": 5201, "zh": 5202}[language]
@@ -83,7 +85,9 @@ def service_declarations(gpu_id: str = GPU_ID) -> dict[str, Any]:
             "allowed_backends": ["cuda"], "minimum_memory_mib": MEMORY_MIB,
             "required_precision": COMPUTE_PRECISION, "storage_precision": STORAGE_PRECISION,
             "license": "Apache-2.0", "commercial_use": True, "files": model_files()},
-        "runner": {"revision": RUNNER_REVISION, "custom_nodes": []},
+        "runner": {"revision": RUNNER_REVISION, "custom_nodes": [],
+            "first_party_nodes": {name: dict(declaration) for name, declaration in FIRST_PARTY_NODES.items()},
+            "precision": dict(PRECISION)},
         "hardware": {"gpu": selected.gpu, "min_ram_per_gpu_gb": MIN_RAM_PER_GPU_GB},
         "component_notices": {"wan_code_weights_vae": "Apache-2.0; retain origin/repack notices",
             "text_encoder": "google/umt5-xxl; Apache-2.0; scaled repack",
@@ -95,7 +99,9 @@ def service_declarations(gpu_id: str = GPU_ID) -> dict[str, Any]:
 
 def recipe_sha256(gpu_id: str = GPU_ID) -> str:
     return hashlib.sha256(canonical({"service": service_declarations(gpu_id),
-        "candidate_sha256": CANDIDATE_SHA256, "template_sha256": SOURCE_SHA256,
+        "technical_recipe": "m5-s2v-bf16-quant-ops-v2",
+        "candidate_sha256": CANDIDATE_SHA256, "first_party_nodes": FIRST_PARTY_NODES,
+        "precision": PRECISION, "template_sha256": SOURCE_SHA256,
         "qwen_sdk_revision": "022e286b98fbec7e1e916cb940cdf532cd9f488e",  # pragma: allowlist secret - public source revision
         "qwen_base_revision": "fd4b254389122332181a7c3db7f27e918eec64e3",  # pragma: allowlist secret - public model revision
         "qwen_design_revision": "5ecdb67327fd37bb2e042aab12ff7391903235d3",  # pragma: allowlist secret - public model revision

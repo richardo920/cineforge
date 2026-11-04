@@ -532,7 +532,8 @@ class SSHWorker:
         if (type(absolute_deadline) not in (int, float) or not math.isfinite(absolute_deadline)
                 or request.get("operation") not in {"native_capabilities", "native_preflight", "native_begin", "native_chunk",
                     "native_finish", "native_setup", "native_select", "native_invoke", "native_fetch",
-                    "native_comfy_install", "native_comfy_model", "native_comfy_setup", "native_comfy_verify"}):
+                    "native_comfy_install", "native_comfy_model", "native_comfy_setup", "native_comfy_verify",
+                    "native_comfy_precision_begin", "native_comfy_precision_finish"}):
             raise WorkerError("invalid fixed native dispatch")
         timeout = min(1200, absolute_deadline-time.monotonic(),
                       self.budget.remaining_seconds(self._key)-120)
@@ -1017,6 +1018,8 @@ class SupervisedComfyTransport:
         if (type(self.worker.selection) is S2VServiceContext
                 and method == "POST" and path == "/prompt"):
             self.worker.verify_comfy_current(absolute_deadline=deadline)
+            assert self.worker._closed_comfy is not None
+            self.worker._closed_comfy.require_precision_post(self.worker, body, deadline=deadline)
         reserve = 120 if type(self.worker.selection) is S2VServiceContext else 0
         remaining = min(require_time(deadline, clock),
                         self.worker.budget.remaining_seconds(self.worker._key) - reserve)

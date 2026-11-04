@@ -353,6 +353,9 @@ def remote_operation(
     request: dict[str, Any], root: Path, deadline: float, binding: dict[str, Any]
 ) -> dict[str, Any]:
     op = request["operation"]
+    if op in ("native_comfy_precision_begin", "native_comfy_precision_finish"):
+        from cineforge.comfy_precision_worker import precision_operation
+        return precision_operation(request, root, deadline, binding)
     if op in ("native_comfy_install", "native_comfy_model", "native_comfy_setup", "native_comfy_verify"):
         from cineforge.comfy_runtime_worker import (
             current_comfy,

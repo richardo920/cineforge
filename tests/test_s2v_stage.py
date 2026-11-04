@@ -80,6 +80,11 @@ class PairTransferTests(unittest.TestCase):
         # This suite's synthetic Comfy wire does not prove an installed runtime.
         closed = object.__new__(ClosedComfyRuntime)
         closed.verify = lambda driver, selected, **kw: selected.gate.preflight()
+        # Synthetic protocol surrogates only; separate precision tests exercise actual contracts.
+        closed.begin_precision = lambda driver, selected, **kw: {"synthetic_precision": "intent"}
+        closed.finish_precision = lambda driver, selected, prompt_id, **kw: {"synthetic_precision": prompt_id}
+        closed.abandon_precision = lambda: None
+        closed.require_precision_post = lambda driver, body, **kw: None
         driver._closed_comfy, driver._comfy_selection = closed, self.selection
         driver._request = self.rpc
         self.addCleanup(driver.close)

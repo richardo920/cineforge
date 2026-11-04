@@ -268,7 +268,7 @@ def install_comfy(request: dict[str, Any], native: Path, deadline: float) -> dic
         raise ValueError("closed Comfy source or image scope differs")
     root = bootstrap.worker_root(request["plan"]["session_id"])
     # Empty destinations only. A prior failed install is never overwritten/reused.
-    for name in ("ComfyUI", "comfy-runtime", "comfy-downloads", "comfy-output", "comfy-user", "comfy-temp", "comfy-notices"):
+    for name in ("ComfyUI", "comfy-runtime", "comfy-downloads", "comfy-output", "comfy-user", "comfy-temp", "comfy-notices", "comfy-precision"):
         (root / name).mkdir(mode=0o700)
     for notice in plan["notices"]:
         path = root / "comfy-notices" / (notice["sha256"] + ".txt")
