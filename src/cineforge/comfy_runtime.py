@@ -3,9 +3,12 @@ from __future__ import annotations
 
 import hashlib
 import time
+import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Protocol
 
+from cineforge.comfy_precision import POLICY, precision_receipt, precision_request
 from cineforge.comfy_runtime_plan import comfy_plan, comfy_subject, comfy_worker
 from cineforge.native_remote_plan import NR_BLOB_MAX, nr_encode, nr_hash, nr_json
 
@@ -101,6 +104,9 @@ class ClosedComfyRuntime:
         self._prepared = False
         self._subject: str | None = None
         self._expires_unix: float | None = None
+        self._precision: dict[str, Any] | None = None
+        self._precision_used: set[str] = set()
+        self._precision_posted = False
 
     def _poison(self) -> None:
         self._unresolved = True
@@ -200,3 +206,94 @@ class ClosedComfyRuntime:
         except BaseException:
             self._poison()
             raise ValueError("closed Comfy current verification failed") from None
+
+
+    def begin_precision(self, worker: Any, selection: Any, *, deadline: float) -> dict[str, Any]:
+        """Consume one exact active intent before POST; ACK loss poisons, never replay."""
+        from cineforge.native_remote_package import native_package
+        from cineforge.native_remote_plan import nr_digest
+        from cineforge.private_store import read_private_input
+        from cineforge.workflows import strict_object
+        if not self._prepared or self._precision is not None or len(self._precision_used) >= 2:
+            raise ValueError("current precision intent unavailable or consumed")
+        plan = self._admit(worker, deadline)
+        worker._require_s2v(selection)
+        language = selection.gate.utterance.language
+        if language not in ("en", "zh") or language in self._precision_used:
+            raise ValueError("language precision intent already consumed")
+        self._precision_used.add(language)
+        nonce = uuid.uuid4().hex
+        package, _ = native_package()
+        assert self._bridge._binding is not None
+        expected = dict(version=1, policy=POLICY, nonce=nonce,
+            nonce_graph_sha256=nr_digest(strict_object(selection.graph_json)),
+            selection_sha256=selection.approved_subject_sha256,
+            comfy_sha256=comfy_subject(plan), runtime_sha256=nr_digest(plan["installed"]),
+            source_sha256=nr_digest(plan["source"]), package_sha256=hashlib.sha256(package).hexdigest(),
+            binding_sha256=nr_digest(self._bridge._binding), worker_id=self._bridge._binding["worker"],
+            session_id=self._bridge._binding["session"], profile_id=worker.selection.worker_profile["id"],
+            enforcer_sha256=hashlib.sha256(read_private_input(
+                Path(__file__).with_name("comfy_model_precision.py"), max_bytes=256*1024)).hexdigest())
+        try:
+            reply = precision_request(self._call("native_comfy_precision_begin", deadline,
+                comfy_subject_sha256=comfy_subject(plan), precision_nonce=nonce,
+                precision_binding={k: expected[k] for k in
+                    ("version", "policy", "nonce_graph_sha256", "selection_sha256")}))
+            if {k:v for k,v in reply.items() if k != "deadline"} != expected:
+                raise ValueError
+            self._admit(worker, deadline)
+            worker._require_s2v(selection)
+            if time.monotonic() >= deadline:
+                raise ValueError
+            self._precision = reply
+            self._precision_posted = False
+            return dict(reply)
+        except BaseException:
+            self._poison()
+            raise ValueError("actual precision begin incomplete; never replay") from None
+
+    def finish_precision(self, worker: Any, selection: Any, prompt_id: str,
+                         *, deadline: float) -> dict[str, Any]:
+        if self._precision is None or not self._precision_posted:
+            raise ValueError("current owned precision intent required")
+        request, self._precision = self._precision, None  # Consume before fallible validation/I/O.
+        try:
+            plan = self._admit(worker, deadline)
+            worker._require_s2v(selection)
+            if request["selection_sha256"] != selection.approved_subject_sha256:
+                raise ValueError
+            reply = precision_receipt(self._call("native_comfy_precision_finish", deadline,
+                comfy_subject_sha256=comfy_subject(plan), precision_nonce=request["nonce"],
+                precision_prompt_id=prompt_id), request)
+            if reply["prompt_id"] != prompt_id:
+                raise ValueError
+            self._admit(worker, deadline)
+            worker._require_s2v(selection)
+            if time.monotonic() >= deadline:
+                raise ValueError
+            return reply
+        except BaseException:
+            self._poison()
+            raise ValueError("actual model precision missing, failed or stale; never replay") from None
+
+
+    def require_precision_post(self, worker: Any, body: Any, *, deadline: float) -> None:
+        from cineforge.native_remote_plan import nr_digest
+        if self._precision is None or self._precision_posted:
+            raise ValueError("active current precision intent required before POST")
+        self._precision_posted = True  # One attempted POST, including preflight/ACK uncertainty.
+        self._admit(worker, deadline)
+        selection = worker._comfy_selection
+        worker._require_s2v(selection)
+        if (type(body) is not dict or set(body) != {"prompt"} or type(body["prompt"]) is not dict
+                or any(type(n) is not dict or set(n) != {"class_type", "inputs"}
+                       for n in body["prompt"].values())
+                or nr_digest(body["prompt"]) != self._precision["nonce_graph_sha256"]
+                or selection.approved_subject_sha256 != self._precision["selection_sha256"]
+                or time.monotonic() >= deadline):
+            raise ValueError("POST differs from current exact precision request")
+
+
+    def abandon_precision(self) -> None:
+        """Any incomplete current attempt poisons new native/Comfy work, never cleanup."""
+        self._poison()

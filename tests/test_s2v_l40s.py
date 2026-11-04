@@ -79,12 +79,12 @@ class L40SProfileTests(unittest.TestCase):
         )
 
     def test_default_bytes_closed_variant_and_same_assets_graph_model(self):
-        # Public pre-change source-declaration digests, not credentials.
-        self.assertEqual(
+        # Superseded M5 scopes must be stale after explicit first-party BF16 policy.
+        self.assertNotEqual(
             profile.recipe_sha256(),
             "69be64e25b56bfe43a46e74664e4c47540f5bc47b077c54a33b518f0b21ba4a8",  # pragma: allowlist secret - public baseline recipe hash
         )
-        self.assertEqual(
+        self.assertNotEqual(
             hashlib.sha256(canonical(profile.service_declarations())).hexdigest(),
             "789cadad39efc0a6abe365a8956d42771c555f50d8d86d4638b87e000f4f28e2",  # pragma: allowlist secret - public baseline declaration hash
         )

@@ -1,6 +1,7 @@
 """Fixed no-site M5 Comfy process entrypoint; never selects code from creative JSON."""
 from __future__ import annotations
 
+import importlib
 import os
 import sys
 import time
@@ -204,6 +205,8 @@ def _startup_observer(root: Path, deadline: float) -> None:
         try:
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
             while time.monotonic() < deadline:
+                from cineforge.comfy_model_precision import installed_nodes
+                installed_nodes()
                 _require_jit_disabled(sys.modules["torch"])
                 try:
                     with opener.open("http://127.0.0.1:8188/system_stats", timeout=min(1, deadline-time.monotonic())) as reply:
@@ -248,6 +251,7 @@ def main() -> int:
         if any(value[key] != previous[key] for key in ("imports", "native_files", "codecs", "abi",
                                                       "execution_sha256", "jit_enabled_before", "jit_enabled_after")):
             raise ValueError
+        native_package_root = Path(sys.argv[1]).parent
         sys.path.insert(0, str(root / "ComfyUI"))
         import runpy
         sys.argv = [str(root / "ComfyUI/main.py"), "--listen", "127.0.0.1", "--port", "8188",
@@ -257,6 +261,15 @@ def main() -> int:
             "--output-directory", str(root / "comfy-output"), "--user-directory", str(root / "comfy-user"),
             "--temp-directory", str(root / "comfy-temp")]
         sys.argv.extend(["--front-end-root", str(root / "comfy-runtime/site/comfyui_frontend_package/static")])
+        importlib.import_module("comfy.options").enable_args_parsing()
+        from cineforge.comfy_model_precision import install
+        from cineforge.comfy_runtime_plan import comfy_subject
+        native = native_package_root
+        binding = nr_json(nr_read(native / "binding.json"))
+        install(root, deadline, dict(worker_id=binding["worker"], session_id=binding["session"],
+            profile_id=comfy_worker(plan).profile_id, binding_sha256=nr_digest(binding),
+            package_sha256=binding["package"], comfy_sha256=comfy_subject(plan),
+            source_sha256=nr_digest(plan["source"]), runtime_sha256=nr_digest(plan["installed"])))
         nr_check(deadline)
         _startup_observer(root, deadline)
         runpy.run_path(sys.argv[0], run_name="__main__")

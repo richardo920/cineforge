@@ -230,12 +230,24 @@ def run_s2v(selection: S2VSelection, verification: WorkerVerification, driver: S
                 remaining = min(deadline - clock(), driver.budget.remaining_seconds(driver._key) - 120)
                 if remaining <= 0:
                     raise ValueError
+                if driver._closed_comfy is None:
+                    raise ValueError("current closed precision runtime required")
+                precision_intent = driver._closed_comfy.begin_precision(driver, selection, deadline=deadline)
+                record["precision_intent"] = precision_intent
+                checkpoint(store)
+                _admit(selection, verification, driver, deadline, clock)
                 manifest = execute(selection.plan(), selection, verification, directory / "shot",
                     allow_live=True, endpoint=endpoint,
                     transport=transport, timeout_seconds=remaining, clock=clock,
                     result_timeout_seconds=min(30, remaining / 2), absolute_deadline=deadline)
                 # Preserve paid output identity before fallible technical inspection.
                 record.update(outcome="generated", manifest=manifest.to_dict())
+                checkpoint(store)
+                _admit(selection, verification, driver, deadline, clock)
+                if len(manifest.shot_runs) != 1:
+                    raise ValueError("exact precision job identity required")
+                record["model_precision"] = driver._closed_comfy.finish_precision(
+                    driver, selection, manifest.shot_runs[0].job_id, deadline=deadline)
                 checkpoint(store)
                 _admit(selection, verification, driver, deadline, clock)
                 measured = technical_result(selection, manifest, directory / "shot", inspect_media,
@@ -248,6 +260,8 @@ def run_s2v(selection: S2VSelection, verification: WorkerVerification, driver: S
                 checkpoint(store)
             except (Exception, KeyboardInterrupt):
                 failed = True
+                if "precision_intent" in record and driver._closed_comfy is not None:
+                    driver._closed_comfy.abandon_precision()
                 record.update(outcome="incomplete", human_review="unavailable")
                 record.pop("technical_result", None)
                 try:
