@@ -154,7 +154,12 @@ class PrecisionGuardTests(unittest.TestCase):
                 fixture.active_casts += 1
                 fixture.casts += 1
                 fixture.maximum_casts = max(fixture.maximum_casts, fixture.active_casts)
-                self.weight = Tensor(module.weight.shape, fixture.cast_dtype)
+                self.weight = Tensor(
+                    module.weight.shape,
+                    fixture.cast_dtype(module)
+                    if callable(fixture.cast_dtype)
+                    else fixture.cast_dtype,
+                )
 
             def __enter__(self):
                 return self.weight, None
@@ -284,6 +289,17 @@ class PrecisionGuardTests(unittest.TestCase):
         self.assertFalse(self.guard.armed)
         self.assertTrue(self.guard.failed)
         self.assertTrue(all(not m._forward_pre_hooks for _, m in self.base.matrices))
+
+    def test_mixed_effective_cast_after_seven_good_layers_refuses_before_inference(self):
+        wrong = self.base.matrices[7][1]
+        self.cast_dtype = lambda module: "fp16" if module is wrong else "bf16"
+        with self.assertRaises(ValueError):
+            self.guard.on_load(self.patcher)
+        self.assertEqual(self.casts, 8)
+        self.assertEqual(self.active_casts, 0)
+        self.assertTrue(all(module.native_calls == 0 for _, module in self.base.matrices))
+        self.assertTrue(all(not module._forward_pre_hooks for _, module in self.base.matrices))
+        self.assertFalse((self.directory / (self.request["nonce"] + ".audit.json")).exists())
 
     def test_cast_exit_expiry_or_failure_cannot_leave_audit_or_observers(self):
         def late():
