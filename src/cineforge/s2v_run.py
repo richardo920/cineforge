@@ -159,7 +159,7 @@ def _admit(selection: S2VSelection, verification: WorkerVerification, driver: SS
             or driver.plan.pod_id != verification.record["worker_id"]
             or driver.runtime_evidence is None):
         raise S2VError("S2V execution requires its exact prepared guarded worker")
-    validate_s2v_runtime(driver.runtime_evidence)
+    validate_s2v_runtime(driver.runtime_evidence, profile_id=driver.selection.worker_profile["id"])
     selection.require_execution_worker(verification)
     driver.check()
     driver.verify_comfy_current(absolute_deadline=deadline)

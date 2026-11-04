@@ -371,9 +371,9 @@ class VerifiedS2V:
     @property
     def subject(self) -> dict[str, Any]:
         trace = self.preflight()
-        return {"schema_version": 1, "task_id": "M5.6", "profile_id": profile.PROFILE_ID,
+        return {"schema_version": 1, "task_id": "M5.6", "profile_id": self.service.worker_profile["id"],
             "scope_sha256": self.service.approval.subject_sha256,
-            "recipe_sha256": profile.recipe_sha256(), "graph": self.graph,
+            "recipe_sha256": self.service.approval.model_workflow_sha256, "graph": self.graph,
             "shot": self.shot.to_dict(), "lineage": trace}
 
     def require(self, request: ExecutionRequest, workflow_digest: str) -> None:
@@ -454,7 +454,7 @@ class S2VSelection(ApprovedComfySelection):
 
 
 def _declarations(gate: VerifiedS2V, subject_sha256: str) -> dict[str, Any]:
-    data = profile.service_declarations()
+    data = gate.service.declarations
     graph = gate.graph
     data["workflow"] = {"canonical_sha256": digest(graph),
         "source_repository": profile.SOURCE_REPOSITORY, "source_revision": profile.SOURCE_REVISION,

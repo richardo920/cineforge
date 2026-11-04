@@ -20,6 +20,7 @@ from cineforge.comfy_runtime_plan import (
     _wheel,
     comfy_plan,
     comfy_subject,
+    comfy_worker,
     notice_bytes,
 )
 from cineforge.native_remote_bootstrap import nr_check, nr_private, nr_read, nr_write
@@ -244,13 +245,23 @@ def verify_source(plan: dict[str, Any], root: Path, deadline: float, *,
     nr_check(deadline)
 
 
+def _require_profile(request: dict[str, Any], plan: dict[str, Any]) -> None:
+    selected = comfy_worker(plan)
+    if (request["profile"]["id"] != selected.profile_id
+            or "selection" in request and (
+                request["selection"].get("profile_id") != selected.profile_id
+                or request["selection"].get("hardware", {}).get("gpu") != selected.gpu)):
+        raise ValueError("closed Comfy profile differs from armed M5 service")
+
+
 def install_comfy(request: dict[str, Any], native: Path, deadline: float) -> dict[str, Any]:
     # Imported only from nr_package's just-verified fixed first-party closure.
     from cineforge import worker_bootstrap as bootstrap
     from cineforge.comfy_runtime_launcher import launch_command, probe_result
-    nr_write(native / "comfy-install-consumed", b"consumed before any Comfy effect")
     nr_read(native / "comfy.blob.done")
     plan = comfy_plan(nr_json(nr_read(native / "comfy.blob")))
+    _require_profile(request, plan)
+    nr_write(native / "comfy-install-consumed", b"consumed before any Comfy effect")
     if (comfy_subject(plan) != request["comfy_subject_sha256"]
             or request["image_digest"] != plan["image"].split("@", 1)[1]
             or plan["interpreter"] != nr_json(nr_read(native / "preflight.json"))["interpreter"]):
@@ -316,9 +327,10 @@ def setup_comfy(request: dict[str, Any], native: Path, deadline: float) -> dict[
     from cineforge import worker_bootstrap as bootstrap
     from cineforge.comfy_runtime_launcher import launch_command, probe_result
     from cineforge.worker_profiles import S2V_WORKER
-    nr_write(native / "comfy-launch-consumed", b"consumed before production startup")
     root = bootstrap.worker_root(request["plan"]["session_id"])
     plan = comfy_plan(nr_json(nr_read(root / "comfy-selection.json")))
+    _require_profile(request, plan)
+    nr_write(native / "comfy-launch-consumed", b"consumed before production startup")
     current_comfy(request, native, deadline)
     files = [nr_json(nr_read(native / ("comfy-model-" + str(index) + ".json")))
              for index in range(len(S2V_WORKER.files))]
@@ -450,6 +462,7 @@ def current_comfy(request: dict[str, Any], native: Path, deadline: float) -> dic
     from cineforge.worker_profiles import S2V_WORKER
     root = worker_root(request["plan"]["session_id"])
     plan = comfy_plan(nr_json(nr_read(root / "comfy-selection.json")))
+    _require_profile(request, plan)
     if request["comfy_subject_sha256"] != comfy_subject(plan):
         raise ValueError("closed Comfy current selection differs")
     verify_runtime(plan, root, deadline)
@@ -460,7 +473,7 @@ def current_comfy(request: dict[str, Any], native: Path, deadline: float) -> dic
     if (facts["execution_sha256"] != nr_digest(plan["execution"])
             or facts["jit_enabled_before"] is not False or facts["jit_enabled_after"] is not False):
         raise ValueError("closed Comfy JIT import policy changed")
-    hardware = s2v_hardware_admission(root, deadline)
+    hardware = s2v_hardware_admission(root, deadline, profile_id=comfy_worker(plan).profile_id)
     for name in ("gpu_raw_name", "capability", "device_count", "nvml_total_mib",
                  "nvml_reserved_mib", "driver_version"):
         if hardware[name] != facts["runtime"][name]:

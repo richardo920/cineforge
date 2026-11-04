@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from cineforge.comfy_runtime_plan import comfy_plan, comfy_subject
+from cineforge.comfy_runtime_plan import comfy_plan, comfy_subject, comfy_worker
 from cineforge.native_remote_plan import NR_BLOB_MAX, nr_encode, nr_hash, nr_json
 
 
@@ -114,7 +114,8 @@ class ClosedComfyRuntime:
         worker.native_admission()
         plan = self._checked.current()
         installed = self._bridge._installed
-        if (plan["image"] != worker.spec.image or type(installed) is not dict
+        if (comfy_worker(plan).profile_id != worker.selection.worker_profile["id"]
+                or plan["image"] != worker.spec.image or type(installed) is not dict
                 or plan["interpreter"] != installed.get("interpreter")):
             raise ValueError("closed Comfy interpreter differs from actual worker admission")
         return plan

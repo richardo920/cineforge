@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 from cineforge.native_remote_plan import nr_digest, nr_hash
 from cineforge.native_speech_integrity import NativeBinary, NativeTree
 from cineforge.s2v_profile import IMAGE
-from cineforge.worker_profiles import S2V_WORKER
+from cineforge.worker_profiles import S2V_L40S_WORKER, S2V_WORKER, WorkerProfile, s2v_worker
 
 COMFY_POLICY = "m5-closed-wheel-runtime-v1"
 COMFY_EXECUTION = {"PYTORCH_JIT": "0", "TORCH_COMPILE_DISABLE": "1",
@@ -134,9 +134,18 @@ def notice_bytes(value: Any) -> bytes:
     return raw
 
 
+def comfy_worker(value: dict[str, Any]) -> WorkerProfile:
+    # Absence preserves the exact legacy5090 plan; L40S is an explicit new subject.
+    if "profile_id" in value and value["profile_id"] != S2V_L40S_WORKER.profile_id:
+        raise ValueError("unsupported explicit Comfy GPU profile")
+    return s2v_worker(value.get("profile_id", S2V_WORKER.profile_id))
+
+
 def comfy_plan(value: Any) -> dict[str, Any]:
     _keys(value, {"version", "policy", "image", "abi", "source", "wheels", "installed",
-                  "interpreter", "native", "review", "notices", "execution", "shared_files", "executables"})
+                  "interpreter", "native", "review", "notices", "execution", "shared_files", "executables"}
+          | ({"profile_id"} if type(value) is dict and "profile_id" in value else set()))
+    comfy_worker(value)
     _keys(value["execution"], set(COMFY_EXECUTION))
     if (type(value["version"]) is not int or value["version"] != 1
             or value["policy"] != COMFY_POLICY or value["image"] != IMAGE

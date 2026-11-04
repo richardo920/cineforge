@@ -418,7 +418,9 @@ class ComfyControllerTests(unittest.TestCase):
                 raise ValueError(CANARY)
 
         worker = SimpleNamespace(
-            spec=SimpleNamespace(image=IMAGE), native_admission=gate, _require_s2v=gate
+            spec=SimpleNamespace(image=IMAGE),
+            selection=SimpleNamespace(worker_profile={"id": "m5-wan22-s2v14b-5090-v1"}),
+            native_admission=gate, _require_s2v=gate
         )
         bridge = object.__new__(RemoteNativeSpeechRuntime)
         bridge._worker = worker
@@ -972,7 +974,7 @@ class ComfyPreimportTests(unittest.TestCase):
                 "import os,sys;sys.path.insert(0,sys.argv[1]);"
                 "from cineforge import comfy_runtime_launcher as l,comfy_runtime_worker as w;"
                 "l._require_abi=lambda:None;w.verify_runtime=lambda *a:None;w.verify_source=lambda *a:None;"
-                "l._observe=lambda *a:dict(synthetic_first_party=True);"
+                "l._observe=lambda *a,**k:dict(synthetic_first_party=True);"
                 "sys.argv=['fixture',sys.argv[1],sys.argv[2],'probe',sys.argv[3]];os._exit(l.main())"
             )
             result = subprocess.run(
@@ -1096,7 +1098,8 @@ class ComfyLaunchDeadlineTests(unittest.TestCase):
 
             request = dict(
                 plan=dict(session_id="fixture", pod_id="owned"),
-                selection=dict(hardware=dict(gpu="NVIDIA GeForce RTX 5090")),
+                selection=dict(profile_id="m5-wan22-s2v14b-5090-v1", hardware=dict(gpu="NVIDIA GeForce RTX 5090")),
+                profile=dict(id="m5-wan22-s2v14b-5090-v1", scope_sha256=HASH),
                 image_digest=declaration["image"].split("@", 1)[1],
             )
             with (

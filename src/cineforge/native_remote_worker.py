@@ -43,6 +43,7 @@ from cineforge.native_speech_pins import (
 from cineforge.native_speech_process import pack, unpack
 from cineforge.native_speech_worker import _selection
 from cineforge.speech import BASE_MODEL, BASE_REVISION, QwenBaseRequest
+from cineforge.worker_profiles import require_s2v_hardware
 
 _RETAINED_DATA = {
     ("sympy", "1.14.0"): "sympy-1.14.0.data/data/share/man/man1/isympy.1",
@@ -365,18 +366,22 @@ def remote_operation(
     if op == "native_setup":
         return _setup(root, deadline)
     if op == "native_select":
-        nr_write(root / "selection-consumed", b"consumed")
         selection = _selected(root, deadline)
+        require_s2v_hardware(request["profile"]["id"], selection.hardware.gpu_name,
+            selection.hardware.memory_mib, selection.hardware.capability)
         if selection.hardware.operator_worker_id != binding["worker"]:
             raise ValueError("native selection belongs to another worker")
+        nr_write(root / "selection-consumed", b"consumed")
         return {"selection_sha256": selection.subject_sha256()}
     if op == "native_invoke":
         token = request["token"]
         nr_token(token)
         nr_read(root / "selection-consumed")
         nr_read(root / (token + ".input.done"))
-        nr_write(root / (token + ".consumed"), b"consumed before child admission")
         selection = _selected(root, deadline)
+        require_s2v_hardware(request["profile"]["id"], selection.hardware.gpu_name,
+            selection.hardware.memory_mib, selection.hardware.capability)
+        nr_write(root / (token + ".consumed"), b"consumed before child admission")
         header, reference = unpack(nr_read(root / (token + ".input")))
         if set(header) != {"operation", "request", "seed"}:
             raise ValueError("invalid fixed native invocation")

@@ -42,6 +42,7 @@ from cineforge.native_remote_plan import (
 )
 from cineforge.native_speech import OriginalVoiceDesign
 from cineforge.native_speech_integrity import (
+    NativeHardware,
     NativeSpeechError,
     NativeTree,
     digest,
@@ -85,19 +86,21 @@ def recipe():
 
 
 class RemoteFixture(unittest.TestCase):
+    gpu_id = profile.GPU_ID
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="cineforge-remote-unit-")
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name).resolve()
         self.root.chmod(0o700)
-        self.gate, _ = context(self.root)
+        self.gate, _ = context(self.root, gpu_id=self.gpu_id)
         self.key = self.root / "key"
         self.key.write_bytes(b"not a credential")
         self.key.chmod(0o600)
         self.spec = RunpodPodSpec(
             "synthetic-remote",
             profile.IMAGE,
-            profile.GPU_ID,
+            self.gpu_id,
             "EU-RO-1",
             legacy_spec().ssh_public_key,
             max_hourly_usd=1.25,
@@ -125,7 +128,13 @@ class RemoteFixture(unittest.TestCase):
         self.worker.runtime_evidence = dict(runtime_fixture(), compute_precision="bf16")
         self.worker.check = lambda: None
         self.worker._request = self.rpc
-        self.selected = selection(self.root)
+        if self.gpu_id == profile.L40S_GPU_ID:
+            self.worker.runtime_evidence.update(python_version="3.11.14", gpu_raw_name=self.gpu_id,
+                gpu_memory_mib=46000, nvml_total_mib=46068, nvml_reserved_mib=68,
+                capability=[8, 9], arch_list=["sm_86"])
+        expected = self.worker.runtime_evidence
+        self.selected = selection(self.root, hardware=NativeHardware("synthetic-worker", self.gpu_id,
+            expected["gpu_memory_mib"], tuple(expected["capability"])))
         self.requests = []
         self.deadlines = []
         self.lost = None
@@ -160,7 +169,8 @@ class RemoteFixture(unittest.TestCase):
         bootstrap.nr_private(self.remote, directory=True)
         return self.remote
 
-    def preflight(self, deadline):
+    def preflight(self, deadline, *, profile_id=profile.PROFILE_ID):
+        self.assertEqual(profile_id, self.gate.service.worker_profile["id"])
         return dict(
             interpreter=asdict(self.selected.interpreter),
             seccomp=asdict(self.selected.seccomp),

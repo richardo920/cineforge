@@ -22,14 +22,14 @@ from cineforge.workflows import canonical
 def _scope(approval: S2VBudgetApproval) -> dict[str, Any]:
     return _scope_fields(approval.journal_directory, approval.region, approval.operator_receipt,
                          approval.aggregate_usd, approval.lifetime_seconds,
-                         approval.hourly_ceiling_usd)
+                         approval.hourly_ceiling_usd, approval.gpu_id)
 
 
 def _scope_fields(directory: str, region: str, receipt: EvidenceRef, aggregate: float,
-                  lifetime: float, hourly: float) -> dict[str, Any]:
-    return {"task_id": "M5", "recipe_sha256": profile.recipe_sha256(),
+                  lifetime: float, hourly: float, gpu_id: str = profile.GPU_ID) -> dict[str, Any]:
+    return {"task_id": "M5", "recipe_sha256": profile.recipe_sha256(gpu_id),
         "operator_receipt": receipt.to_dict(),
-        "image": profile.IMAGE, "gpu_id": profile.GPU_ID, "region": region,
+        "image": profile.IMAGE, "gpu_id": profile.worker(gpu_id).gpu, "region": region,
         "journal_directory": directory, "min_ram_per_gpu_gb": 64,
         "aggregate_usd": aggregate, "max_attempts": 1, "max_concurrent": 1,
         "lifetime_seconds": lifetime, "hourly_ceiling_usd": hourly, "disk_gb": 150,
@@ -57,31 +57,31 @@ class S2VBudgetApproval(BudgetApproval):
                 or not 120 < self.lifetime_seconds <= 1800
                 or type(self.hourly_ceiling_usd) not in (int, float)
                 or not 0 < self.hourly_ceiling_usd <= 1.25
-                or self.image != profile.IMAGE or self.gpu_id != profile.GPU_ID
+                or self.image != profile.IMAGE or self.gpu_id not in (profile.GPU_ID, profile.L40S_GPU_ID)
                 or self.min_cuda != "12.8" or type(self.disk_gb) is not int or self.disk_gb != 150
                 or type(self.max_attempts) is not int or self.max_attempts != 1
                 or type(self.max_concurrent) is not int or self.max_concurrent != 1
                 or self.model != profile.model()
-                or self.model_workflow_sha256 != profile.recipe_sha256()
+                or self.model_workflow_sha256 != profile.recipe_sha256(self.gpu_id)
                 or self.subject_sha256 != hashlib.sha256(canonical(_scope(self))).hexdigest()):
             raise CloudBudgetError("invalid closed M5 recipe budget scope")
 
     @classmethod
     def for_scope(cls, journal_directory: str, region: str, operator_receipt: EvidenceRef,
                   *, aggregate_usd: float = 5, lifetime_seconds: float = 1800,
-                  hourly_ceiling_usd: float = 1.25) -> S2VBudgetApproval:
+                  hourly_ceiling_usd: float = 1.25, gpu_id: str = profile.GPU_ID) -> S2VBudgetApproval:
         # Build once from independently selected operator arguments, never creative JSON.
         if type(operator_receipt) is not EvidenceRef:
             raise CloudBudgetError("M5 budget requires separately verified operator evidence")
         digest = None
         try:
             digest = hashlib.sha256(canonical(_scope_fields(journal_directory, region,
-                operator_receipt, aggregate_usd, lifetime_seconds, hourly_ceiling_usd))).hexdigest()
+                operator_receipt, aggregate_usd, lifetime_seconds, hourly_ceiling_usd, gpu_id))).hexdigest()
         except (ValueError, TypeError, OverflowError):
             pass
         if digest is None:
             raise CloudBudgetError("invalid M5 scope declarations")
-        return cls(digest, profile.recipe_sha256(), profile.model(), profile.IMAGE, profile.GPU_ID,
+        return cls(digest, profile.recipe_sha256(gpu_id), profile.model(), profile.IMAGE, profile.worker(gpu_id).gpu,
             region, "12.8", aggregate_usd, 1, 1, lifetime_seconds, hourly_ceiling_usd, 150,
             journal_directory, operator_receipt)
 
@@ -108,12 +108,12 @@ class S2VServiceContext:
     @property
     def declarations(self) -> dict[str, Any]:
         self.preflight()
-        return profile.service_declarations()
+        return profile.service_declarations(self.approval.gpu_id)
 
     @property
     def worker_profile(self) -> dict[str, str]:
         self.preflight()
-        return {"id": profile.PROFILE_ID, "scope_sha256": self.approval.subject_sha256}
+        return {"id": profile.worker(self.approval.gpu_id).profile_id, "scope_sha256": self.approval.subject_sha256}
 
 
 def prepare_service_journal(context: S2VServiceContext) -> None:

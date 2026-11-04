@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from cineforge.comfy_runtime_plan import COMFY_ABI, COMFY_EXECUTION, comfy_plan
+from cineforge.comfy_runtime_plan import COMFY_ABI, COMFY_EXECUTION, comfy_plan, comfy_worker
 from cineforge.native_remote_bootstrap import nr_check, nr_read, nr_write
 from cineforge.native_remote_plan import nr_digest, nr_encode, nr_json
 
@@ -62,14 +62,17 @@ def probe_result(value: dict[str, Any], root: Path, plan: dict[str, Any],
     if type(runtime) is not dict:
         raise ValueError("closed Comfy runtime probe missing")
     runtime.update(resource_evidence(root))
-    validate_s2v_runtime(runtime)
+    validate_s2v_runtime(runtime, profile_id=comfy_worker(plan).profile_id)
     if runtime["torchvision_version"] != "0.23.0+cu128":
         raise ValueError("closed Comfy torchvision differs")
     nr_check(deadline)
     return runtime, value
 
 
-def _observe(root: Path, deadline: float) -> dict[str, Any]:
+def _observe(root: Path, deadline: float, *,
+             profile_id: str = "m5-wan22-s2v14b-5090-v1") -> dict[str, Any]:
+    from cineforge.worker_profiles import S2V_L40S_WORKER, require_s2v_hardware, s2v_worker
+    configured = s2v_worker(profile_id)
     import hashlib
     import importlib
     import io
@@ -100,11 +103,14 @@ def _observe(root: Path, deadline: float) -> dict[str, Any]:
             or torch.cuda.device_count() != 1):
         raise ValueError("closed Comfy fixed GPU stack unavailable")
     props = torch.cuda.get_device_properties(0)
-    if (props.name != "NVIDIA GeForce RTX 5090" or not 30720 <= props.total_memory // 1048576 <= 32768
-            or tuple(torch.cuda.get_device_capability()) != (12, 0)):
-        raise ValueError("closed Comfy observed GPU differs")
+    require_s2v_hardware(profile_id, props.name, props.total_memory // 1048576,
+                         tuple(torch.cuda.get_device_capability()))
     x = torch.ones((1, 1, 2, 16), device="cuda", dtype=torch.bfloat16)
-    y = torch.nn.functional.scaled_dot_product_attention(x, x, x)
+    if configured is S2V_L40S_WORKER:
+        with torch.nn.attention.sdpa_kernel(torch.nn.attention.SDPBackend.MATH):
+            y = torch.nn.functional.scaled_dot_product_attention(x, x, x)
+    else:
+        y = torch.nn.functional.scaled_dot_product_attention(x, x, x)
     nvml = bounded_process(["/usr/bin/nvidia-smi", "--id=0",
         "--query-gpu=memory.total,memory.reserved,driver_version", "--format=csv,noheader,nounits"],
         timeout=min(5, deadline-time.monotonic()), absolute_deadline=deadline,
@@ -230,7 +236,7 @@ def main() -> int:
         verify_runtime(plan, root, deadline)
         verify_source(plan, root, deadline)
         sys.path.insert(0, str(root / "comfy-runtime/site"))
-        value = _observe(root, deadline)
+        value = _observe(root, deadline, profile_id=comfy_worker(plan).profile_id)
         if mode == "probe":
             nr_check(deadline)
             sys.stdout.buffer.write(nr_encode(value))

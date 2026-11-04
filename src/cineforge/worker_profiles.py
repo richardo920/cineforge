@@ -76,4 +76,29 @@ S2V_WORKER = WorkerProfile(
                                        64_000_000_000, 32 * 1024**3, 30 * 1024**3),
 )
 
+S2V_L40S_WORKER = S2V_WORKER._replace(
+    profile_id="m5-wan22-s2v14b-l40s-v1", gpu="NVIDIA L40S",
+    reference_runtime=ReferenceRuntime("2.8.0+cu128", 49152, (8, 9), "sm_89",
+                                       64_000_000_000, 32 * 1024**3, 30 * 1024**3),
+)
+S2V_PROFILE_IDS = (S2V_WORKER.profile_id, S2V_L40S_WORKER.profile_id)
+
+
+def s2v_worker(profile_id: str = S2V_WORKER.profile_id) -> WorkerProfile:
+    if profile_id == S2V_WORKER.profile_id:
+        return S2V_WORKER
+    if profile_id == S2V_L40S_WORKER.profile_id:
+        return S2V_L40S_WORKER
+    raise ValueError("unsupported closed M5 worker profile")
+
+
+def require_s2v_hardware(profile_id: str, name: str, memory: int,
+                         capability: tuple[int, int]) -> None:
+    selected = s2v_worker(profile_id)
+    expected = selected.reference_runtime
+    if (expected is None or name != selected.gpu or capability != expected.capability
+            or any(type(x) is not int for x in capability) or type(memory) is not int
+            or not selected.minimum_memory_mib <= memory <= expected.maximum_memory_mib):
+        raise ValueError("hardware differs from selected M5 profile")
+
 # END_REVIEWED_WORKER_PROFILES

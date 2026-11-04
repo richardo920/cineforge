@@ -338,7 +338,8 @@ class SSHWorker:
         runtime = reply["runtime"]
         if self._profile is not None:
             self.runtime_evidence = self._runtime_evidence(runtime,
-                s2v=type(self.selection) is S2VServiceContext, admission=True)
+                s2v=type(self.selection) is S2VServiceContext, admission=True,
+                profile_id=self._profile["id"])
         self.observation = WorkerObservation(GPUDevice(str(snapshot.resource_id), Backend.CUDA,
             runtime["gpu_memory_mib"], frozenset({self.selection.model.required_precision})),
             runtime["gpu_raw_name"])
@@ -449,11 +450,13 @@ class SSHWorker:
         failed = False
         observed = None
         try:
+            if type(self.selection) is not S2VServiceContext:
+                raise WorkerError("closed Comfy requires the selected M5 service")
             reply = runtime.prepare(self, selection, deadline=deadline)
-            worker_bootstrap.validate_s2v_runtime(reply["runtime"])
+            worker_bootstrap.validate_s2v_runtime(reply["runtime"], profile_id=self.selection.worker_profile["id"])
             result = WorkerVerification.from_dict(reply["verification"])
             result.require_matches(self.selection)
-            observed = self._runtime_evidence(reply["runtime"], s2v=True)
+            observed = self._runtime_evidence(reply["runtime"], s2v=True, profile_id=self.selection.worker_profile["id"])
             assert self.plan is not None
             if (result.record["worker_id"] != self.plan.pod_id
                     or result.record["image_digest"] != self.spec.image.split("@", 1)[1]):
@@ -474,11 +477,11 @@ class SSHWorker:
 
     @staticmethod
     def _runtime_evidence(runtime: dict[str, Any], *, s2v: bool = False,
-                          admission: bool = False) -> dict[str, Any]:
+                          admission: bool = False, profile_id: str = "m5-wan22-s2v14b-5090-v1") -> dict[str, Any]:
         if s2v and admission and (type(runtime) is not dict or "admission_status" not in runtime):
             raise WorkerError("M5 arm cannot attest an unreviewed imported runtime")
         if s2v and type(runtime) is dict and "admission_status" in runtime:
-            worker_bootstrap.validate_s2v_admission(runtime)
+            worker_bootstrap.validate_s2v_admission(runtime, profile_id=profile_id)
             if len(canonical(runtime)) > 4096:
                 raise WorkerError("M5 hardware admission exceeds bound")
             return strict_object(canonical(runtime))
@@ -491,7 +494,7 @@ class SSHWorker:
         if set(runtime) != fields or len(canonical(runtime)) > 4096:
             raise WorkerError("invalid bounded M4 runtime evidence")
         if s2v:
-            worker_bootstrap.validate_s2v_runtime(runtime)
+            worker_bootstrap.validate_s2v_runtime(runtime, profile_id=profile_id)
         else:
             worker_bootstrap.validate_m4_runtime(runtime)
         return strict_object(canonical(runtime))
@@ -503,7 +506,7 @@ class SSHWorker:
                     or selection.gate.service != self.selection or self.plan is None
                     or self.runtime_evidence is None):
                 raise ValueError
-            worker_bootstrap.validate_s2v_admission(self.runtime_evidence)
+            worker_bootstrap.validate_s2v_admission(self.runtime_evidence, profile_id=self.selection.worker_profile["id"])
             trace = selection.gate.preflight()
             selection.request(selection.gate.shot)
             if trace["speech_native_proof"]["worker_id"] != self.plan.pod_id:
@@ -518,7 +521,7 @@ class SSHWorker:
         if (type(self.selection) is not S2VServiceContext or self.plan is None
                 or self.runtime_evidence is None):
             raise WorkerError("native speech needs an existing guarded M5 service")
-        worker_bootstrap.validate_s2v_admission(self.runtime_evidence)
+        worker_bootstrap.validate_s2v_admission(self.runtime_evidence, profile_id=self.selection.worker_profile["id"])
         self.selection.preflight()
         self.check()
         if self.budget.remaining_seconds(self._key) <= 120:
@@ -555,7 +558,7 @@ class SSHWorker:
         if (allow_live is not True or type(self.selection) is not S2VServiceContext
                 or self.plan is None or self.runtime_evidence is None or not callable(invoke)):
             raise WorkerError("native speech needs explicit guarded M5 service opt-in")
-        worker_bootstrap.validate_s2v_admission(self.runtime_evidence)
+        worker_bootstrap.validate_s2v_admission(self.runtime_evidence, profile_id=self.selection.worker_profile["id"])
         self.selection.preflight()
         self.check()
         timeout = min(1200, self.budget.remaining_seconds(self._key) - 120)

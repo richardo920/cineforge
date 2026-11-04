@@ -38,6 +38,7 @@ from cineforge.s2v_service import S2VServiceContext
 from cineforge.speech import QwenBaseRequest, SpeechArtifact
 from cineforge.ssh_worker import SSHWorker
 from cineforge.worker_guard import worker_guard_source_sha256
+from cineforge.worker_profiles import require_s2v_hardware
 
 
 @dataclass(frozen=True, slots=True)
@@ -410,6 +411,14 @@ class RemoteNativeSpeechRuntime:
             or self._selection is not None
         ):
             raise NativeSpeechError("separately reviewed installed native selection required")
+        service = self._worker.selection
+        try:
+            if type(service) is not S2VServiceContext:
+                raise ValueError
+            require_s2v_hardware(service.worker_profile["id"], selection.hardware.gpu_name,
+                                 selection.hardware.memory_mib, selection.hardware.capability)
+        except ValueError:
+            raise NativeSpeechError("native hardware differs from selected M5 service") from None
         value = asdict(selection)
         for name in ("interpreter", "seccomp", "runtime", "sdk", "base", "design"):
             if nr_encode(value[name]) != nr_encode(self._installed[name]):
