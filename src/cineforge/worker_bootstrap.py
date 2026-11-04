@@ -539,7 +539,7 @@ def validate_s2v_runtime(runtime: dict[str, Any], *,
                          profile_id: str = S2V_WORKER.profile_id) -> None:
     """Exact selected M5 resources plus the observed BF16 attention-kernel probe."""
     configured = s2v_worker(profile_id)
-    if (profile_id == S2V_PROFILE_IDS[1] and (type(runtime.get("python_version")) is not str
+    if (profile_id != S2V_WORKER.profile_id and (type(runtime.get("python_version")) is not str
             or re.fullmatch(r"3\.11\.[0-9]{1,3}", runtime["python_version"]) is None)):
         raise BootstrapError("M5 fixed interpreter ABI unavailable")
     if runtime.get("compute_precision") != "bf16":

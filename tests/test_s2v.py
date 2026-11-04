@@ -126,7 +126,7 @@ def worker(gate):
         "image_digest": profile.IMAGE.split("@", 1)[1], "python_version": "3.11.5",
         "torch_version": "2.8.0+cu128", "cuda_version": "12.8",
         "gpu": {"name": gate.service.approval.gpu_id, "backend": "cuda",
-                "memory_mib": 46000 if gate.service.approval.gpu_id == profile.L40S_GPU_ID else 32286},
+                "memory_mib": 32286 if gate.service.approval.gpu_id == profile.GPU_ID else 46000},
         "model_files": [{key: asset[key] for key in ("path", "size_bytes", "sha256")}
                         for asset in profile.model_files()], "custom_nodes_disabled": True})
 

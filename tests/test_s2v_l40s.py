@@ -345,7 +345,7 @@ class L40SProfileTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     native_bootstrap.nr_preflight(deadline, profile_id=profile.L40S_PROFILE_ID)
 
-    def test_l40s_observation_requires_bf16_math_kernel_on_exact_gpu(self):
+    def exercise_math_observation(self, gpu_id, profile_id, capability):
         import importlib
         from contextlib import contextmanager
 
@@ -379,9 +379,9 @@ class L40SProfileTests(unittest.TestCase):
             is_bf16_supported=lambda: True,
             device_count=lambda: 1,
             get_device_properties=lambda i: SimpleNamespace(
-                name=profile.L40S_GPU_ID, total_memory=46000 * 1024**2
+                name=gpu_id, total_memory=46000 * 1024**2
             ),
-            get_device_capability=lambda: (8, 9),
+            get_device_capability=lambda: capability,
         )
         torch = SimpleNamespace(
             __version__="2.8.0+cu128",
@@ -421,7 +421,7 @@ class L40SProfileTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(RuntimeError, "stop before codecs"):
                 launcher._observe(
-                    self.root, time.monotonic() + 5, profile_id=profile.L40S_PROFILE_ID
+                    self.root, time.monotonic() + 5, profile_id=profile_id
                 )
             self.assertEqual(events, ["bf16-cuda-input", "math-enter", "sdpa", "math-exit"])
             self.assertEqual(child.call_count, 1)
@@ -430,10 +430,13 @@ class L40SProfileTests(unittest.TestCase):
             cuda.is_bf16_supported = lambda: False
             with self.assertRaises(ValueError):
                 launcher._observe(
-                    self.root, time.monotonic() + 5, profile_id=profile.L40S_PROFILE_ID
+                    self.root, time.monotonic() + 5, profile_id=profile_id
                 )
             child.assert_not_called()
             self.assertEqual(events, [])
+
+    def test_l40s_observation_requires_bf16_math_kernel_on_exact_gpu(self):
+        self.exercise_math_observation(profile.L40S_GPU_ID, profile.L40S_PROFILE_ID, (8, 9))
 
     def test_expired_hardware_cap_never_starts_a_child(self):
         with (

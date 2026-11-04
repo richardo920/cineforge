@@ -8,7 +8,7 @@ from typing import Any
 from cineforge.conditioning_profile import IMAGE as IMAGE
 from cineforge.conditioning_profile import WORKFLOW_LICENSE as WORKFLOW_LICENSE
 from cineforge.devices import Backend, ModelSpec, Precision
-from cineforge.worker_profiles import S2V_L40S_WORKER, S2V_WORKER, WorkerProfile
+from cineforge.worker_profiles import S2V_A40_WORKER, S2V_L40S_WORKER, S2V_WORKER, WorkerProfile
 from cineforge.workflows import canonical, strict_object
 
 PROFILE_ID = "m5-wan22-s2v14b-5090-v1"
@@ -27,6 +27,8 @@ MODEL_TERMS_SHA256 = "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf3
 GPU_ID = "NVIDIA GeForce RTX 5090"
 L40S_GPU_ID = "NVIDIA L40S"
 L40S_PROFILE_ID = "m5-wan22-s2v14b-l40s-v1"
+A40_GPU_ID = "NVIDIA A40"
+A40_PROFILE_ID = "m5-wan22-s2v14b-a40-v1"
 MEMORY_MIB = 30720  # Conservative admission floor, not measured model fit.
 MIN_RAM_PER_GPU_GB = 64
 DURATION = 77 / 16
@@ -43,6 +45,8 @@ def worker(gpu_id: str = GPU_ID) -> WorkerProfile:
         return S2V_WORKER
     if gpu_id == L40S_GPU_ID:
         return S2V_L40S_WORKER
+    if gpu_id == A40_GPU_ID:
+        return S2V_A40_WORKER
     raise ValueError("unsupported closed S2V GPU selection")
 
 

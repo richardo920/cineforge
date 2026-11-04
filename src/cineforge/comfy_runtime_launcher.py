@@ -71,7 +71,7 @@ def probe_result(value: dict[str, Any], root: Path, plan: dict[str, Any],
 
 def _observe(root: Path, deadline: float, *,
              profile_id: str = "m5-wan22-s2v14b-5090-v1") -> dict[str, Any]:
-    from cineforge.worker_profiles import S2V_L40S_WORKER, require_s2v_hardware, s2v_worker
+    from cineforge.worker_profiles import S2V_WORKER, require_s2v_hardware, s2v_worker
     configured = s2v_worker(profile_id)
     import hashlib
     import importlib
@@ -106,7 +106,7 @@ def _observe(root: Path, deadline: float, *,
     require_s2v_hardware(profile_id, props.name, props.total_memory // 1048576,
                          tuple(torch.cuda.get_device_capability()))
     x = torch.ones((1, 1, 2, 16), device="cuda", dtype=torch.bfloat16)
-    if configured is S2V_L40S_WORKER:
+    if configured is not S2V_WORKER:
         with torch.nn.attention.sdpa_kernel(torch.nn.attention.SDPBackend.MATH):
             y = torch.nn.functional.scaled_dot_product_attention(x, x, x)
     else:
