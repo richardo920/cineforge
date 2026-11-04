@@ -107,6 +107,17 @@ class ModelGuard:
             raise ValueError("precision loader has a different graph role")
         return str(self._current()["nonce"])
 
+    def _reachable(self) -> list[tuple[str, Any]]:
+        """Bound the actual current hierarchy, not only retired observer references."""
+        result = []
+        for index, (name, module) in enumerate(self.base.model.diffusion_model.named_modules()):
+            self._time()
+            if index >= 8192 or type(name) is not str or len(name) > 512:
+                raise ValueError("selected model hierarchy exceeds fixed audit bounds")
+            if getattr(module, "quant_format", None) is not None:
+                result.append((name, module))
+        return result
+
     def attach(self, patcher: Any) -> Any:
         self.patcher_methods = {name: getattr(type(patcher), name) for name in (
             "clone", "set_model_compute_dtype", "get_callbacks", "get_wrappers",
@@ -118,9 +129,7 @@ class ModelGuard:
         self.base.add_callback_with_key(self.callbacks.ON_CLEANUP, POLICY, self.on_cleanup)
         self.base.add_wrapper_with_key(self.wrappers.APPLY_MODEL, POLICY, self.apply)
         rows = []
-        for name, module in self.base.model.diffusion_model.named_modules():
-            if getattr(module, "quant_format", None) is None:
-                continue
+        for name, module in self._reachable():
             self.module_check(module)
             weight = module.weight
             if (module.quant_format != "float8_e4m3fn"
@@ -195,6 +204,13 @@ class ModelGuard:
             rows.append([name, list(module.weight.shape)])
         if nr_digest(sorted(rows)) != MATRICES_SHA256:
             raise ValueError("actual model matrix coverage changed")
+        # Last currentness checkout follows all validation callbacks. A replacement
+        # with the same name/shape still must carry this instance's exact observers.
+        reachable = self._reachable()
+        expected = {name: module for name, module, _, _ in self.modules}
+        if (len(reachable) != COUNT or len({name for name, _ in reachable}) != COUNT
+                or any(expected.get(name) is not module for name, module in reachable)):
+            raise ValueError("actual reachable quantized modules changed after attachment")
         self._time()
 
     def _audit(self, patcher: Any) -> None:

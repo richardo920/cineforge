@@ -403,6 +403,75 @@ class PrecisionGuardTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.guard.fingerprint("161")
 
+    def test_reachable_replacement_cannot_execute_with_a_retired_module_guard(self):
+        self.guard.on_pre_run(self.patcher)
+        name, retired = self.base.matrices[1]
+        replacement = Matrix()
+        replacement.output_dtype = "fp16"
+        self.base.matrices[1] = (name, replacement)
+        fixture = self
+
+        class Executor:
+            class_obj = fixture.patcher.model
+
+            def __call__(self):
+                replacement(Tensor())
+                fixture.base.matrices[0][1](Tensor())
+                return Tensor(dtype="fp32")
+
+        with self.assertRaises(ValueError):
+            self.guard.apply(Executor())
+        self.assertEqual(replacement.native_calls, 0)
+        self.assertEqual(retired.native_calls, 0)
+        self.assertEqual(self.base.matrices[0][1].native_calls, 0)
+        self.assertFalse((self.directory / (self.request["nonce"] + ".step-001.json")).exists())
+
+    def test_reachable_addition_refuses_before_delegation(self):
+        self.guard.on_pre_run(self.patcher)
+        extra = Matrix()
+        self.base.matrices.append(("extra", extra))
+        with self.assertRaises(ValueError):
+            self.apply()
+        self.assertEqual(extra.native_calls, 0)
+        self.assertEqual(self.base.matrices[0][1].native_calls, 0)
+
+    def test_reachable_removal_refuses_before_delegation(self):
+        self.guard.on_pre_run(self.patcher)
+        self.base.matrices.pop()
+        with self.assertRaises(ValueError):
+            self.apply()
+        self.assertEqual(self.base.matrices[0][1].native_calls, 0)
+
+    def test_reachable_name_remap_refuses_before_delegation(self):
+        self.guard.on_pre_run(self.patcher)
+        name, module = self.base.matrices[1]
+        self.base.matrices[1] = (name + "-unapproved", module)
+        with self.assertRaises(ValueError):
+            self.apply()
+        self.assertEqual(module.native_calls, 0)
+        self.assertEqual(self.base.matrices[0][1].native_calls, 0)
+
+    def test_reachable_mutation_by_validation_callback_is_checked_after_callback(self):
+        self.guard.on_pre_run(self.patcher)
+
+        def mutate(module):
+            if module is self.base.matrices[0][1]:
+                self.base.matrices[1] = (self.base.matrices[1][0], Matrix())
+
+        self.guard.module_check = mutate
+        with self.assertRaises(ValueError):
+            self.apply()
+        self.assertTrue(all(module.native_calls == 0 for _, module in self.base.matrices))
+
+    def test_unbounded_hierarchy_refuses_without_delegation(self):
+        self.guard.on_pre_run(self.patcher)
+        self.patcher.model.diffusion_model.named_modules = lambda: (
+            (str(i), object()) for i in range(8193)
+        )
+        with self.assertRaises(ValueError):
+            self.apply()
+        self.assertEqual(self.base.matrices[0][1].native_calls, 0)
+
     def test_receipt_strict_types_and_stale_bindings(self):
         self.guard.on_pre_run(self.patcher)
         self.apply()
