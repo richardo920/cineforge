@@ -494,4 +494,4 @@ def installed_nodes() -> dict[str, Any]:
             or cls.__module__ != __name__
             or Path(inspect.getfile(cls)).resolve() != Path(__file__).resolve()):
         raise ValueError("first-party precision loader was removed or replaced")
-    return FIRST_PARTY_NODES
+    return {name: dict(declaration) for name, declaration in FIRST_PARTY_NODES.items()}

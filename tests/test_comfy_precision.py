@@ -730,6 +730,9 @@ class PrecisionLoaderFactoryTests(unittest.TestCase):
         patcher = self.load()
         self.assertEqual(patcher.object_patches["manual_cast_dtype"], "bf16")
         self.assertEqual(runtime.installed_nodes(), policy.FIRST_PARTY_NODES)
+        observation = runtime.installed_nodes()
+        observation[policy.CLASS]["policy"] = "unreviewed"
+        self.assertEqual(runtime.installed_nodes(), policy.FIRST_PARTY_NODES)
         self.assertIsNot(self.nodes.NODE_CLASS_MAPPINGS["UNETLoader"], self.cls)
         self.assertEqual(len(self.graph), 2)  # Tiny fake semantic graph only.
         with self.assertRaises(ValueError):
@@ -851,3 +854,20 @@ class PrecisionSupervisedTransportTests(unittest.TestCase):
                             absolute_deadline=time.monotonic() + 2,
                         )
                     self.assertEqual(len(calls), 1)
+
+
+class PrecisionDeclarationIsolationTests(unittest.TestCase):
+    def test_returned_service_metadata_cannot_mutate_global_policy_or_later_scopes(self):
+        from cineforge import s2v_profile as profile
+        from cineforge.comfy_runtime_plan import COMFY_EXECUTION
+
+        gpus = (profile.GPU_ID, profile.L40S_GPU_ID, profile.A40_GPU_ID)
+        before = {gpu: profile.recipe_sha256(gpu) for gpu in gpus}
+        for gpu in gpus:
+            value = profile.service_declarations(gpu)
+            value["runner"]["precision"]["manual_dtype"] = "fp16"
+            value["runner"]["first_party_nodes"][policy.CLASS]["module"] = "unreviewed"
+            self.assertEqual(profile.PRECISION["manual_dtype"], "bf16")
+            self.assertEqual(policy.FIRST_PARTY_NODES[policy.CLASS]["module"], policy.MODULE)
+            self.assertEqual(COMFY_EXECUTION["model_precision"]["manual_dtype"], "bf16")
+            self.assertEqual({item: profile.recipe_sha256(item) for item in gpus}, before)
