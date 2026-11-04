@@ -649,6 +649,7 @@ class PrecisionLoaderFactoryTests(unittest.TestCase):
             module.weight.layout_cls = layout
             module.weight.params.orig_dtype = "fp16"
             module._full_precision_mm = True
+            module._full_precision_mm_config = False
 
         original_file = inspect.getfile
 

@@ -233,6 +233,7 @@ class ModelGuard:
                     self._time()
                     del plain
                 del weight, bias, input_tensor
+                self.torch.cuda.synchronize()  # Account for offload/teardown work too.
                 self._time()  # After controlled cast/offload context cleanup too.
             self._validate(patcher)
             nr_write(target / (self.nonce + ".audit.json"), nr_encode(self._receipt(patcher)))
@@ -423,6 +424,10 @@ def install(root: Path, deadline: float, expected: dict[str, Any]) -> type[Any]:
         if (type(module).__module__ != "comfy.ops"
                 or module.layout_type != "TensorCoreFP8E4M3Layout"
                 or module.weight._layout_cls != module.layout_type
+                or module.weight._qdata.dtype != torch.float8_e4m3fn
+                or module.weight.params.scale.dtype != torch.float32
+                or tuple(module.weight.params.scale.shape) != ()
+                or module._full_precision_mm_config is not False
                 or module.weight.layout_cls is not quant_ops.TensorCoreFP8E4M3Layout
                 or module.weight.params.orig_dtype not in (torch.float16, torch.bfloat16)
                 or type(module._full_precision_mm) is not bool
