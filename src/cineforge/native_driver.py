@@ -294,6 +294,15 @@ def validate_driver_receipt(receipt: Any, *, path: str, size_bytes: int, sha256:
             raise ValueError("unprotected NVIDIA alias")
 
 
+def _driver_verification_identity(binary: dict[str, Any]) -> dict[str, Any]:
+    # Completed reads may observe directory accounting/timestamp changes. Keep
+    # namespace-object identity and protection exact; read_native_file still
+    # checks all eight stat fields for races within each individual read.
+    receipt = dict(binary["driver_mount"])
+    receipt["ancestors"] = [[path, identity[:4]] for path, identity in receipt["ancestors"]]
+    return dict(binary, driver_mount=receipt)
+
+
 def verify_driver_binary(binary: dict[str, Any], deadline: float, binding_sha256: str) -> None:
     """Reopen a closed alias; declarations cannot substitute live namespace/mount facts."""
     if type(binary) is not dict or set(binary) != {"path", "size_bytes", "sha256", "driver_mount"}:
@@ -302,5 +311,5 @@ def verify_driver_binary(binary: dict[str, Any], deadline: float, binding_sha256
         size_bytes=binary["size_bytes"], sha256=binary["sha256"], binding_sha256=binding_sha256)
     actual = read_native_file(binary["driver_mount"]["alias"], deadline, DRIVER_ROOTS,
                               binding_sha256=binding_sha256)
-    if actual != binary:
+    if _driver_verification_identity(actual) != _driver_verification_identity(binary):
         raise ValueError("mounted NVIDIA binary identity changed")

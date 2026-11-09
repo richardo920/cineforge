@@ -34,6 +34,7 @@ class DriverMountTests(unittest.TestCase):
         self.fs = "ext4"
         self.point = str(self.body)
         self.readonly = True
+        self.directory_stats = dict(st_nlink=2, st_size=4096, st_mtime_ns=0, st_ctime_ns=0)
         self.real_stat, self.real_fstat, self.real_lstat = os.stat, os.fstat, os.lstat
         self.identity = self.real_stat(self.body)
         # Explicit Linux worker wire identity, including on a Darwin controller.
@@ -72,7 +73,7 @@ class DriverMountTests(unittest.TestCase):
             # Synthetic protected ancestors must not inherit unrelated /tmp churn
             # from concurrent test processes. Keep actual inode/owner/mode, which
             # the explicit replacement/mode race tests still mutate and verify.
-            values.update(st_nlink=2, st_size=4096, st_mtime_ns=0, st_ctime_ns=0)
+            values.update(self.directory_stats)
         return SimpleNamespace(**values)
 
     def fake_stat(self, *args, **kwargs):
@@ -123,6 +124,102 @@ class DriverMountTests(unittest.TestCase):
             driver.read_native_file(str(self.body), self.deadline, (str(self.root)+"/",))
         with self.assertRaises(ValueError):
             driver.read_native_file(str(self.body), self.deadline, (str(self.root)+"/",), binding_sha256="0"*64)
+
+    def test_completed_reads_allow_directory_metadata_drift_without_refreshing_receipt(self):
+        binary = self.measure()
+        original = copy.deepcopy(binary)
+        for changes in (dict(st_size=8192, st_ctime_ns=1),
+                        dict(st_nlink=3, st_size=16384, st_mtime_ns=2, st_ctime_ns=3)):
+            with self.subTest(changes=changes):
+                self.directory_stats.update(changes)
+                current = self.measure()
+                before = copy.deepcopy(current)
+                self.assertNotEqual(current, binary)
+                driver.verify_driver_binary(binary, self.deadline, BINDING)
+                with patch.object(driver, "read_native_file", return_value=current):
+                    driver.verify_driver_binary(binary, self.deadline, BINDING)
+                self.assertEqual(binary, original)
+                self.assertEqual(current, before)
+                self.assertEqual(len(current["driver_mount"]["ancestors"][0][1]), 8)
+
+    def test_directory_metadata_drift_during_one_read_still_refuses(self):
+        original_read = os.read
+        for field in ("st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns"):
+            with self.subTest(field=field):
+                def drift(fd, count):
+                    data = original_read(fd, count)
+                    if data:
+                        self.directory_stats[field] += 1
+                    return data
+                with patch.object(driver.os, "read", side_effect=drift):
+                    with self.assertRaisesRegex(ValueError, "ancestor changed during read"):
+                        self.measure()
+
+    def test_cross_phase_comparison_keeps_stable_ancestors_and_other_evidence_exact(self):
+        binary = self.measure()
+        original = copy.deepcopy(binary)
+        def refuses(changed):
+            before = copy.deepcopy(changed)
+            with patch.object(driver, "read_native_file", return_value=changed):
+                with self.assertRaises(ValueError):
+                    driver.verify_driver_binary(binary, self.deadline, BINDING)
+            self.assertEqual(changed, before)
+            self.assertEqual(binary, original)
+        for index in range(4):
+            changed = copy.deepcopy(binary)
+            changed["driver_mount"]["ancestors"][0][1][index] += 1
+            with self.subTest(ancestor_identity=index):
+                refuses(changed)
+        for kind in ("path", "order", "length"):
+            changed = copy.deepcopy(binary)
+            rows = changed["driver_mount"]["ancestors"]
+            if kind == "path":
+                rows[0][0] = "/different"
+            elif kind == "order":
+                rows.reverse()
+            else:
+                rows.pop()
+            with self.subTest(ancestor_rows=kind):
+                refuses(changed)
+        for key in binary:
+            if key != "driver_mount":
+                changed = copy.deepcopy(binary)
+                changed[key] = "changed" if isinstance(changed[key], str) else changed[key]+1
+                with self.subTest(body=key):
+                    refuses(changed)
+        for key in binary["driver_mount"]:
+            if key != "ancestors":
+                changed = copy.deepcopy(binary)
+                value = changed["driver_mount"][key]
+                changed["driver_mount"][key] = value+["changed"] if isinstance(value, list) else value+"changed"
+                with self.subTest(witness=key):
+                    refuses(changed)
+        for index in range(8):
+            changed = copy.deepcopy(binary)
+            changed["driver_mount"]["identity"][index] += 1
+            with self.subTest(body_identity=index):
+                refuses(changed)
+
+    def test_cross_phase_alias_link_identity_and_target_remain_exact(self):
+        alias = self.root / "driver-alias"
+        alias.symlink_to(self.body)
+        with patch.dict(driver.DRIVER_ALIASES, {str(alias): "nvidia_smi"}):
+            binary = driver.read_native_file(str(alias), self.deadline,
+                (str(self.root)+"/",), binding_sha256=BINDING)
+            self.assertTrue(binary["driver_mount"]["links"])
+            driver.verify_driver_binary(binary, self.deadline, BINDING)
+            for index in range(8):
+                changed = copy.deepcopy(binary)
+                changed["driver_mount"]["links"][0][1][index] += 1
+                with self.subTest(link_identity=index):
+                    with patch.object(driver, "read_native_file", return_value=changed):
+                        with self.assertRaises(ValueError):
+                            driver.verify_driver_binary(binary, self.deadline, BINDING)
+            changed = copy.deepcopy(binary)
+            changed["driver_mount"]["links"][0][2] += "changed"
+            with patch.object(driver, "read_native_file", return_value=changed):
+                with self.assertRaises(ValueError):
+                    driver.verify_driver_binary(binary, self.deadline, BINDING)
 
     def test_same_inode_remount_namespace_change_and_stale_declarations_refuse(self):
         binary = self.measure()
@@ -208,6 +305,34 @@ class DriverMountTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             verify_runtime_binary(binary, native, self.deadline)
 
+    def test_downstream_original_capture_allows_live_drift_but_not_declaration_tampering(self):
+        from cineforge import comfy_runtime_worker as worker
+        from cineforge.native_remote_plan import nr_digest, nr_encode
+        native = self.root / "native"
+        native.mkdir(mode=0o700)
+        binding = {"worker": "synthetic-worker", "scope": "a"*64, "session": "synthetic-session"}
+        (native / "binding.json").write_bytes(nr_encode(binding))
+        (native / "binding.json").chmod(0o600)
+        with patch.dict(globals(), BINDING=nr_digest(binding)):
+            binary = self.measure()
+        captured = nr_encode({"binding_sha256": nr_digest(binding),
+            "files": [dict(binary, status="measured")]})
+        (native / "capabilities.json").write_bytes(captured)
+        (native / "capabilities.json").chmod(0o600)
+        original = copy.deepcopy(binary)
+        self.directory_stats.update(st_nlink=3, st_size=8192, st_mtime_ns=2, st_ctime_ns=3)
+        worker.verify_runtime_binary(binary, native, self.deadline)
+        self.assertEqual(binary, original)
+        for index in range(4, 8):
+            changed = copy.deepcopy(binary)
+            changed["driver_mount"]["ancestors"][0][1][index] += 1
+            with self.subTest(tampered_captured_field=index):
+                with patch.object(worker, "verify_driver_binary", wraps=driver.verify_driver_binary) as verify:
+                    with self.assertRaisesRegex(ValueError, "differs from actual consumed worker capabilities"):
+                        worker.verify_runtime_binary(changed, native, self.deadline)
+                    verify.assert_not_called()
+        self.assertEqual((native / "capabilities.json").read_bytes(), captured)
+
     def test_parent_path_inode_replacement_after_descriptor_open_refuses(self):
         original_read = os.read
         moved = self.root.parent / (self.root.name+"-moved")
@@ -269,6 +394,15 @@ class DriverMountTests(unittest.TestCase):
         checked = CheckedComfyRuntime.reviewed(declaration, Reviewer())
         closed = ClosedComfyRuntime(bridge, checked)
         closed._admit(worker, self.deadline)
+        original_plan = copy.deepcopy(checked.current())
+        for index in range(4, 8):
+            changed = copy.deepcopy(declaration)
+            row = next(row for row in changed["native"] if "driver_mount" in row)
+            row["driver_mount"]["ancestors"][0][1][index] += 1
+            mutated = ClosedComfyRuntime(bridge, CheckedComfyRuntime.reviewed(changed, Reviewer()))
+            with self.subTest(tampered_checked_field=index), self.assertRaises(ValueError):
+                mutated._admit(worker, self.deadline)
+        self.assertEqual(checked.current(), original_plan)
         bridge._capabilities_payload = None
         with self.assertRaises(ValueError):
             closed._admit(worker, self.deadline)
