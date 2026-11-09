@@ -18,6 +18,7 @@ from cineforge.native_remote_package import native_package
 from cineforge.native_remote_plan import nr_encode
 from cineforge.native_speech_integrity import NativeBinary, _directory, verify_binary
 from cineforge.worker_bundle import MAX_SOURCE_BYTES, worker_source
+from cineforge.worker_transport_source import worker_command_source
 
 
 class ClosedComfyProcessTests(unittest.TestCase):
@@ -25,8 +26,8 @@ class ClosedComfyProcessTests(unittest.TestCase):
         self.assertEqual(sys.platform, "linux", "Linux command evidence cannot be skipped")
         source = worker_source()
         package, pins = native_package()
-        command = "python3 -I -B -S -c " + shlex.quote(source.decode())
-        m5_command = "/usr/bin/python3.11 -I -B -S -c " + shlex.quote(source.decode())
+        command = "python3 -I -B -S -c " + shlex.quote(worker_command_source(source))
+        m5_command = "/usr/bin/python3.11 -I -B -S -c " + shlex.quote(worker_command_source(source))
         self.assertLessEqual(len(source), MAX_SOURCE_BYTES)
         self.assertLess(len(command.encode()), 128 * 1024)
         self.assertLess(len(m5_command.encode()), 128 * 1024)

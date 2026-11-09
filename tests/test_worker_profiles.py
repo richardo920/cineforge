@@ -19,6 +19,7 @@ from cineforge.comfy_policy import ApprovedComfySelection
 from cineforge.selection import selection_subject
 from cineforge.worker_bundle import MAX_SOURCE_BYTES, WorkerBundleError, worker_source
 from cineforge.worker_profiles import I2V_WORKER, T2V_WORKER
+from cineforge.worker_transport_source import worker_command_source
 from cineforge.workflows import canonical
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -136,7 +137,7 @@ class BundleTests(unittest.TestCase):
                   "profile": {"id": "private-module-canary"}},
                  2, b'{"status":"worker_operation_failed"}\n'),
             ]:
-                result = subprocess.run([sys.executable, "-I", "-c", worker_source().decode()],
+                result = subprocess.run([sys.executable, "-I", "-c", worker_command_source(worker_source())],
                     input=canonical(request), capture_output=True, cwd=path, timeout=3)
                 self.assertEqual((result.returncode, result.stdout, result.stderr),
                                  (code, expected, b""))
@@ -147,7 +148,9 @@ class BundleTests(unittest.TestCase):
                    + repr(reference_metadata()).encode()
                    + b')._asdict()]).decode())\n')
         with tempfile.TemporaryDirectory(prefix="cineforge-profile-data-") as path:
-            result = subprocess.run([sys.executable, "-I", "-c", source.decode()],
+            fixture_source = Path(path) / "bundle-fixture.py"
+            fixture_source.write_bytes(source)
+            result = subprocess.run([sys.executable, "-I", str(fixture_source)],
                                     capture_output=True, cwd=path, timeout=3)
         self.assertEqual(result.returncode, 0, result.stderr)
         expected = json.loads(canonical([T2V_WORKER._asdict(), I2V_WORKER._asdict()]))
@@ -169,7 +172,7 @@ class BundleTests(unittest.TestCase):
                 fixtures = {"worker_profiles.py": parts[0], "worker_bootstrap.py": parts[1],
                             **{name: (root / name).read_bytes() for name in
                                ("audio_pcm.py", "paired_media.py", "s2v_stage.py", "native_speech_pins.py",
-                                "native_remote_plan.py", "native_remote_bootstrap.py")}}
+                                "native_driver.py", "native_remote_plan.py", "native_remote_bootstrap.py")}}
                 with patch("cineforge.worker_bundle.read_private_input",
                            side_effect=lambda path, **kw: fixtures[path.name]):
                     with self.assertRaisesRegex(WorkerBundleError, "fixed reviewed worker"):

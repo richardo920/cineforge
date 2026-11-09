@@ -766,8 +766,10 @@ print("verified first-party package imported; no ambient Cineforge or SDK")
             root = Path(directory).resolve()
             root.chmod(0o700)
             bootstrap.nr_write(root / "package.blob", package)
+            fixture_source = root / "standalone-fixture.py"
+            fixture_source.write_bytes(source)
             result = subprocess.run(
-                [sys.executable, "-I", "-B", "-S", "-c", source.decode(), str(root)],
+                [sys.executable, "-I", "-B", "-S", str(fixture_source), str(root)],
                 capture_output=True,
                 timeout=15,
                 cwd=root,

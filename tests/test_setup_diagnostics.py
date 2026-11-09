@@ -18,6 +18,7 @@ from cineforge import worker_bootstrap as bootstrap
 from cineforge.conditioning import ConditioningError
 from cineforge.private_store import PrivateRunDirectory
 from cineforge.ssh_worker import SSHWorker, WorkerError, run_process
+from cineforge.worker_bundle import worker_source
 
 CANARY = "synthetic-sensitive-diagnostic-canary"
 
@@ -172,7 +173,7 @@ class DiagnosticTests(Fixture):
 
     def test_only_m4_setup_ssh_opts_into_decode_and_retains_first_safe_failure(self):
         worker = object.__new__(SSHWorker)
-        worker._source, worker._host = b"synthetic", "fixture.invalid"
+        worker._source, worker._host = worker_source(), "fixture.invalid"
         worker.selection = object()  # Legacy diagnostic-only driver fixture.
         worker._command = lambda: ["synthetic"]
         worker.check = lambda: None

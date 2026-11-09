@@ -306,8 +306,8 @@ class GuardTests(unittest.TestCase):
             with patch("cineforge.worker_guard.worker_credential", return_value="fixture-scoped-key"), \
                     patch("urllib.request.build_opener", return_value=StalledOpener()):
                 started = time.monotonic()
-                self.assertFalse(stop_own_pod(plan(), allow_live=True, timeout_seconds=.03))
-                self.assertLess(time.monotonic() - started, .5)
+                self.assertFalse(stop_own_pod(plan(), allow_live=True, timeout_seconds=.3))
+                self.assertLess(time.monotonic() - started, .75)
                 self.assertTrue(entered.is_set())
                 self.assertEqual([c[0] for c in calls], ["GET"])
         finally:

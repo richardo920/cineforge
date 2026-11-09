@@ -37,7 +37,7 @@ from cineforge.native_remote_plan import nr_digest, nr_encode
 from cineforge.native_remote_worker import _install_wheel
 from cineforge.native_speech_integrity import NativeBinary, NativeSpeechError, verify_binary
 from cineforge.s2v_profile import IMAGE, model_files
-from cineforge.worker_bundle import worker_source
+from cineforge.worker_bundle import MAX_SOURCE_BYTES, worker_source
 
 HASH = "a" * 64
 CANARY = "SYNTHETIC-PRIVATE-CANARY"
@@ -539,7 +539,7 @@ class ComfyControllerTests(unittest.TestCase):
             self.assertNotIn(key, environment)
         self.assertEqual(environment["PATH"], "")
         source = worker_source()
-        self.assertLess(len(source), 128 * 1024)
+        self.assertLessEqual(len(source), MAX_SOURCE_BYTES)
         self.assertIn(b'"comfy"', source)
         self.assertIn(b"hardware_only_unverified_runtime", source)
 

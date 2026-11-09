@@ -18,8 +18,9 @@ from cineforge.cloud_budget import CloudBudgetError, CloudBudgetSession
 from cineforge.cloud_journal import CloudJournalError
 from cineforge.s2v import select_s2v
 from cineforge.s2v_service import S2VBudgetApproval, S2VServiceContext, prepare_service_journal
-from cineforge.worker_bundle import worker_source
+from cineforge.worker_bundle import MAX_SOURCE_BYTES, worker_source
 from cineforge.worker_profiles import I2V_WORKER, S2V_WORKER
+from cineforge.worker_transport_source import worker_command_source
 from cineforge.workflows import canonical
 
 
@@ -123,8 +124,8 @@ class S2VWorkerTests(unittest.TestCase):
 
     def test_installed_stdlib_worker_bundle_handles_ping_without_package_imports(self):
         source = worker_source()
-        self.assertLess(len(source), 128 * 1024)
-        result = subprocess.run([sys.executable, "-I", "-c", source.decode()],
+        self.assertLessEqual(len(source), MAX_SOURCE_BYTES)
+        result = subprocess.run([sys.executable, "-I", "-c", worker_command_source(source)],
             input=b'{"operation":"ping","allow_live":true,"timeout_seconds":1}',
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=self.root, timeout=5)
         self.assertEqual(result.returncode, 0, result.stderr)

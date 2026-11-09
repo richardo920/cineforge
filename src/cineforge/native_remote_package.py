@@ -43,6 +43,7 @@ _PACKAGE_FILES = (
     "devices.py",
     "json_codec.py",
     "mock.py",
+    "native_driver.py",
     "native_remote.py",
     "native_remote_bootstrap.py",
     "native_remote_package.py",
@@ -78,6 +79,7 @@ _PACKAGE_FILES = (
     "worker_bundle.py",
     "worker_guard.py",
     "worker_profiles.py",
+    "worker_transport_source.py",
     "workflows.py",
 )
 

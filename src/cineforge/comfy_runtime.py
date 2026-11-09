@@ -10,7 +10,7 @@ from typing import Any, Protocol
 
 from cineforge.comfy_precision import POLICY, precision_receipt, precision_request
 from cineforge.comfy_runtime_plan import comfy_plan, comfy_subject, comfy_worker
-from cineforge.native_remote_plan import NR_BLOB_MAX, nr_encode, nr_hash, nr_json
+from cineforge.native_remote_plan import NR_BLOB_MAX, nr_digest, nr_encode, nr_hash, nr_json
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,6 +124,18 @@ class ClosedComfyRuntime:
                 or plan["image"] != worker.spec.image or type(installed) is not dict
                 or plan["interpreter"] != installed.get("interpreter")):
             raise ValueError("closed Comfy interpreter differs from actual worker admission")
+        for binary in plan["native"]:
+            if "driver_mount" in binary:
+                if binary["driver_mount"]["binding_sha256"] != nr_digest(self._bridge._binding):
+                    raise ValueError("NVIDIA mount belongs to another native worker binding")
+                captured = self._bridge._capabilities_payload
+                if captured is None:
+                    raise ValueError("NVIDIA declaration has no actual consumed capability measurement")
+                facts = nr_json(captured)
+                if (nr_digest(facts) != self._bridge._capabilities_sha256
+                        or not any({key: row[key] for key in binary if key in row} == binary
+                                   for row in facts["files"] if row.get("status") == "measured")):
+                    raise ValueError("NVIDIA declaration differs from consumed capability measurement")
         return plan
 
     def _call(self, operation: str, deadline: float, **fields: Any) -> dict[str, Any]:
