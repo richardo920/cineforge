@@ -212,6 +212,15 @@ def read_native_file(alias: str, deadline: float, roots: tuple[str, ...], *,
 
 
 
+def linux_device_parts(value: int) -> tuple[int, int]:
+    """Decode the Linux uint64 dev_t wire value, independently of this host ABI."""
+    if type(value) is not int or not 0 <= value < 2**64:
+        raise ValueError("invalid Linux device identity")
+    major = ((value >> 8) & 0xfff) | ((value >> 32) & 0xfffff000)
+    minor = (value & 0xff) | ((value >> 12) & 0xffffff00)
+    return major, minor
+
+
 def validate_driver_receipt(receipt: Any, *, path: str, size_bytes: int, sha256: str,
                             binding_sha256: str, role: str | None = None,
                             alias: str | None = None) -> None:
@@ -255,7 +264,7 @@ def validate_driver_receipt(receipt: Any, *, path: str, size_bytes: int, sha256:
     mount = receipt["mount"]
     if (type(mount) is not list or len(mount) != 6
             or any(type(mount[i]) is not int or not 0 < mount[i] < 2**64 for i in (0, 1))
-            or mount[2] != str(os.major(identity[0]))+":"+str(os.minor(identity[0]))
+            or mount[2] != ":".join(map(str, linux_device_parts(identity[0])))
             or mount[3] != path or mount[4] != "ext4" or type(mount[5]) is not str
             or len(mount[5]) > 4096 or "ro" not in mount[5].split(",") or "rw" in mount[5].split(",")):
         raise ValueError("invalid individual NVIDIA mount")
