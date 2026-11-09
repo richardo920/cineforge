@@ -220,10 +220,14 @@ def bounded_process(command: list[str], *, timeout: float, cwd: Path | None = No
                 raise BootstrapError("worker process bounds exceeded", reason="timeout")
             if check is not None:
                 check()
+            if time.monotonic() >= deadline:
+                raise BootstrapError("worker process bounds exceeded", reason="timeout")
             for key, event in selector.select(min(.05, max(0, deadline-time.monotonic()))):
+                if time.monotonic() >= deadline:
+                    raise BootstrapError("worker process bounds exceeded", reason="timeout")
                 if event & selectors.EVENT_READ:
                     try:
-                        block = os.read(key.fd, min(4096, max_output+1-len(output)))
+                        block = os.read(key.fd, min(64*1024, max_output+1-len(output)))
                     except BlockingIOError:
                         continue
                     output.extend(block)
@@ -250,6 +254,8 @@ def bounded_process(command: list[str], *, timeout: float, cwd: Path | None = No
             raise BootstrapError("worker process did not complete", reason="process_failed")
         if check is not None:
             check()
+        if time.monotonic() >= deadline:
+            raise BootstrapError("worker process bounds exceeded", reason="timeout")
         result = bytes(output)
     finally:
         # A completed parent can leave descendants holding its pipes open. Always

@@ -294,6 +294,7 @@ class SSHWorker:
             raw = run_process(command, timeout=timeout, payload=canonical(request),
                 check=self.check if supervise else lambda: None,
                 **({"decode_setup_failure": True} if diagnostic_setup else {}),
+                **({"max_output": 256*1024} if request.get("operation") == "native_fetch" else {}),
                 **bounds)
         except worker_bootstrap.SetupFailure as error:
             if diagnostic_setup and self.setup_failure is None:

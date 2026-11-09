@@ -35,6 +35,7 @@ from cineforge.audio_pcm import inspect_pcm16_wav
 from cineforge.native_remote import RemoteNativeSpeechRuntime
 from cineforge.native_remote_package import native_package
 from cineforge.native_remote_plan import (
+    NR_CHUNK,
     nr_encode,
     nr_json,
     nr_recipe,
@@ -293,6 +294,74 @@ class RemoteTests(RemoteFixture):
         self.assertEqual(s2v.native_receipt_sha256, proof.native_receipt_sha256)
         self.static_failure(lambda: self.bridge.preview(self.design))
         self.assertEqual(self.child_count, 2)
+
+    def test_large_manifest_roundtrip_uses_33_bounded_data_frames_each_direction(self):
+        self.bridge.stage(recipe(), b"x")
+        # Synthetic canonical JSON matches the observed manifest size, without private data.
+        raw = nr_encode({"files": "x" * (4211692 - len(nr_encode({"files": ""})))})
+        self.assertEqual(len(raw), 4211692)
+        (self.remote / "installed.json").unlink()
+        bootstrap.nr_write(self.remote / "installed.json", raw)
+        self.requests.clear()
+        frames, replies = [], []
+        original = self.worker._request
+
+        def framed(request, timeout, **options):
+            closed = dict(request, allow_live=True, timeout_seconds=timeout,
+                          guard_sha256=worker_guard_source_sha256(), profile=self.worker._profile)
+            encoded = nr_encode(closed)
+            frames.append(encoded)
+            self.assertLessEqual(len(encoded), 256 * 1024)
+            reply = original(nr_json(encoded), timeout, **options)
+            encoded_reply = nr_encode(reply)
+            replies.append(encoded_reply)
+            self.assertLessEqual(len(encoded_reply), 256 * 1024)
+            return nr_json(encoded_reply)
+
+        self.worker._request = framed
+        descriptor = {"size_bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+        self.assertEqual(self.bridge._fetch("installed", descriptor), raw)
+        self.bridge._upload("selection", raw)
+        chunks = [r for r in self.requests if r["operation"] == "native_chunk"]
+        fetches = [r for r in self.requests if r["operation"] == "native_fetch"]
+        self.assertEqual(len(chunks), 33)
+        self.assertEqual(len(fetches), 33)
+        self.assertEqual([r["offset"] for r in chunks], list(range(0, len(raw), NR_CHUNK)))
+        self.assertEqual([r["offset"] for r in fetches], list(range(0, len(raw), NR_CHUNK)))
+        self.assertEqual(bootstrap.nr_read(self.remote / "selection.blob"), raw)
+        self.assertEqual(b"".join(base64.b64decode(r["data"], validate=True) for r in chunks), raw)
+        self.assertGreater(max(map(len, frames)), 174764)
+        self.assertGreater(max(map(len, replies)), 174764)
+        self.assertEqual(self.child_count, 0)
+        self.assertEqual(len(set(self.deadlines)), 1)
+
+    def test_larger_chunks_still_refuse_oversize_reorder_and_wrong_raw_hash(self):
+        for fault in ("oversize", "reorder", "hash"):
+            with self.subTest(fault=fault):
+                case = RemoteFixture("runTest")
+                case.setUp()
+                try:
+                    case.bridge.stage(recipe(), b"x")
+                    data = b"x" * NR_CHUNK
+                    common = {"role": "selection", "token": "a" * 32}
+                    case.bridge._call("native_begin", **common, size_bytes=len(data)+1,
+                                      sha256=hashlib.sha256(data+b"x").hexdigest())
+                    if fault == "hash":
+                        case.bridge._call("native_chunk", **common, offset=0,
+                                          data=base64.b64encode(data).decode())
+                        case.bridge._call("native_chunk", **common, offset=NR_CHUNK,
+                                          data=base64.b64encode(b"y").decode())
+                        case.static_failure(lambda: case.bridge._call("native_finish", **common))
+                    else:
+                        payload = data+b"x" if fault == "oversize" else data
+                        case.static_failure(lambda: case.bridge._call("native_chunk", **common,
+                            offset=0 if fault == "oversize" else NR_CHUNK,
+                            data=base64.b64encode(payload).decode()))
+                    self.assertTrue(case.bridge._unresolved)
+                    self.assertFalse((case.remote / "selection.blob.done").exists())
+                    self.assertEqual(case.child_count, 0)
+                finally:
+                    case.doCleanups()
 
     def test_lost_ack_consumed_no_second_setup_or_invoke(self):
         for operation in (
