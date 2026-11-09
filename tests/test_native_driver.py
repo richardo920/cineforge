@@ -36,7 +36,8 @@ class DriverMountTests(unittest.TestCase):
         self.readonly = True
         self.real_stat, self.real_fstat, self.real_lstat = os.stat, os.fstat, os.lstat
         self.identity = self.real_stat(self.body)
-        self.major_minor = str(os.major(self.identity.st_dev))+":"+str(os.minor(self.identity.st_dev))
+        # Explicit Linux worker wire identity, including on a Darwin controller.
+        self.major_minor = "8:1"
         self.extra_mount = ""
         self.descriptor_mount = 17
         self.context = []
@@ -44,6 +45,8 @@ class DriverMountTests(unittest.TestCase):
             patch.dict(driver.DRIVER_ALIASES, {str(self.body): "nvidia_smi"}),
             patch.object(driver, "DRIVER_ROOTS", (str(self.root)+"/",)),
             patch.object(driver.os, "getuid", return_value=0),
+            patch.object(driver.os, "major", side_effect=lambda device: 8 if device == 2049 else self.fail("unexpected synthetic Linux device")),
+            patch.object(driver.os, "minor", side_effect=lambda device: 1 if device == 2049 else self.fail("unexpected synthetic Linux device")),
             patch.object(driver.os, "stat", side_effect=self.fake_stat),
             patch.object(driver.os, "fstat", side_effect=self.fake_fstat),
             patch.object(driver.os, "lstat", side_effect=lambda *a, **kw: self.changed(self.real_lstat(*a, **kw))),
@@ -62,6 +65,9 @@ class DriverMountTests(unittest.TestCase):
     def changed(self, info):
         values = {key: getattr(info, key) for key in dir(info) if key.startswith("st_")}
         values["st_uid"] = self.uid if (info.st_dev, info.st_ino) == (self.identity.st_dev, self.identity.st_ino) else 0
+        # Real descriptors/inodes and mutation checks remain in use. Only the
+        # device ABI is synthetic Linux, rather than leaking the test host's dev_t.
+        values["st_dev"] = 2049
         if stat.S_ISDIR(info.st_mode):
             # Synthetic protected ancestors must not inherit unrelated /tmp churn
             # from concurrent test processes. Keep actual inode/owner/mode, which
