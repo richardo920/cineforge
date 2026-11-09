@@ -32,6 +32,7 @@ from cineforge.worker_bootstrap import (
     setup,
 )
 from cineforge.worker_bundle import worker_source
+from cineforge.worker_transport_source import worker_command_source
 
 
 def exercise_descendant_pipe(test, root, module, function):
@@ -329,7 +330,7 @@ class BootstrapTests(unittest.TestCase):
 
     def test_standalone_failure_does_not_echo_input_or_traceback(self):
         request = {"operation": "fixture-sensitive-value", "allow_live": False, "timeout_seconds": 1}
-        result = subprocess.run([sys.executable, "-I", "-c", worker_source().decode()],
+        result = subprocess.run([sys.executable, "-I", "-c", worker_command_source(worker_source())],
             input=json.dumps(request).encode(), capture_output=True)
         self.assertEqual(result.returncode, 2)
         self.assertEqual(result.stdout, b'{"status":"worker_operation_failed"}\n')

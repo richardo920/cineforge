@@ -23,6 +23,7 @@ from cineforge.comfy_runtime_plan import (
     comfy_worker,
     notice_bytes,
 )
+from cineforge.native_driver import verify_driver_binary
 from cineforge.native_remote_bootstrap import nr_check, nr_private, nr_read, nr_write
 from cineforge.native_remote_plan import nr_digest, nr_encode, nr_json
 from cineforge.native_remote_worker import _destination, _download, _install_wheel, _parent, _parts
@@ -150,11 +151,26 @@ def install_source(path: Path, target: Path, declaration: dict[str, Any], deadli
     nr_check(deadline)
 
 
-def verify_runtime(plan: dict[str, Any], root: Path, deadline: float) -> None:
+def verify_runtime_binary(binary: dict[str, Any], native: Path | None, deadline: float) -> None:
+    if "driver_mount" not in binary:
+        verify_binary(NativeBinary(**binary), deadline)
+    else:
+        if native is None:
+            raise ValueError("qualified NVIDIA verification needs the actual native session")
+        binding = nr_json(nr_read(native / "binding.json"))
+        facts = nr_json(nr_read(native / "capabilities.json"))
+        if (facts.get("binding_sha256") != nr_digest(binding)
+                or not any({key: row[key] for key in binary if key in row} == binary
+                           for row in facts.get("files", []) if row.get("status") == "measured")):
+            raise ValueError("NVIDIA plan differs from actual consumed worker capabilities")
+        verify_driver_binary(binary, deadline, nr_digest(binding))
+
+
+def verify_runtime(plan: dict[str, Any], root: Path, deadline: float, *, native: Path | None = None) -> None:
     comfy_plan(plan)
     verify_binary(NativeBinary(**plan["interpreter"]), deadline)
     for binary in plan["native"]:
-        verify_binary(NativeBinary(**binary), deadline)
+        verify_runtime_binary(binary, native, deadline)
     runtime = root / "comfy-runtime"
     verify_tree(NativeTree(str(runtime), _files(plan["installed"], str(runtime))), deadline)
     executable_paths = {entry["path"] for entry in plan["executables"]}
@@ -276,7 +292,7 @@ def install_comfy(request: dict[str, Any], native: Path, deadline: float) -> dic
             nr_write(path, notice_bytes(notice))
     nr_write(root / "comfy-notices-manifest.json", nr_encode(plan["notices"]))
     for binary in [plan["interpreter"], *plan["native"]]:
-        verify_binary(NativeBinary(**binary), deadline)
+        verify_runtime_binary(binary, native, deadline)
     downloads = root / "comfy-downloads"
     manifest: dict[str, tuple[int, str]] = {}
     for wheel in plan["wheels"]:
@@ -293,7 +309,7 @@ def install_comfy(request: dict[str, Any], native: Path, deadline: float) -> dic
               source["size_bytes"], source["sha256"], deadline)
     install_source(archive, root / "ComfyUI", source, deadline)
     nr_write(root / "comfy-selection.json", nr_encode(plan))
-    verify_runtime(plan, root, deadline)
+    verify_runtime(plan, root, deadline, native=native)
     verify_source(plan, root, deadline)
     command, environment = launch_command(plan, root, native, "probe", deadline)
     raw = bootstrap.bounded_process(command, timeout=min(30, deadline-time.monotonic()),
@@ -465,7 +481,7 @@ def current_comfy(request: dict[str, Any], native: Path, deadline: float) -> dic
     _require_profile(request, plan)
     if request["comfy_subject_sha256"] != comfy_subject(plan):
         raise ValueError("closed Comfy current selection differs")
-    verify_runtime(plan, root, deadline)
+    verify_runtime(plan, root, deadline, native=native)
     required = tuple(p for i, (p, _, _) in enumerate(S2V_WORKER.files)
                      if (native / ("comfy-model-" + str(i) + ".json")).exists())
     verify_source(plan, root, deadline, required_models=required)

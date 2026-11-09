@@ -8,6 +8,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from cineforge.comfy_precision import FIRST_PARTY_NODES, PRECISION
+from cineforge.native_driver import validate_driver_receipt
 from cineforge.native_remote_plan import nr_digest, nr_hash
 from cineforge.native_speech_integrity import NativeBinary, NativeTree
 from cineforge.s2v_profile import IMAGE
@@ -230,8 +231,14 @@ def comfy_plan(value: Any) -> dict[str, Any]:
         raise ValueError("closed Comfy native identities missing")
     paths = []
     for binary in value["native"]:
-        _keys(binary, {"path", "size_bytes", "sha256"})
-        paths.append(NativeBinary(**binary).path)
+        if type(binary) is not dict or set(binary) not in ({"path", "size_bytes", "sha256"},
+                                                          {"path", "size_bytes", "sha256", "driver_mount"}):
+            raise ValueError("invalid native binary declaration")
+        paths.append(NativeBinary(**{k: binary[k] for k in ("path", "size_bytes", "sha256")}).path)
+        if "driver_mount" in binary:
+            witness = binary["driver_mount"]
+            validate_driver_receipt(witness, path=binary["path"], size_bytes=binary["size_bytes"],
+                sha256=binary["sha256"], binding_sha256=witness.get("binding_sha256", "") if type(witness) is dict else "")
     if paths != sorted(set(paths)) or "/usr/bin/nvidia-smi" not in paths:
         raise ValueError("ambiguous closed Comfy native identities")
     _keys(value["review"], {"artifacts", "dependencies", "licenses", "advisories", "abi"})

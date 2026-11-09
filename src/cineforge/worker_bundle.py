@@ -13,7 +13,7 @@ from cineforge.private_store import read_private_input
 _PROFILE_IMPORT = b'from cineforge.worker_profiles import (\n    I2V_WORKER,\n    S2V_PROFILE_IDS,\n    S2V_WORKER,\n    T2V_WORKER,\n    WorkerProfile,\n    s2v_worker,\n)\n'
 _FUTURE = b"from __future__ import annotations\n"
 _MAIN = b'\nif __name__ == "__main__":\n    raise SystemExit(main())\n'
-MAX_SOURCE_BYTES = 128 * 1024
+MAX_SOURCE_BYTES = 160 * 1024
 
 
 class WorkerBundleError(ValueError):
@@ -42,8 +42,9 @@ def worker_source() -> bytes:
         helpers = b""
         for name, imports in (
             ("native_speech_pins.py", ()),
+            ("native_driver.py", ()),
             ("native_remote_plan.py", (b"from cineforge.native_speech_pins import BASE_FILES, DESIGN_FILES, RUNTIME_DISTRIBUTIONS, SDK_FILES\n",)),
-            ("native_remote_bootstrap.py", (b"from cineforge.native_remote_plan import (\n    NR_BLOB_MAX,\n    NR_CHUNK,\n    nr_digest,\n    nr_encode,\n    nr_hash,\n    nr_json,\n    nr_token,\n)\n", b"from cineforge.worker_bootstrap import bounded_process\n", b"from cineforge.worker_profiles import S2V_WORKER, s2v_worker\n")),
+            ("native_remote_bootstrap.py", (b"from cineforge.native_remote_plan import (\n    NR_BLOB_MAX,\n    NR_CHUNK,\n    nr_digest,\n    nr_encode,\n    nr_hash,\n    nr_json,\n    nr_token,\n)\n", b"from cineforge.native_driver import read_native_file\n", b"from cineforge.worker_bootstrap import bounded_process\n", b"from cineforge.worker_profiles import S2V_WORKER, s2v_worker\n")),
             ("audio_pcm.py", ()) ,
             ("paired_media.py", (b"from cineforge.audio_pcm import inspect_pcm16_wav\n",)),
             ("s2v_stage.py", (

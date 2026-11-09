@@ -18,6 +18,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from cineforge.native_driver import read_native_file
 from cineforge.native_remote_plan import (
     NR_BLOB_MAX,
     NR_CHUNK,
@@ -47,82 +48,8 @@ NR_CAP_ROOTS = ("/usr/bin/", "/usr/local/nvidia/bin/", "/usr/lib/x86_64-linux-gn
                 "/usr/lib64/", "/usr/local/nvidia/lib64/")
 
 
-def nr_file_identity(info: os.stat_result) -> tuple[int, ...]:
-    return (info.st_dev, info.st_ino, info.st_uid, info.st_mode, info.st_nlink,
-            info.st_size, info.st_mtime_ns, info.st_ctime_ns)
-
-
-def nr_cap_file(alias: str, deadline: float) -> dict[str, Any]:
-    # The only caller enumerates fixed aliases. Resolve protected symlinks with
-    # bounded descriptor traversal, then hash the actual no-follow owned body.
-    path = alias
-    links: list[tuple[str, tuple[int, ...], str]] = []
-    for _ in range(17):
-        nr_check(deadline)
-        if len(path) > 4096 or not path.startswith("/") or "\x00" in path:
-            raise ValueError("invalid fixed native capability path")
-        parts = path.split("/")[1:]
-        descriptor = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
-        restart = False
-        try:
-            for index, name in enumerate(parts):
-                nr_check(deadline)
-                if name in ("", ".", ".."):
-                    raise ValueError("invalid fixed native capability component")
-                before = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
-                if before.st_uid not in (0, os.getuid()):
-                    raise ValueError("unowned fixed native capability")
-                if stat.S_ISLNK(before.st_mode):
-                    target = os.readlink(name, dir_fd=descriptor)
-                    after = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
-                    if nr_file_identity(before) != nr_file_identity(after):
-                        raise ValueError("fixed native capability link changed")
-                    links.append((os.path.join("/", *parts[:index+1]), nr_file_identity(before), target))
-                    path = os.path.normpath(os.path.join("/", *parts[:index], target, *parts[index+1:]))
-                    restart = True
-                    break
-                if before.st_mode & 0o022 and not (before.st_uid == 0 and before.st_mode & stat.S_ISVTX):
-                    raise ValueError("unprotected fixed native capability ancestor")
-                if index < len(parts)-1:
-                    child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor)
-                    if (os.fstat(child).st_dev, os.fstat(child).st_ino) != (before.st_dev, before.st_ino):
-                        os.close(child)
-                        raise ValueError("fixed native capability ancestor changed")
-                    os.close(descriptor)
-                    descriptor = child
-                    continue
-                if (not path.startswith(NR_CAP_ROOTS) or not stat.S_ISREG(before.st_mode)
-                        or before.st_nlink != 1 or before.st_mode & 0o022
-                        or not 0 < before.st_size <= 1024**3):
-                    raise ValueError("unprotected fixed native capability body")
-                fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=descriptor)
-                try:
-                    if nr_file_identity(before) != nr_file_identity(os.fstat(fd)):
-                        raise ValueError("fixed native capability changed before read")
-                    sha, count = hashlib.sha256(), 0
-                    while block := os.read(fd, 1024**2):
-                        nr_check(deadline)
-                        count += len(block)
-                        if count > before.st_size:
-                            raise ValueError("fixed native capability grew")
-                        sha.update(block)
-                    after = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
-                    if (count != before.st_size or nr_file_identity(before) != nr_file_identity(after)
-                            or nr_file_identity(before) != nr_file_identity(os.fstat(fd))):
-                        raise ValueError("fixed native capability changed during read")
-                finally:
-                    os.close(fd)
-                nr_check(deadline)
-                for link, identity, target in links:
-                    if nr_file_identity(os.lstat(link)) != identity or os.readlink(link) != target:
-                        raise ValueError("fixed native capability alias changed during read")
-                    nr_check(deadline)
-                return {"path": path, "size_bytes": count, "sha256": sha.hexdigest()}
-        finally:
-            os.close(descriptor)
-        if not restart:
-            break
-    raise ValueError("fixed native capability link bound exceeded")
+def nr_cap_file(alias: str, deadline: float, *, binding_sha256: str | None = None) -> dict[str, Any]:
+    return read_native_file(alias, deadline, NR_CAP_ROOTS, binding_sha256=binding_sha256)
 
 
 def nr_capabilities(deadline: float, binding: dict[str, Any]) -> dict[str, Any]:
@@ -131,7 +58,7 @@ def nr_capabilities(deadline: float, binding: dict[str, Any]) -> dict[str, Any]:
     for role, alias in NR_CAP_ALIASES:
         row: dict[str, Any] = {"role": role, "alias": alias}
         try:
-            pin = nr_cap_file(alias, deadline)
+            pin = nr_cap_file(alias, deadline, binding_sha256=nr_digest(binding))
         except FileNotFoundError:
             row["status"] = "missing"
         else:

@@ -17,6 +17,7 @@ from cineforge import native_remote_bootstrap
 from cineforge import worker_bootstrap as bootstrap
 from cineforge.ssh_worker import SSHWorker, WorkerError
 from cineforge.worker_bundle import MAX_SOURCE_BYTES, worker_source
+from cineforge.worker_transport_source import worker_command_source
 from cineforge.workflows import canonical
 
 
@@ -37,7 +38,7 @@ class M5PythonTests(unittest.TestCase):
             "native_preflight", "native_begin", "native_chunk", "native_finish",
             "native_setup", "native_select", "native_fetch", "native_invoke",
             "native_comfy_install", "native_comfy_model", "native_comfy_setup", "native_comfy_verify")
-        source = worker_source().decode()
+        source = worker_command_source(worker_source())
         injection = "synthetic-not-a-command; $(false)"
         for operation in operations:
             with self.subTest(operation=operation):
@@ -79,7 +80,7 @@ class M5PythonTests(unittest.TestCase):
                     with patch("cineforge.ssh_worker.run_process", return_value=b"{}") as call:
                         worker._request({"operation": operation}, 5, supervise=False)
                     command = call.call_args.args[0][-1]
-                    self.assertEqual(command, prefix + shlex.quote(worker_source().decode()))
+                    self.assertEqual(command, prefix + shlex.quote(worker_command_source(worker_source())))
 
     def test_default_312_rejected_before_hardware_and_native_effects_311_admits_only_facts(self):
         deadline = time.monotonic()+10

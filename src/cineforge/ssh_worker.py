@@ -38,6 +38,7 @@ from cineforge.s2v import S2VSelection, StagedS2VPair
 from cineforge.s2v_service import S2VServiceContext
 from cineforge.worker_bundle import worker_source
 from cineforge.worker_guard import GuardReceipt, WorkerGuardPlan, worker_guard_source_sha256
+from cineforge.worker_transport_source import worker_command_source
 from cineforge.workflows import canonical, strict_object
 
 
@@ -285,7 +286,8 @@ class SSHWorker:
             flags = "/usr/bin/python3.11 -I -B -S -c "
         else:
             flags = "python3 -I -B -S -c " if native else "python3 -I -c "
-        command = self._command() + [self._host, flags + shlex.quote(self._source.decode())]
+        rendered = worker_command_source(self._source)
+        command = self._command() + [self._host, flags + shlex.quote(rendered)]
         diagnostic_setup = self._profile is not None and request.get("operation") == "setup"
         bounds: dict[str, Any] = {} if absolute_deadline is None else {"absolute_deadline": absolute_deadline}
         try:

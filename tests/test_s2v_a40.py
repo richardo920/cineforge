@@ -29,6 +29,7 @@ from cineforge.s2v_service import S2VBudgetApproval, S2VServiceContext, prepare_
 from cineforge.ssh_worker import SSHWorker, WorkerError
 from cineforge.worker_bundle import MAX_SOURCE_BYTES, worker_source
 from cineforge.worker_profiles import S2V_A40_WORKER, S2V_L40S_WORKER, S2V_WORKER
+from cineforge.worker_transport_source import worker_command_source
 from cineforge.workflows import canonical
 
 
@@ -220,7 +221,7 @@ class A40ProfileTests(unittest.TestCase):
         package, pins = native_package()
         self.assertLessEqual(len(source), MAX_SOURCE_BYTES)
         self.assertLess(
-            len(("/usr/bin/python3.11 -I -B -S -c " + shlex.quote(source.decode())).encode()),
+            len(("/usr/bin/python3.11 -I -B -S -c " + shlex.quote(worker_command_source(source))).encode()),
             131072,
         )
         self.assertLessEqual(len(package), 2 * 1024**2)

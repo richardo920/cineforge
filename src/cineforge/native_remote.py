@@ -17,6 +17,7 @@ from threading import Lock
 from typing import Any
 
 from cineforge.audio_pcm import PCM16Wave
+from cineforge.native_driver import validate_driver_receipt
 from cineforge.native_remote_bootstrap import NR_CAP_ALIASES, NR_CAP_POLICY, NR_CAP_ROOTS
 from cineforge.native_remote_package import native_package
 from cineforge.native_remote_plan import (
@@ -110,6 +111,7 @@ class RemoteNativeSpeechRuntime:
         self._staging_attempted = False
         self._capabilities_attempted = False
         self._capabilities_sha256: str | None = None
+        self._capabilities_payload: bytes | None = None
         self._unresolved = False
         self._attempts = 0
         self._used: set[str] = set()
@@ -230,6 +232,7 @@ class RemoteNativeSpeechRuntime:
                 if time.monotonic() >= self._deadline:
                     raise ValueError
                 self._capabilities_sha256 = nr_digest(result)
+                self._capabilities_payload = nr_encode(result)
                 if time.monotonic() >= self._deadline:
                     raise ValueError
             except BaseException:
@@ -253,13 +256,17 @@ class RemoteNativeSpeechRuntime:
                 raise ValueError("fixed native measurement alias differs")
             if row.get("status") == "missing" and set(row) == {"role", "alias", "status"}:
                 continue
-            if (set(row) != {"role", "alias", "status", "path", "size_bytes", "sha256"}
+            if (set(row) not in ({"role", "alias", "status", "path", "size_bytes", "sha256"},
+                                    {"role", "alias", "status", "path", "size_bytes", "sha256", "driver_mount"})
                     or row["status"] != "measured" or type(row["path"]) is not str
                     or not row["path"].startswith(NR_CAP_ROOTS) or len(row["path"]) > 4096
                     or "\x00" in row["path"] or any(p in ("", ".", "..") for p in row["path"].split("/")[1:])
                     or type(row["size_bytes"]) is not int or not 0 < row["size_bytes"] <= 1024**3):
                 raise ValueError("invalid fixed native measurement body")
             nr_hash(row["sha256"])
+            if "driver_mount" in row:
+                validate_driver_receipt(row["driver_mount"], path=row["path"], size_bytes=row["size_bytes"],
+                    sha256=row["sha256"], binding_sha256=nr_digest(self._binding), role=role, alias=alias)
             total += row["size_bytes"]
         if total > 2 * 1024**3:
             raise ValueError("fixed native measurements exceed bound")
