@@ -290,6 +290,8 @@ class SSHWorker:
         command = self._command() + [self._host, flags + shlex.quote(rendered)]
         diagnostic_setup = self._profile is not None and request.get("operation") == "setup"
         bounds: dict[str, Any] = {} if absolute_deadline is None else {"absolute_deadline": absolute_deadline}
+        if request.get("operation") == "native_fetch":
+            bounds["max_output"] = 256*1024
         try:
             raw = run_process(command, timeout=timeout, payload=canonical(request),
                 check=self.check if supervise else lambda: None,

@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 
 from cineforge.native_speech_pins import BASE_FILES, DESIGN_FILES, RUNTIME_DISTRIBUTIONS, SDK_FILES
 
-NR_CHUNK = 32768
+NR_CHUNK = 128 * 1024
 NR_BLOB_MAX = 16 * 1024**2
 NR_POLICY = "native-fixed-wheel-unpack-v4-model-role"
 

@@ -360,6 +360,19 @@ class SSHTests(unittest.TestCase):
     def test_post_spawn_clock_interruption_reaps_ssh_child_and_closes_pipes(self):
         exercise_post_spawn_clock_failure(self, run_process, WorkerError)
 
+    def test_only_native_fetch_has_a_larger_bounded_response(self):
+        worker = self.worker(allow_live=True)
+        worker._connection(LeaseSnapshot("first", "created", "pod_1"), 5)
+        for operation in ("ping", "setup", "native_chunk", "native_setup", "native_fetch"):
+            with self.subTest(operation=operation), patch("cineforge.ssh_worker.run_process",
+                    return_value=b'{"status":"fixture"}') as call:
+                deadline = time.monotonic() + 5
+                worker._request({"operation": operation}, 5, supervise=False,
+                                absolute_deadline=deadline)
+                self.assertEqual(call.call_args.kwargs.get("max_output", 65536),
+                                 256 * 1024 if operation == "native_fetch" else 65536)
+                self.assertEqual(call.call_args.kwargs["absolute_deadline"], deadline)
+
     def test_source_and_payload_are_separate_not_shell_interpolated(self):
         worker = self.worker(allow_live=True)
         worker._connection(LeaseSnapshot("first", "created", "pod_1"), 5)

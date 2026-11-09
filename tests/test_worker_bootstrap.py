@@ -307,6 +307,93 @@ class BootstrapTests(unittest.TestCase):
         with self.assertRaises(BootstrapError):
             bounded_process([sys.executable, "-c", "print('x'*100000)"], timeout=2, max_output=100)
 
+    def test_stdout_batches_keep_remaining_sentinel_and_guard_checks(self):
+        original = os.read
+        reads, checks = [], []
+        def observed(fd, amount):
+            reads.append((amount, len(checks)))
+            return original(fd, amount)
+        command = [sys.executable, "-c", "import sys;sys.stdout.buffer.write(b'x'*174800)"]
+        with patch("cineforge.worker_bootstrap.os.read", side_effect=observed):
+            answer = bounded_process(command, timeout=5, max_output=256*1024,
+                                     check=lambda: checks.append(True))
+        self.assertEqual(answer, b"x" * 174800)
+        # Popen may read its own error pipe before the monitored stdout loop.
+        stdout_reads = [(n, c) for n, c in reads if c]
+        self.assertTrue(stdout_reads)
+        self.assertTrue(all(0 < n <= 64*1024 for n, _ in stdout_reads))
+        self.assertEqual(stdout_reads[0][0], 64*1024)
+        self.assertEqual(len({c for _, c in stdout_reads}), len(stdout_reads))
+        self.assertGreater(len(checks), stdout_reads[-1][1])  # final admission
+        for size in (100, 101, 65536, 65537):
+            with self.subTest(size=size):
+                command = [sys.executable, "-c", f"import sys;sys.stdout.buffer.write(b'x'*{size})"]
+                if size in (100, 65536):
+                    self.assertEqual(len(bounded_process(command, timeout=5, max_output=size)), size)
+                else:
+                    with self.assertRaises(BootstrapError):
+                        bounded_process(command, timeout=5, max_output=size-1)
+
+    def test_slow_guard_cannot_dispatch_input_or_accept_output_after_original_cap(self):
+        child, clock, writes = [], [0.0], []
+        spawn, write = subprocess.Popen, os.write
+        def tracked(*args, **kwargs):
+            process = spawn(*args, **kwargs)
+            child.append(process)
+            return process
+        def observed(fd, data):
+            writes.append(data)
+            return write(fd, data)
+        def slow_guard():
+            clock[0] = 6.0
+        with patch("cineforge.worker_bootstrap.subprocess.Popen", side_effect=tracked), \
+                patch("cineforge.worker_bootstrap.time.monotonic", side_effect=lambda: clock[0]), \
+                patch("cineforge.worker_bootstrap.os.write", side_effect=observed):
+            with self.assertRaises(BootstrapError):
+                bounded_process([sys.executable, "-c", "import sys;sys.stdin.buffer.read()"],
+                                timeout=5, payload=b"not dispatched", check=slow_guard)
+        self.assertEqual(writes, [])
+        self.assertIsNotNone(child[0].poll())
+        clock[0] = 0.0
+        child.clear()
+        delayed_final = []
+        def final_guard():
+            if child[0].stdout.closed:
+                delayed_final.append(True)
+                clock[0] = 6.0
+        with patch("cineforge.worker_bootstrap.subprocess.Popen", side_effect=tracked), \
+                patch("cineforge.worker_bootstrap.time.monotonic", side_effect=lambda: clock[0]):
+            with self.assertRaises(BootstrapError):
+                bounded_process([sys.executable, "-c", "print('bounded')"], timeout=5,
+                                check=final_guard)
+        self.assertTrue(delayed_final)
+        self.assertIsNotNone(child[0].poll())
+
+    def test_stdout_trickle_cancellation_and_final_admission_remain_bounded(self):
+        command = [sys.executable, "-c",
+                   "import os,time\nwhile True:\n os.write(1,b'x');time.sleep(.01)"]
+        started = time.monotonic()
+        with self.assertRaises(BootstrapError):
+            bounded_process(command, timeout=5, absolute_deadline=started+.15)
+        self.assertLess(time.monotonic()-started, 3)
+        with self.assertRaises(KeyboardInterrupt):
+            bounded_process(command, timeout=5,
+                check=lambda: (_ for _ in ()).throw(KeyboardInterrupt()))
+        def reject_final():
+            # Empty output has one loop check followed by final admission.
+            if child[0].poll() is not None:
+                raise ValueError("fixture final admission rejected")
+        child = []
+        spawn = subprocess.Popen
+        def tracked(*args, **kwargs):
+            process = spawn(*args, **kwargs)
+            child.append(process)
+            return process
+        with patch("cineforge.worker_bootstrap.subprocess.Popen", side_effect=tracked):
+            with self.assertRaises(ValueError):
+                bounded_process([sys.executable, "-c", "pass"], timeout=5, check=reject_final)
+        self.assertIsNotNone(child[0].returncode)
+
     def test_exited_parent_detached_descendant_and_backpressure_cannot_hold_worker_deadline(self):
         exercise_descendant_pipe(self, self.root, "cineforge.worker_bootstrap", "bounded_process")
 
