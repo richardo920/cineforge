@@ -218,3 +218,49 @@ class DriverMountTests(unittest.TestCase):
                 import shutil
                 shutil.rmtree(self.root)
                 moved.rename(self.root)
+
+    def test_capability_controller_and_reviewed_plan_reject_mixed_or_stale_witness(self):
+        from test_comfy_runtime import Reviewer, plan
+
+        from cineforge import native_remote as controller
+        from cineforge.comfy_runtime import CheckedComfyRuntime, ClosedComfyRuntime
+        from cineforge.comfy_runtime_plan import comfy_plan
+        from cineforge.native_remote import RemoteNativeSpeechRuntime
+        from cineforge.native_remote_plan import nr_digest, nr_encode
+        binding = {"worker": "owned-worker", "session": "owned-session", "scope": "c"*64}
+        with patch.dict(globals(), BINDING=nr_digest(binding)):
+            binary = self.measure()
+        bridge = object.__new__(RemoteNativeSpeechRuntime)
+        bridge._binding = binding
+        facts = {"version": 1, "policy": controller.NR_CAP_POLICY, "binding_sha256": nr_digest(binding),
+                 "interpreter_path": "/usr/bin/python3.11", "files": [dict(binary, role="nvidia_smi", alias=str(self.body), status="measured"),
+                 dict(role="interpreter", alias="/usr/bin/python3.11", status="measured", path="/usr/bin/python3.11", size_bytes=1, sha256="d"*64)]}
+        aliases = (("nvidia_smi", str(self.body)), ("interpreter", "/usr/bin/python3.11"))
+        with patch.object(controller, "NR_CAP_ALIASES", aliases), patch.object(controller, "NR_CAP_ROOTS", (str(self.root)+"/", "/usr/bin/")):
+            bridge._validate_capabilities(facts)
+            tampered = copy.deepcopy(facts)
+            tampered["files"][0]["driver_mount"]["role"] = "interpreter"
+            with self.assertRaises(ValueError):
+                bridge._validate_capabilities(tampered)
+        declaration = plan()
+        declaration["native"].append(binary)
+        declaration["native"].sort(key=lambda b: b["path"])
+        comfy_plan(declaration)
+        worker = SimpleNamespace(spec=SimpleNamespace(image=declaration["image"]),
+            selection=SimpleNamespace(worker_profile={"id": "m5-wan22-s2v14b-5090-v1"}), native_admission=lambda: None)
+        bridge._worker = worker
+        bridge._deadline = self.deadline
+        bridge._expires_unix = time.time()+10
+        bridge._installed = {"interpreter": declaration["interpreter"]}
+        bridge._capabilities_payload = nr_encode(facts)
+        bridge._capabilities_sha256 = nr_digest(facts)
+        checked = CheckedComfyRuntime.reviewed(declaration, Reviewer())
+        closed = ClosedComfyRuntime(bridge, checked)
+        closed._admit(worker, self.deadline)
+        bridge._capabilities_payload = None
+        with self.assertRaises(ValueError):
+            closed._admit(worker, self.deadline)
+        bridge._capabilities_payload = nr_encode(facts)
+        bridge._binding = dict(binding, session="foreign-session")
+        with self.assertRaises(ValueError):
+            closed._admit(worker, self.deadline)
