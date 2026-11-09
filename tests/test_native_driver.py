@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import os
+import stat
 import tempfile
 import time
 import unittest
@@ -61,6 +62,11 @@ class DriverMountTests(unittest.TestCase):
     def changed(self, info):
         values = {key: getattr(info, key) for key in dir(info) if key.startswith("st_")}
         values["st_uid"] = self.uid if (info.st_dev, info.st_ino) == (self.identity.st_dev, self.identity.st_ino) else 0
+        if stat.S_ISDIR(info.st_mode):
+            # Synthetic protected ancestors must not inherit unrelated /tmp churn
+            # from concurrent test processes. Keep actual inode/owner/mode, which
+            # the explicit replacement/mode race tests still mutate and verify.
+            values.update(st_nlink=2, st_size=4096, st_mtime_ns=0, st_ctime_ns=0)
         return SimpleNamespace(**values)
 
     def fake_stat(self, *args, **kwargs):
