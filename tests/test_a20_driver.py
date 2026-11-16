@@ -143,6 +143,16 @@ class CoreTests(unittest.TestCase):
         self.assertNotIn("private text", json.dumps(result))
         kwargs["snapshot"].assert_called_once_with()
 
+    def test_default_clock_is_resolved_at_call_time(self):
+        snapshot = Mock()
+        with patch.object(driver.time, "monotonic", return_value=100) as clock:
+            result = driver.CoreProbe().run(deadline=100, prep={}, staged=None,
+                                             frozen={}, snapshot=snapshot)
+        clock.assert_called_once_with()
+        self.assertEqual(result["reads"], [])
+        self.assertEqual(result["findings"]["failure_code"], "A20_CORE_CAP_EXHAUSTED")
+        snapshot.assert_not_called()
+
     def test_hold_is_minimum_of_600_original_parent_and_lease_reserve(self):
         self.assertEqual(driver.attempt_cap(2000, 1800, 10), 610)
         self.assertEqual(driver.attempt_cap(100, 1800, 10), 100)
@@ -295,10 +305,13 @@ class DriverTests(unittest.TestCase):
             with self.subTest(expired=expired), tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
                 h = Harness(Path(tmp).resolve(), stack, failure="prepare")
                 h.budget.snapshot_for.side_effect = RuntimeError("private diagnostic error")
+                clock = stack.enter_context(patch.object(driver.time, "monotonic", return_value=1))
                 if expired:
-                    # Core's default clock retains real monotonic; a historical
-                    # parent cap must refuse all fact reads, even in this fake run.
-                    stack.enter_context(patch.object(driver.time, "monotonic", return_value=1))
+                    # Preparation consumes the original cap before failing.
+                    def prepare(*args, clock=clock, h=h, **kwargs):
+                        clock.return_value = kwargs["absolute_deadline"]
+                        h.event("prepare")
+                    h.worker.prepare.side_effect = prepare
                 def release(owned, h=h):
                     saved = json.loads((h.output / "run.json").read_bytes())
                     self.assertEqual(saved["core_probe"]["invocation"], 1)

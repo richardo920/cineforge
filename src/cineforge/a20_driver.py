@@ -101,7 +101,9 @@ class CoreProbe:
 
     def run(self, *, deadline: float, prep: dict[str, Any], staged: dict[str, Any] | None,
             frozen: dict[str, Any], snapshot: Callable[[], Any],
-            clock: Callable[[], float] = time.monotonic) -> dict[str, Any]:
+            clock: Callable[[], float] | None = None) -> dict[str, Any]:
+        if clock is None:
+            clock = time.monotonic
         if self.invocations:
             raise A20Error("A20_CORE_ALREADY_CONSUMED")
         self.invocations += 1
