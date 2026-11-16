@@ -6,13 +6,14 @@ import sys
 import unittest
 from pathlib import Path
 
+from stable_test_temp import stable_temporary_directory
+
 from cineforge.json_codec import is_sha256_hex
 from cineforge.native_driver import DRIVER_ALIASES, DRIVER_POLICY, validate_driver_receipt
 from cineforge.native_remote_plan import nr_hash
 from cineforge.s2v import S2VError, _sha
 from cineforge.s2v_stage import _sha as stage_sha
 from cineforge.worker_bundle import worker_source
-from tests.stable_test_temp import stable_temporary_directory
 
 
 class StringSubclass(str):
