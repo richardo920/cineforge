@@ -7,7 +7,9 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
+import cineforge.skill_runtime as skill_runtime
 from cineforge.contracts import Shot
 from cineforge.rights import (
     EvidenceRef,
@@ -20,6 +22,8 @@ from cineforge.rights import (
 from cineforge.skill_runtime import (
     InstalledSkill,
     RuntimePolicy,
+    SkillInstallConflictError,
+    SkillInstallIncompleteError,
     SkillRuntime,
     SkillRuntimeError,
 )
@@ -111,8 +115,208 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(receipt["attributions"][0]["notices"], ["Synthetic notice"])
         self.assertEqual(len(os.listdir(self.cache)), 1)
         self.assertEqual((folder / "receipt").stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.install(), installed)
+
+    def expected_install(self) -> tuple[InstalledSkill, bytes]:
+        receipt = self.runtime._receipt(self.entry, self.binding)
+        return InstalledSkill(self.entry.pin, self.binding.shot_sha256,
+                              hashlib.sha256(receipt).hexdigest()), receipt
+
+    def assert_receipt_variant(self, *, entry=None, record_changes=None,
+                               policy=None) -> None:
+        # Both contexts are authorized by the same record, isolating policy changes.
+        uses = tuple(Use(action, audience, commercial)
+                     for action in ("reference", "install", "execute")
+                     for audience in ("internal", "public") for commercial in (False, True))
+        self.runtime.ledger = RightsLedger()
+        self.runtime.ledger.register(rights_for(self.entry, allowed_uses=uses))
+        first = self.install()
+        first_receipt = (self.cache / first.cache_key / "receipt").read_bytes()
+        self.assertEqual(self.runtime.open_session(first, binding=self.binding,
+                                                   shot=self.shot).instructions(), SOURCE.decode())
+        variant = self.entry if entry is None else entry
+        self.runtime.catalog = SkillCatalog((variant,))
+        self.runtime.ledger = RightsLedger()
+        self.runtime.ledger.register(rights_for(variant, allowed_uses=uses,
+                                               **(record_changes or {})))
+        if policy is not None:
+            self.runtime.policy = policy
+        binding = bind_shot(self.shot, (variant.pin,))
+        expected_receipt = self.runtime._receipt(variant, binding)
+        second = self.runtime.install(variant.pin, binding=binding, shot=self.shot, source=SOURCE)
+        self.assertNotEqual(first.cache_key, second.cache_key)
+        self.assertNotEqual(first.receipt_sha256, second.receipt_sha256)
+        self.assertEqual(first.shot_sha256, second.shot_sha256)
+        use = json.loads(expected_receipt)["attributions"][0]["use"]
+        self.assertEqual(use["audience"], self.runtime.policy.audience)
+        self.assertEqual(use["commercial"], self.runtime.policy.commercial)
+        # Isolate receipt identity even when catalog declarations also change the pin.
+        fixed_pin = replace(second, pin=first.pin, shot_sha256=first.shot_sha256)
+        self.assertNotEqual(first.cache_key, fixed_pin.cache_key)
+        if entry is None or variant.digest == self.entry.digest:
+            self.assertEqual(first.pin, second.pin)
+            self.assertEqual(first.shot_sha256, second.shot_sha256)
+        self.assertEqual((self.cache / first.cache_key / "receipt").read_bytes(), first_receipt)
+        self.assertEqual((self.cache / second.cache_key / "receipt").read_bytes(), expected_receipt)
+        for installed in (first, second):
+            self.assertEqual((self.cache / installed.cache_key / "instructions").read_bytes(), SOURCE)
+        session = self.runtime.open_session(second, binding=binding, shot=self.shot)
+        self.assertEqual(session.instructions(), SOURCE.decode())
+        self.assertEqual(len(os.listdir(self.cache)), 2)
+
+    def test_cache_identity_includes_entrypoint_receipt(self) -> None:
+        source = replace(self.entry.source, path="alternate/SKILL.md")
+        entry = replace(self.entry, source=source, entrypoint=source.path)
+        entry = replace(entry, review=replace(entry.review, declaration_sha256=entry.digest))
+        self.assert_receipt_variant(entry=entry)
+
+    def test_cache_identity_includes_permissions_receipt(self) -> None:
+        permissions = Permissions(tools=("read_file",), read_paths=("inputs/brief",))
+        self.assert_receipt_variant(entry=entry_for(permissions=permissions))
+
+    def test_cache_identity_includes_source_review_receipt(self) -> None:
+        review = replace(self.entry.review, reviewer="another-reviewer")
+        self.assert_receipt_variant(entry=replace(self.entry, review=review))
+
+    def test_cache_identity_includes_review_evidence_uri_receipt(self) -> None:
+        review = replace(self.entry.review, evidence_uri="urn:review:other")
+        self.assert_receipt_variant(entry=replace(self.entry, review=review))
+
+    def test_cache_identity_includes_attributions_receipt(self) -> None:
+        self.assert_receipt_variant(record_changes={"attribution": "Another fixture credit"})
+
+    def test_cache_identity_includes_audience_in_attribution_use(self) -> None:
+        self.assert_receipt_variant(policy=RuntimePolicy(CAPS, audience="public"))
+
+    def test_cache_identity_includes_commercial_in_attribution_use(self) -> None:
+        self.assert_receipt_variant(policy=RuntimePolicy(CAPS, commercial=True))
+
+    def test_identical_reinstall_returns_same_binding_and_opens_session(self) -> None:
+        first = self.install()
+        folder = self.cache / first.cache_key
+        before = {name: ((folder / name).read_bytes(), (folder / name).stat().st_ino)
+                  for name in ("instructions", "receipt")}
+        self.assertEqual(self.install(), first)
+        self.assertEqual(before, {name: ((folder / name).read_bytes(), (folder / name).stat().st_ino)
+                                  for name in before})
+        self.assertEqual(self.runtime.open_session(first, binding=self.binding,
+                                                   shot=self.shot).instructions(), SOURCE.decode())
+
+    def assert_existing_slot(self, files: dict[str, bytes], error_type, names) -> None:
+        installed, _ = self.expected_install()
+        folder = self.cache / installed.cache_key
+        folder.mkdir(mode=0o700)
+        for name, data in files.items():
+            (folder / name).write_bytes(data)
+        with self.assertRaises(error_type) as error:
+            self.install()
+        self.assertIn(installed.cache_key, str(error.exception))
+        for name in names:
+            self.assertIn(name, str(error.exception))
+        self.assertNotIn("could not install", str(error.exception))
+        self.assertEqual({path.name: path.read_bytes() for path in folder.iterdir()}, files)
         with self.assertRaises(SkillRuntimeError):
-            self.install()  # No overwrite or implicit upgrade.
+            self.runtime.open_session(installed, binding=self.binding, shot=self.shot)
+
+    def test_existing_instructions_conflict_is_specific_and_unchanged(self) -> None:
+        _, receipt = self.expected_install()
+        self.assert_existing_slot({"instructions": SOURCE + b"different", "receipt": receipt},
+                                  SkillInstallConflictError, ("instructions",))
+
+    def test_existing_receipt_conflict_is_specific_and_unchanged(self) -> None:
+        self.assert_existing_slot({"instructions": SOURCE, "receipt": b"different"},
+                                  SkillInstallConflictError, ("receipt",))
+
+    def test_existing_empty_slot_names_both_missing_files(self) -> None:
+        self.assert_existing_slot({}, SkillInstallIncompleteError, ("instructions", "receipt"))
+        self.assertFalse(issubclass(SkillInstallIncompleteError, SkillInstallConflictError))
+
+    def test_existing_instructions_only_names_missing_receipt(self) -> None:
+        self.assert_existing_slot({"instructions": SOURCE}, SkillInstallIncompleteError,
+                                  ("receipt",))
+
+    def test_existing_receipt_only_names_missing_instructions(self) -> None:
+        _, receipt = self.expected_install()
+        self.assert_existing_slot({"receipt": receipt}, SkillInstallIncompleteError,
+                                  ("instructions",))
+
+    def test_create_collision_checks_complete_slot_without_overwriting(self) -> None:
+        installed, receipt = self.expected_install()
+        folder = self.cache / installed.cache_key
+        original_create = skill_runtime._create
+
+        def concurrent_create(root, parts, data):
+            (folder / "instructions").write_bytes(SOURCE)
+            (folder / "receipt").write_bytes(receipt)
+            original_create(root, parts, data)  # Real O_EXCL collision.
+
+        with patch.object(skill_runtime, "_create", side_effect=concurrent_create):
+            self.assertEqual(self.install(), installed)
+        self.assertEqual((folder / "instructions").read_bytes(), SOURCE)
+        self.assertEqual((folder / "receipt").read_bytes(), receipt)
+
+    def test_create_collision_names_incomplete_slot_without_creating_receipt(self) -> None:
+        installed, _ = self.expected_install()
+        folder = self.cache / installed.cache_key
+        original_create = skill_runtime._create
+
+        def concurrent_create(root, parts, data):
+            (folder / "instructions").write_bytes(SOURCE)
+            original_create(root, parts, data)
+
+        with patch.object(skill_runtime, "_create", side_effect=concurrent_create):
+            with self.assertRaisesRegex(SkillInstallIncompleteError,
+                                        installed.cache_key + ": missing receipt"):
+                self.install()
+        self.assertEqual(set(os.listdir(folder)), {"instructions"})
+        self.assertEqual((folder / "instructions").read_bytes(), SOURCE)
+
+    def test_receipt_create_collision_names_conflict_without_overwriting(self) -> None:
+        installed, _ = self.expected_install()
+        folder = self.cache / installed.cache_key
+        original_create = skill_runtime._create
+
+        def concurrent_create(root, parts, data):
+            if parts[-1] == "receipt":
+                (folder / "receipt").write_bytes(b"different")
+            original_create(root, parts, data)
+
+        with patch.object(skill_runtime, "_create", side_effect=concurrent_create):
+            with self.assertRaisesRegex(SkillInstallConflictError,
+                                        installed.cache_key + ": .*receipt"):
+                self.install()
+        self.assertEqual((folder / "instructions").read_bytes(), SOURCE)
+        self.assertEqual((folder / "receipt").read_bytes(), b"different")
+
+    def test_failed_create_retains_slot_and_retry_names_missing_receipt(self) -> None:
+        installed, _ = self.expected_install()
+        folder = self.cache / installed.cache_key
+        original_create = skill_runtime._create
+
+        def failed_create(root, parts, data):
+            if parts[-1] == "receipt":
+                raise OSError("synthetic write failure")
+            original_create(root, parts, data)
+
+        with patch.object(skill_runtime, "_create", side_effect=failed_create):
+            with self.assertRaises(SkillRuntimeError):
+                self.install()
+        with self.assertRaisesRegex(SkillInstallIncompleteError,
+                                    installed.cache_key + ": missing receipt"):
+            self.install()
+        self.assertEqual(set(os.listdir(folder)), {"instructions"})
+        self.assertEqual((folder / "instructions").read_bytes(), SOURCE)
+
+    def test_session_recomputes_receipt_after_rights_attribution_changes(self) -> None:
+        installed = self.install()
+        self.runtime.ledger = RightsLedger()
+        self.runtime.ledger.register(rights_for(self.entry, attribution="Changed credit"))
+        with self.assertRaises(SkillRuntimeError):
+            self.runtime.open_session(installed, binding=self.binding, shot=self.shot)
+        replacement = self.install()
+        self.assertNotEqual(installed.cache_key, replacement.cache_key)
+        self.assertEqual(self.runtime.open_session(replacement, binding=self.binding,
+                                                   shot=self.shot).instructions(), SOURCE.decode())
 
     def test_portable_text_verbatim_and_actual_bounded_file_operations(self) -> None:
         session = self.session()
