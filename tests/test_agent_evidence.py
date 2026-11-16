@@ -304,6 +304,12 @@ def workflow_job_runs(event_name, event, ref="refs/heads/main"):
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_ci_runs_on_main_pushes_and_pull_requests_with_full_python_matrix(self):
+        workflow = (SCRIPT.parents[1] / ".github/workflows/ci.yml").read_text()
+        self.assertIn("on:\n  push:\n    branches: [main]\n  pull_request:\n", workflow)
+        self.assertNotIn("  push:\n  pull_request:", workflow)
+        self.assertIn("python: ['3.11', '3.12', '3.13', '3.14']", workflow)
+
     def test_privileged_workflow_concurrency_is_per_pr_with_main_fallback(self):
         workflow = (SCRIPT.parents[1] / ".github/workflows/agent-evidence.yml").read_text()
         self.assertIn(
