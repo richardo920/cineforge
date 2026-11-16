@@ -340,7 +340,15 @@ def selection_from_approval(gate: VerifiedConditioning, receipt: dict[str, Any])
 
 
 def load_context(path: str | Path, reference_path: str | Path) -> VerifiedConditioning:
-    """Load private metadata separately from the operator approval; no network or uploads."""
+    """Load private metadata separately from operator approval; no network or uploads.
+
+    Register rights in ascending lexical order of (subject.kind, subject_id,
+    revision, sha256, ref.record_id, ref.revision). The greatest ref per exact
+    subject wins, independent of input order; no timestamp exists, so this is
+    neither latest-in-time nor most-recently-reviewed. Canonical ordering keeps
+    replacement grants supported without relying on incidental list order.
+    Duplicate refs still fail; revocations follow registration in input order.
+    """
     failed = False
     gate = None
     try:
@@ -352,8 +360,11 @@ def load_context(path: str | Path, reference_path: str | Path) -> VerifiedCondit
         character = CharacterRevision.from_dict(data["character"])
         registry, ledger = CharacterRegistry(), RightsLedger()
         registry.register(character)
-        for value in data["rights"]:
-            ledger.register(RightsRecord.from_dict(value))
+        records = (RightsRecord.from_dict(value) for value in data["rights"])
+        for record in sorted(records, key=lambda record: (
+                record.subject.kind, record.subject.subject_id, record.subject.revision,
+                record.subject.sha256, record.ref.record_id, record.ref.revision)):
+            ledger.register(record)
         for value in data["revocations"]:
             ledger.revoke(RightsRef.from_dict(value), reason="Operator recorded revocation")
         catalog = SkillCatalog(tuple(CatalogEntry.from_dict(value) for value in data["catalog"]))
