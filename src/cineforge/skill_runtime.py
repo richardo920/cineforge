@@ -32,6 +32,14 @@ class SkillRuntimeError(ValueError):
     """Denied or invalid managed operation; diagnostics exclude supplied content."""
 
 
+class SkillInstallConflictError(SkillRuntimeError):
+    """An immutable installation slot contains different or unsafe content."""
+
+
+class SkillInstallIncompleteError(SkillRuntimeError):
+    """An immutable installation slot is missing required files."""
+
+
 def _relative(value: object) -> tuple[str, ...]:
     try:
         if not isinstance(value, str):
@@ -178,7 +186,7 @@ class InstalledSkill:
 
     @property
     def cache_key(self) -> str:
-        raw = self.pin.to_json() + ":" + self.shot_sha256
+        raw = self.pin.to_json() + ":" + self.shot_sha256 + ":" + self.receipt_sha256
         return hashlib.sha256(raw.encode()).hexdigest()
 
 
@@ -280,12 +288,42 @@ class SkillRuntime:
                 raise ValueError
             receipt = self._receipt(entry, binding)
             installed = InstalledSkill(pin, binding.shot_sha256, hashlib.sha256(receipt).hexdigest())
-            os.mkdir(installed.cache_key, 0o700, dir_fd=self._install)
-            _create(self._install, (installed.cache_key, "instructions"), source)
-            _create(self._install, (installed.cache_key, "receipt"), receipt)
-            return installed
         except (OSError, ValueError, TypeError, UnicodeError):
             raise SkillRuntimeError("could not install exact reviewed instruction bytes") from None
+        try:
+            os.mkdir(installed.cache_key, 0o700, dir_fd=self._install)
+        except FileExistsError:
+            self._check_slot(installed, source, receipt)
+            return installed
+        except OSError:
+            raise SkillRuntimeError("could not install exact reviewed instruction bytes") from None
+        try:
+            _create(self._install, (installed.cache_key, "instructions"), source)
+            _create(self._install, (installed.cache_key, "receipt"), receipt)
+        except FileExistsError:
+            self._check_slot(installed, source, receipt)
+        except (OSError, ValueError, TypeError):
+            raise SkillRuntimeError("could not install exact reviewed instruction bytes") from None
+        return installed
+
+    def _check_slot(self, installed: InstalledSkill, source: bytes, receipt: bytes) -> None:
+        missing, conflicting = [], []
+        for name, expected in (("instructions", source), ("receipt", receipt)):
+            try:
+                actual = _read(self._install, (installed.cache_key, name), len(expected))
+                if actual != expected:
+                    conflicting.append(name)
+            except FileNotFoundError:
+                missing.append(name)
+            except (OSError, ValueError):
+                conflicting.append(name)
+        if missing:
+            raise SkillInstallIncompleteError(
+                f"incomplete skill cache slot {installed.cache_key}: missing {', '.join(missing)}")
+        if conflicting:
+            raise SkillInstallConflictError(
+                f"conflicting skill cache slot {installed.cache_key}: "
+                f"different or unsafe {', '.join(conflicting)}")
 
     def open_session(self, installed: InstalledSkill, *, binding: ShotSkills, shot: Shot,
                      device: GPUDevice | None = None) -> SkillSession:
