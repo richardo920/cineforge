@@ -17,6 +17,7 @@ from threading import RLock
 from typing import Any, TypeGuard
 
 from cineforge.devices import Backend, GPUDevice, ModelSpec, Precision, compatibility
+from cineforge.interruptions import preserve_interruption, remember_interruption
 from cineforge.runpod_transport import CloudResponse, CloudTransport, bounded_seconds
 from cineforge.workflows import canonical, strict_object
 
@@ -125,6 +126,7 @@ class AcquisitionIntent:
                 "request_timeout_seconds": self.request_timeout_seconds}
 
     @classmethod
+    @preserve_interruption
     def from_dict(cls, data: dict[str, Any]) -> AcquisitionIntent:
         failed = False
         result = None
@@ -144,7 +146,8 @@ class AcquisitionIntent:
             result = cls(data["key"], spec, data["owner_token"], data["name"],
                          ModelSpec(**model), data["max_cost_usd"], data["lease_seconds"],
                          data["startup_timeout_seconds"], data["request_timeout_seconds"])
-        except (Exception, KeyboardInterrupt):
+        except (Exception, KeyboardInterrupt) as interruption_error:
+            remember_interruption(interruption_error)
             failed = True
         if failed or result is None:
             raise ValueError("invalid persisted acquisition intent")
@@ -184,6 +187,7 @@ class LeaseSnapshot:
                 "reason": self.reason}
 
     @classmethod
+    @preserve_interruption
     def from_dict(cls, data: dict[str, Any]) -> LeaseSnapshot:
         failed = False
         result = None
@@ -194,7 +198,8 @@ class LeaseSnapshot:
                 raise ValueError
             result = cls(data["key"], data["state"], data["resource_id"], data["hourly_usd"],
                          data["reason"])
-        except (Exception, KeyboardInterrupt):
+        except (Exception, KeyboardInterrupt) as interruption_error:
+            remember_interruption(interruption_error)
             failed = True
         if failed or result is None:
             raise ValueError("invalid persisted lease snapshot")
@@ -291,6 +296,7 @@ class RunpodPodProvisioner:
                 raise ProvisioningError("unknown cloud lease")
             return self._leases[key].intent
 
+    @preserve_interruption
     def _emit(self, lease: _Lease, **changes: Any) -> None:
         candidate = replace(lease.snapshot, **changes)
         ready = candidate.state == "ready"
@@ -302,7 +308,8 @@ class RunpodPodProvisioner:
         try:
             if self._sink(lease.intent, candidate) is not None:
                 raise ValueError
-        except (Exception, KeyboardInterrupt):
+        except (Exception, KeyboardInterrupt) as interruption_error:
+            remember_interruption(interruption_error)
             failed = True
         if failed:
             if ready:
@@ -311,6 +318,7 @@ class RunpodPodProvisioner:
         if ready:
             lease.snapshot = candidate
 
+    @preserve_interruption
     def _call(self, method: str, path: str, deadline: float,
               body: dict[str, object] | None = None) -> CloudResponse:
         remaining = deadline - self._clock()
@@ -327,19 +335,22 @@ class RunpodPodProvisioner:
                     or len(result.body) > 2 * 1024 * 1024
                     or method != "POST" and self._clock() >= deadline):
                 raise ValueError
-        except (Exception, KeyboardInterrupt):
+        except (Exception, KeyboardInterrupt) as interruption_error:
+            remember_interruption(interruption_error)
             failed = True
         if failed or result is None:
             raise ProvisioningError("cloud lifecycle request failed")
         return result
 
     @staticmethod
+    @preserve_interruption
     def _json(reply: CloudResponse) -> dict[str, Any]:
         failed = False
         result = None
         try:
             result = strict_object(reply.body)
-        except (Exception, KeyboardInterrupt):
+        except (Exception, KeyboardInterrupt) as interruption_error:
+            remember_interruption(interruption_error)
             failed = True
         if failed or result is None:
             raise ProvisioningError("invalid cloud lifecycle response")
@@ -369,6 +380,7 @@ class RunpodPodProvisioner:
                 or env.get("CINEFORGE_LEASE") != lease.intent.owner_token):
             raise ProvisioningError("cloud ownership verification failed", lease.snapshot)
 
+    @preserve_interruption
     def _configured(self, lease: _Lease, pod: dict[str, Any]) -> None:
         """Execution admission stays strict; configuration drift cannot block cleanup."""
         failed = False
@@ -389,7 +401,8 @@ class RunpodPodProvisioner:
                     or any(a not in ("start", "stop", "restart", "terminate")
                            for a in pod["actions"])):
                 raise ValueError
-        except (Exception, KeyboardInterrupt):
+        except (Exception, KeyboardInterrupt) as interruption_error:
+            remember_interruption(interruption_error)
             failed = True
         if failed:
             raise ProvisioningError("cloud configuration verification failed", lease.snapshot)
@@ -456,6 +469,7 @@ class RunpodPodProvisioner:
                 self._sleep(min(self._interval, max(0, deadline - self._clock())))
         raise ProvisioningError("owned worker release was not confirmed", lease.snapshot)
 
+    @preserve_interruption
     def release(self, device_id: str) -> None:
         with self._lock:
             lease = self._known(device_id)
@@ -464,7 +478,8 @@ class RunpodPodProvisioner:
             failed = False
             try:
                 self._clean(lease)
-            except (Exception, KeyboardInterrupt):
+            except (Exception, KeyboardInterrupt) as interruption_error:
+                remember_interruption(interruption_error)
                 failed = True
             if failed:
                 lease.snapshot = replace(lease.snapshot, state="cleanup_uncertain")
@@ -486,6 +501,7 @@ class RunpodPodProvisioner:
                 raise ProvisioningError("invalid worker hourly rate", lease.snapshot)
             return lease.snapshot
 
+    @preserve_interruption
     def _measurement(self, lease: _Lease, timeout: float) -> WorkerObservation | None:
         bounded_seconds(timeout)
         failed = False
@@ -498,7 +514,8 @@ class RunpodPodProvisioner:
                     or observation.raw_gpu_name != self.spec.gpu_id
                     or compatibility(observation.device, lease.intent.requirements)):
                 raise ValueError
-        except (Exception, KeyboardInterrupt):
+        except (Exception, KeyboardInterrupt) as interruption_error:
+            remember_interruption(interruption_error)
             failed = True
         if failed:
             raise ProvisioningError("measured worker is invalid or incompatible", lease.snapshot)
@@ -536,6 +553,7 @@ class RunpodPodProvisioner:
             lease.observation = observation
             return observation.device
 
+    @preserve_interruption
     def acquire(self, requirements: ModelSpec, *, max_cost_usd: float,
                 idempotency_key: str | None = None,
                 cancelled: Callable[[], bool] = lambda: False) -> GPUDevice:
@@ -587,6 +605,8 @@ class RunpodPodProvisioner:
                 reason = "transport"
                 created_request = True
                 reply = self._call("POST", "/v2/pods", deadline, self._body(intent))
+                if reply.interrupted:
+                    remember_interruption(KeyboardInterrupt())
                 if 400 <= reply.status < 500 and reply.status != 408:
                     rejected = True
                     reason = "rejected"
@@ -601,6 +621,8 @@ class RunpodPodProvisioner:
                 self._ids[identity] = key
                 reason = "event_sink"
                 self._emit(lease)  # Identity is retained before persistence/probe can fail.
+                if reply.interrupted:
+                    raise KeyboardInterrupt from None
                 for _ in range(self._max_polls):
                     if cancelled():
                         reason = "cancelled"
@@ -632,7 +654,8 @@ class RunpodPodProvisioner:
                             return observation.device
                     reason = "startup_timeout"
                     self._sleep(min(self._interval, max(0, deadline - self._clock())))
-            except (Exception, KeyboardInterrupt):
+            except (Exception, KeyboardInterrupt) as interruption_error:
+                remember_interruption(interruption_error)
                 failed = True
             if not failed:
                 reason = "startup_timeout"

@@ -9,6 +9,8 @@ import signal
 import subprocess
 import time
 
+from cineforge.interruptions import preserve_interruption, remember_interruption
+
 
 class AudioProcessError(ValueError):
     """Static diagnostics only; never retain argv, input, environment or tool output."""
@@ -18,6 +20,7 @@ class AudioProcessError(ValueError):
         self.cleanup_uncertain = cleanup_uncertain
 
 
+@preserve_interruption
 def _finalize(process: subprocess.Popen[bytes] | None,
               selector: selectors.BaseSelector | None) -> bool:
     """Attempt every cleanup independently; OS refusal cannot imply confirmed cleanup."""
@@ -27,7 +30,8 @@ def _finalize(process: subprocess.Popen[bytes] | None,
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-        except BaseException:
+        except BaseException as interruption_error:
+            remember_interruption(interruption_error)
             uncertain = True
             # This can terminate the owned parent if group signaling was refused;
             # it does not confirm the state of any descendants.
@@ -35,16 +39,19 @@ def _finalize(process: subprocess.Popen[bytes] | None,
                 process.kill()
             except ProcessLookupError:
                 pass
-            except BaseException:
+            except BaseException as interruption_error:
+                remember_interruption(interruption_error)
                 uncertain = True
         try:
             process.wait(timeout=2)
-        except BaseException:
+        except BaseException as interruption_error:
+            remember_interruption(interruption_error)
             uncertain = True
     if selector is not None:
         try:
             selector.close()
-        except BaseException:
+        except BaseException as interruption_error:
+            remember_interruption(interruption_error)
             uncertain = True
     if process is not None:
         for name in ("stdin", "stdout"):
@@ -52,11 +59,13 @@ def _finalize(process: subprocess.Popen[bytes] | None,
                 stream = getattr(process, name)
                 if stream is not None:
                     stream.close()
-            except BaseException:
+            except BaseException as interruption_error:
+                remember_interruption(interruption_error)
                 uncertain = True
     return uncertain
 
 
+@preserve_interruption
 def run_audio_process(command: tuple[str, ...], *, payload: bytes, timeout_seconds: float,
                       max_output_bytes: int) -> bytes:
     """Bound pipes/time; attempt group termination, bounded reap and every descriptor close."""
@@ -118,9 +127,11 @@ def run_audio_process(command: tuple[str, ...], *, payload: bytes, timeout_secon
         if process.returncode != 0:
             raise AudioProcessError("audio process failed")
         result = bytes(output)
-    except KeyboardInterrupt:
+    except KeyboardInterrupt as interruption_error:
+        remember_interruption(interruption_error)
         cancelled = True
-    except BaseException:
+    except BaseException as interruption_error:
+        remember_interruption(interruption_error)
         failed = True
     finally:
         cleanup_uncertain = _finalize(process, selector)

@@ -18,6 +18,7 @@ from cineforge.characters import CharacterPin, CharacterRegistry, ReferenceArtif
 from cineforge.comfy_policy import ApprovedComfySelection, WorkerVerification
 from cineforge.contracts import ProjectPlan, Shot
 from cineforge.devices import Backend, GPUDevice, Precision
+from cineforge.interruptions import preserve_interruption, remember_interruption
 from cineforge.paired_media import PNG_MAX_BYTES, image_metadata, speech_metadata
 from cineforge.private_store import read_private_input
 from cineforge.providers import ExecutionRequest
@@ -358,11 +359,13 @@ class VerifiedS2V:
         return dict(after, actor_review=reviewed_actor.evidence.to_dict(), speech_native_proof={
             key: getattr(speech_proof, key) for key in NativeSpeechProof.__dataclass_fields__})
 
+    @preserve_interruption
     def preflight(self) -> dict[str, Any]:
         result = None
         try:
             result = self._check()
-        except (Exception, KeyboardInterrupt):
+        except (Exception, KeyboardInterrupt) as interruption_error:
+            remember_interruption(interruption_error)
             pass
         if result is None:
             raise S2VError("current S2V rights, actor, native speech or source rejected")
@@ -376,6 +379,7 @@ class VerifiedS2V:
             "recipe_sha256": self.service.approval.model_workflow_sha256, "graph": self.graph,
             "shot": self.shot.to_dict(), "lineage": trace}
 
+    @preserve_interruption
     def require(self, request: ExecutionRequest, workflow_digest: str) -> None:
         self.preflight()
         if (type(request) is not ExecutionRequest or request.model != profile.model()
@@ -388,7 +392,8 @@ class VerifiedS2V:
             if self.authorize(subject) is not None:
                 raise ValueError
             self._require_current(subject["lineage"])
-        except (Exception, KeyboardInterrupt):
+        except (Exception, KeyboardInterrupt) as interruption_error:
+            remember_interruption(interruption_error)
             failed = True
         if failed:
             raise S2VError("current exact S2V request authorization rejected")

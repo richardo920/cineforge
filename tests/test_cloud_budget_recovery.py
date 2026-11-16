@@ -107,13 +107,13 @@ class CleanupRecoveryTests(unittest.TestCase):
             self.inject_three_claims(session)
             provider = ReleaseProbe(session, {"pod_claim1": TimeoutError,
                                               "pod_claim3": KeyboardInterrupt})
-            with self.assertRaises(CleanupUncertainError) as error:
+            with self.assertRaises(KeyboardInterrupt) as error:
                 session.recover_owned(provider)
             self.assertEqual(provider.attempts, ["pod_claim1", "pod_claim2", "pod_claim3"])
-            self.assertEqual(error.exception.released_keys, ("claim2",))
-            self.assertEqual(error.exception.uncertain_keys, ("claim1", "claim3"))
+            self.assertEqual([s.state for s in session.snapshots],
+                             ["cleanup_uncertain", "released", "cleanup_uncertain"])
             self.assertEqual(session._cleanup_inflight, set())
-            self.assertIsNone(error.exception.__context__)
+            self.assertTrue(error.exception.__suppress_context__)
             self.assertNotIn("private-release-canary",
                              "".join(traceback.format_exception(error.exception)))
 

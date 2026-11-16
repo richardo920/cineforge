@@ -21,6 +21,7 @@ from cineforge.comfy_policy import ApprovedComfySelection, WorkerVerification, l
 from cineforge.comfy_run import execute_comfy
 from cineforge.comfy_transport import ComfyTransport
 from cineforge.contracts import Project, ProjectPlan, RunManifest, RunStatus, Scene, Shot
+from cineforge.interruptions import preserve_interruption, remember_interruption
 from cineforge.private_store import PrivateRunDirectory, read_private_input
 from cineforge.runpod import (
     AcquisitionIntent,
@@ -253,6 +254,7 @@ def _observe_guard_stop(worker: ManagedWorker, provider: RunpodPodProvisioner,
     raise CloudSmokeError("independent worker stop was not confirmed within its grace")
 
 
+@preserve_interruption
 def run_managed_smoke(selection: ApprovedComfySelection, approval: BudgetApproval,
                       spec: RunpodPodSpec, transport: CloudTransport, budget_dir: str | Path,
                       output_dir: str | Path, reference: ParityReference, worker_factory: WorkerFactory,
@@ -313,7 +315,8 @@ def run_managed_smoke(selection: ApprovedComfySelection, approval: BudgetApprova
                             report.update(outcome="generated", manifest=manifest.to_dict())
                 except _InjectedFailure:
                     report["outcome"] = "injected_post_acquire_failure"
-                except (Exception, KeyboardInterrupt):
+                except (Exception, KeyboardInterrupt) as interruption_error:
+                    remember_interruption(interruption_error)
                     failed = True
                     report["outcome"] = "incomplete"
                 finally:
@@ -322,7 +325,8 @@ def run_managed_smoke(selection: ApprovedComfySelection, approval: BudgetApprova
                             if snapshot.resource_id is not None and snapshot.state != "released":
                                 try:
                                     provider.release(snapshot.resource_id)
-                                except (Exception, KeyboardInterrupt):
+                                except (Exception, KeyboardInterrupt) as interruption_error:
+                                    remember_interruption(interruption_error)
                                     failed = True
                     report["leases"] = [s.to_dict() for s in budget.snapshots]
                     report["release_verified"] = (bool(budget.snapshots)
@@ -340,17 +344,20 @@ def run_managed_smoke(selection: ApprovedComfySelection, approval: BudgetApprova
                         if normalized["contract"] != reference.normalized["contract"]:
                             raise CloudSmokeError("managed/prepared normalized contract mismatch")
                         report.update(outcome="succeeded", managed=normalized)
-                    except (Exception, KeyboardInterrupt):
+                    except (Exception, KeyboardInterrupt) as interruption_error:
+                        remember_interruption(interruption_error)
                         failed = True
                         report["outcome"] = "incomplete"
                     store.checkpoint(canonical(report))
-    except (Exception, KeyboardInterrupt):
+    except (Exception, KeyboardInterrupt) as interruption_error:
+        remember_interruption(interruption_error)
         failed = True
     if failed:
         raise CloudSmokeError("managed smoke incomplete; inspect private run and budget records")
     return report
 
 
+@preserve_interruption
 def recover_managed(spec: RunpodPodSpec, approval: BudgetApproval, transport: CloudTransport,
                     budget_dir: str | Path, *, allow_live: bool = False) -> dict[str, Any]:
     """Discover/release only existing journal-owned leases; never calls acquire/probe."""
@@ -373,7 +380,8 @@ def recover_managed(spec: RunpodPodSpec, approval: BudgetApproval, transport: Cl
                                         for s in budget.snapshots)}
             if not report["release_verified"]:
                 failed = True
-    except (Exception, KeyboardInterrupt):
+    except (Exception, KeyboardInterrupt) as interruption_error:
+        remember_interruption(interruption_error)
         failed = True
     if failed or report is None:
         raise CloudSmokeError("owned recovery incomplete; retain private budget journal")

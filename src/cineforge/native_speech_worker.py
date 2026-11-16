@@ -197,6 +197,9 @@ def main() -> int:
         receipt, payload = handle(header, reference)
         frame = pack(receipt, payload)
         code = 0
+    except KeyboardInterrupt:
+        frame = pack({"version": 1, "status": "failed"}, b"")
+        code = 130
     except BaseException:
         frame = pack({"version": 1, "status": "failed"}, b"")
         code = 1

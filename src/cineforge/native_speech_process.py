@@ -13,6 +13,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from cineforge.interruptions import preserve_interruption, remember_interruption
 from cineforge.json_codec import strict_loads
 from cineforge.native_speech_integrity import NativeSpeechError
 
@@ -51,6 +52,7 @@ def unpack(raw: bytes) -> tuple[dict[str, Any], bytes]:
     return header, raw[4 + count:]
 
 
+@preserve_interruption
 def _finish(process: subprocess.Popen[bytes] | None, selector: selectors.BaseSelector | None,
             deadline: float) -> bool:
     uncertain = False
@@ -61,23 +63,27 @@ def _finish(process: subprocess.Popen[bytes] | None, selector: selectors.BaseSel
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-        except BaseException:
+        except BaseException as interruption_error:
+            remember_interruption(interruption_error)
             uncertain = True
             try:
                 process.kill()
             except ProcessLookupError:
                 pass
-            except BaseException:
+            except BaseException as interruption_error:
+                remember_interruption(interruption_error)
                 uncertain = True
         try:
             remaining = max(0.0, min(2.0, deadline - time.monotonic()))
             process.wait(timeout=remaining)
-        except BaseException:
+        except BaseException as interruption_error:
+            remember_interruption(interruption_error)
             uncertain = True
     if selector is not None:
         try:
             selector.close()
-        except BaseException:
+        except BaseException as interruption_error:
+            remember_interruption(interruption_error)
             uncertain = True
     if process is not None:
         for name in ("stdin", "stdout"):
@@ -85,11 +91,13 @@ def _finish(process: subprocess.Popen[bytes] | None, selector: selectors.BaseSel
                 stream = getattr(process, name)
                 if stream is not None:
                     stream.close()
-            except BaseException:
+            except BaseException as interruption_error:
+                remember_interruption(interruption_error)
                 uncertain = True
     return uncertain
 
 
+@preserve_interruption
 def run_child(command: tuple[str, ...], *, payload: bytes, env: dict[str, str],
               cwd: str, deadline: float) -> OwnedChildResult:
     """The original absolute deadline includes a two-second cleanup reserve.
@@ -151,12 +159,17 @@ def run_child(command: tuple[str, ...], *, payload: bytes, env: dict[str, str],
         if time.monotonic() >= work_deadline:
             raise NativeSpeechError("native speech deadline exceeded")
         result = bytes(output)
-    except KeyboardInterrupt:
+    except KeyboardInterrupt as interruption_error:
+        remember_interruption(interruption_error)
         cancelled = True
-    except BaseException:
+    except BaseException as interruption_error:
+        remember_interruption(interruption_error)
         failed = True
     finally:
         uncertain = _finish(process, selector, deadline)
+    # Only the owned reap establishes the fixed child interruption exit code.
+    if process is not None and process.returncode in (130, -signal.SIGINT):
+        raise KeyboardInterrupt from None
     if uncertain:
         raise NativeSpeechError("native speech cleanup incomplete or unconfirmed",
                                 cleanup_uncertain=True,

@@ -41,6 +41,7 @@ _PACKAGE_FILES = (
     "contracts.py",
     "curated_skills.py",
     "devices.py",
+    "interruptions.py",
     "json_codec.py",
     "mock.py",
     "native_driver.py",

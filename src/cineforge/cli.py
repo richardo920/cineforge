@@ -1,10 +1,20 @@
-"""Offline defaults and an explicitly opted-in private ComfyUI entry point."""
+"""CLI compatibility contract (RF-20).
+
+Success/help/version/bare invocation: return None (process 0). Usage AND application
+failures: SystemExit(2), preserving existing shell and Python callers. Ctrl-C:
+SystemExit(130) after bounded owned cleanup/private checkpoint attempts. Historical
+run records retain their original outcomes; exit codes describe this invocation.
+Diagnostics contain only fixed stage/error codes, never exception text or chains.
+"""
 
 import argparse
+import sys
 from typing import Any, NoReturn
 
 from cineforge import __version__
+from cineforge.cloud_budget import CloudBudgetError
 from cineforge.cloud_smoke import (
+    CloudSmokeError,
     cli_inputs,
     load_reference,
     recover_managed,
@@ -13,10 +23,12 @@ from cineforge.cloud_smoke import (
     ssh_factory,
 )
 from cineforge.comfy_policy import WorkerVerification, load_comfy_selection
-from cineforge.comfy_run import execute_comfy
+from cineforge.comfy_run import ComfyRunError, execute_comfy
+from cineforge.conditioning import ConditioningError
 from cineforge.contracts import ProjectPlan
 from cineforge.mock import execute_mock, load_mock_plan
-from cineforge.private_store import read_private_input
+from cineforge.private_store import ArtifactStoreError, read_private_input
+from cineforge.storage import StorageError
 from cineforge.workflows import canonical as canonical_json
 from cineforge.workflows import strict_object
 
@@ -29,15 +41,58 @@ class _ArgumentParser(argparse.ArgumentParser):
         super().__init__(*args, **kwargs)
 
     def error(self, message: str) -> NoReturn:
-        super().error("invalid command arguments; use --help for syntax")
+        super().error("[stage=usage code=CF_USAGE] invalid command arguments; use --help for syntax")
 
-    def application_error(self, message: str) -> NoReturn:
-        """Preserve existing offline domain errors; live callers pass fixed safe text."""
-        super().error(message)
+    def application_error(self, message: str, reason: str = "unexpected") -> NoReturn:
+        """Only internal constant messages may reach this compatibility path."""
+        super().error(f"[stage={_stage()} code=CF_APPLICATION reason={reason}] {message}")
+
+
+_STAGES = frozenset({"validate-plan", "mock-run", "comfy-run", "cloud-smoke",
+                     "cloud-recover", "conditioning-preflight", "conditioning-run",
+                     "conditioning-recover"})
+
+
+def _stage() -> str:
+    return sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] in _STAGES else "cli"
+
+
+def _reason(error: Exception) -> str:
+    """Closed vocabulary: subclass names, messages and chains are never displayed."""
+    for known, reason in ((CloudBudgetError, "cloud-budget"), (CloudSmokeError, "cloud-smoke"),
+                          (ComfyRunError, "comfy-run"), (ConditioningError, "conditioning"),
+                          (ArtifactStoreError, "private-store"), (StorageError, "storage"),
+                          (TimeoutError, "timeout"), (OSError, "io"), (ValueError, "invalid-data")):
+        if isinstance(error, known):
+            return reason
+    return "unexpected"
 
 
 def main() -> None:
-    parser = _ArgumentParser(prog="cineforge", description="Cineforge production metadata and execution")
+    """Preserve normal returns and SystemExit(2); sanitize unexpected failures too."""
+    code = ""
+    reason = "interrupted"
+    exit_code = 2
+    try:
+        _main()
+    except KeyboardInterrupt:
+        code, exit_code = "CF_INTERRUPTED", 130
+    except Exception as error:
+        code, reason = "CF_APPLICATION", _reason(error)
+    # Exit outside the handler so no private exception survives as displayed context.
+    if code:
+        print(f"cineforge: error: [stage={_stage()} code={code} reason={reason}] "
+              "command incomplete; retain private journals", file=sys.stderr)
+        raise SystemExit(exit_code)
+
+
+def _main() -> None:
+    parser = _ArgumentParser(prog="cineforge", description="Cineforge production metadata and execution",
+        epilog="Exit codes: 0 success/help/version/bare invocation; 2 usage or application "
+               "failure (compatible); 130 interruption after bounded owned cleanup. "
+               "Errors use fixed stage and CF_USAGE/CF_APPLICATION/CF_INTERRUPTED codes; "
+               "allowlisted reasons identify domain, IO, invalid data or unexpected failure. "
+               "Retain private checkpoints; historical outcomes are unchanged.")
     parser.add_argument("--version", action="version", version=f"cineforge {__version__}")
     commands = parser.add_subparsers(dest="command")
     validate = commands.add_parser("validate-plan", help="validate a synthetic JSON plan")
@@ -99,16 +154,18 @@ def main() -> None:
     if args.command is None:
         parser.print_help()
         return
+    reason = "unexpected"
     if args.command.startswith("conditioning-"):
         from cineforge.conditioning_cli import command as conditioning_command
         m4_failed = False
         m4_report = None
         try:
             m4_report = conditioning_command(args)
-        except (Exception, KeyboardInterrupt):
+        except Exception as error:
+            reason = _reason(error)
             m4_failed = True
         if m4_failed or m4_report is None:
-            parser.application_error("conditioning command rejected or incomplete; retain private journals")
+            parser.application_error("conditioning command rejected or incomplete; retain private journals", reason)
         print(canonical_json(m4_report).decode())
         return
     if args.command in ("cloud-smoke", "cloud-recover"):
@@ -128,10 +185,11 @@ def main() -> None:
                 report = run_managed_smoke(selection, approval, spec, transport, args.budget_dir,
                     args.output_dir, reference, ssh_factory(spec, selection, transport,
                     args.ssh_private_key), case=args.case, allow_live=args.allow_live)
-        except (Exception, KeyboardInterrupt):
+        except Exception as error:
+            reason = _reason(error)
             failed = True
         if failed or report is None:
-            parser.application_error("cloud command rejected or incomplete; retain private journals")
+            parser.application_error("cloud command rejected or incomplete; retain private journals", reason)
         output_report = {name: report[name] for name in ("release_verified", "costs", "leases")}
         if "guard_stop_verified" in report:
             output_report["guard_stop_verified"] = report["guard_stop_verified"]
@@ -152,20 +210,26 @@ def main() -> None:
                 poll_interval_seconds=args.poll_interval_seconds, max_polls=args.max_polls,
                 max_result_bytes=args.max_result_bytes,
             ).to_json()
-        except (Exception, KeyboardInterrupt):
+        except Exception as error:
+            reason = _reason(error)
             failed = True
         if failed:
             parser.application_error(
-                "ComfyUI command rejected or incomplete; inspect private run.json if present")
+                "ComfyUI command rejected or incomplete; inspect private run.json if present", reason)
         print(output)
         return
+    offline_failed = False
+    output = ""
     try:
         plan = load_mock_plan(args.plan)
         output = (plan.plan.to_json() if args.command == "validate-plan" else
                   execute_mock(plan, run_id=args.run_id, output_dir=args.output_dir,
                                resume=args.resume).manifest.to_json())
-    except (OSError, ValueError, RecursionError) as exc:
-        parser.application_error(str(exc))
+    except (OSError, ValueError, RecursionError) as error:
+        reason = _reason(error)
+        offline_failed = True
+    if offline_failed:
+        parser.application_error("offline command rejected or incomplete", reason)
     print(output)
 
 

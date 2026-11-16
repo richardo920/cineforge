@@ -14,6 +14,7 @@ import stat
 from pathlib import Path
 from typing import Any
 
+from cineforge.interruptions import preserve_interruption, remember_interruption
 from cineforge.paired_media import PNG_MAX_BYTES, SPEECH_MAX_BYTES, image_metadata, speech_metadata
 from cineforge.worker_bootstrap import BootstrapError, encode, private_write
 
@@ -123,6 +124,7 @@ def _pair_key(scope: str, subject: str, media: dict[str, Any]) -> str:
                                  "media": media})).hexdigest()
 
 
+@preserve_interruption
 def paired_transfer(request: dict[str, Any], root: Path) -> dict[str, Any]:
     """Only dispatch after exact armed profile/lease/source and live guard checks."""
     result = None
@@ -231,7 +233,8 @@ def paired_transfer(request: dict[str, Any], root: Path) -> dict[str, Any]:
                           "worker_id": request["plan"]["pod_id"]}
             else:
                 raise ValueError
-    except (Exception, KeyboardInterrupt):
+    except (Exception, KeyboardInterrupt) as interruption_error:
+        remember_interruption(interruption_error)
         pass
     finally:
         for descriptor in (fd, root_fd):
