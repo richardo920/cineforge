@@ -7,7 +7,7 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 from test_native_remote import RemoteFixture
 from test_s2v import context
@@ -223,3 +223,135 @@ class CleanupCancellationTests(unittest.TestCase):
             self.assertIs(fixture.runtime._unresolved, fixture.runtime.last_attempt)
         finally:
             fixture.doCleanups()
+
+
+class SSHContextCancellationTests(unittest.TestCase):
+    def test_actual_context_close_failure_before_cli_boundary(self):
+        import test_cli_error_contract as cli_fixtures
+
+        from cineforge.ssh_worker import WorkerError
+
+        worker = object.__new__(SSHWorker)
+        worker._stop = Mock()
+        worker._thread = None
+        worker._claimed = MagicMock()
+        claimed = worker._claimed
+        worker._close_tunnel = Mock(side_effect=WorkerError("private-finalizer-canary"))
+
+        def work(*args):
+            with worker:
+                os.kill(os.getpid(), signal.SIGINT)
+
+        with patch.object(SSHWorker, "__enter__", return_value=worker):
+            code, _, err = cli_fixtures.ErrorContractTests().invoke(
+                ["mock-run", "x"], patch("cineforge.cli.load_mock_plan", side_effect=work))
+        self.assertEqual(code, 130)
+        self.assertIn("CF_INTERRUPTED", err)
+        self.assertNotIn("private-finalizer-canary", err)
+        worker._close_tunnel.assert_called_once()
+        claimed.__exit__.assert_called_once()
+        self.assertIsNone(worker._claimed)
+
+    def test_real_sigint_with_ssh_finalizer_faults_through_owned_callers(self):
+        import json
+        from contextlib import ExitStack
+        from threading import RLock
+
+        import test_cli_error_contract as cli_fixtures
+        import test_cloud_smoke as managed
+        import test_conditioning as conditioning
+
+        from cineforge.ssh_worker import WorkerError
+
+        for module, fixture_type in ((managed, managed.ManagedSmokeTests),
+                                     (conditioning, conditioning.ManagedTests)):
+            for boundary in ("caller", "cli"):
+                for phase in ("close", "tunnel", "kill", "reap", "control", "claimed", "both"):
+                    with self.subTest(caller=module.__name__, boundary=boundary, phase=phase):
+                        fixture = fixture_type()
+                        fixture.setUp()
+                        claimed = MagicMock()
+                        if phase in ("claimed", "both"):
+                            claimed.__exit__.side_effect = OSError("private-finalizer-canary")
+                        process = Mock(pid=12345)
+                        process.wait.return_value = 0
+                        if phase == "reap":
+                            process.wait.side_effect = OSError("private-finalizer-canary")
+
+                        def enter(worker):
+                            worker._stop = Mock()
+                            worker._thread = Mock()
+                            worker._claimed = claimed
+                            worker._tunnel_lock = RLock()
+                            worker._tunnel = process if phase in ("kill", "reap") else None
+                            worker._control_dir = Path("/synthetic-owned-control")
+                            worker._control_identity = (1, 2)
+                            worker._control_socket_identity = (1, 3)
+                            worker._retired_controls = []
+                            worker._control_ready = Mock()
+                            if phase == "control":
+                                worker._control_ready.side_effect = WorkerError("private-finalizer-canary")
+                            return worker
+
+                        def interrupt(worker):
+                            os.kill(os.getpid(), signal.SIGINT)
+
+                        def run(*args, **kwargs):
+                            if module is managed:
+                                return fixture.run_smoke("context-interrupt")
+                            return fixture.run_case("context-interrupt")
+
+                        try:
+                            with ExitStack() as stack:
+                                for name, method in (("__enter__", enter), ("__exit__", SSHWorker.__exit__),
+                                                     ("close", SSHWorker.close), ("_close_tunnel", SSHWorker._close_tunnel),
+                                                     ("prepare", interrupt)):
+                                    stack.enter_context(patch.object(module.Worker, name, method, create=True))
+                                if phase == "close":
+                                    stack.enter_context(patch.object(module.Worker, "close",
+                                        side_effect=WorkerError("private-finalizer-canary")))
+                                if phase in ("tunnel", "both"):
+                                    stack.enter_context(patch.object(module.Worker, "_close_tunnel",
+                                        side_effect=WorkerError("private-finalizer-canary")))
+                                kill = stack.enter_context(patch("cineforge.ssh_worker.os.killpg",
+                                    side_effect=PermissionError("private-finalizer-canary") if phase == "kill" else None))
+                                if boundary == "caller":
+                                    with self.assertRaises(KeyboardInterrupt) as caught:
+                                        run()
+                                    self.assertEqual(str(caught.exception), "")
+                                    self.assertIsNone(caught.exception.__context__)
+                                else:
+                                    if module is managed:
+                                        stack.enter_context(patch("cineforge.cli.recovery_inputs",
+                                            return_value=(None, None, None)))
+                                        argv = ["cloud-recover", "--selection", "x", "--proposal", "x", "--budget-dir", "x"]
+                                        command = "cineforge.cli.recover_managed"
+                                    else:
+                                        argv = ["conditioning-preflight", "--context", "x", "--reference", "x", "--output-dir", "x"]
+                                        command = "cineforge.conditioning_cli.command"
+                                    code, _, err = cli_fixtures.ErrorContractTests().invoke(
+                                        argv, patch(command, side_effect=run))
+                                    self.assertEqual(code, 130)
+                                    self.assertIn("CF_INTERRUPTED", err)
+                                    self.assertNotIn("private-finalizer-canary", err)
+                                worker = fixture.workers[0]
+                                claimed.__exit__.assert_called_once()
+                                self.assertIsNone(worker._claimed)
+                                if phase != "close":
+                                    worker._thread.join.assert_called_once_with(timeout=7)
+                                if phase in ("kill", "reap"):
+                                    kill.assert_called_once_with(12345, signal.SIGKILL)
+                                    process.wait.assert_called_once_with(timeout=2)
+                                    self.assertIs(worker._tunnel, process)
+                                if phase == "control":
+                                    self.assertIsNotNone(worker._control_dir)
+                                    self.assertEqual(worker._retired_controls, [])
+                            checkpoint = fixture.root / "context-interrupt" / "run.json"
+                            report = json.loads(checkpoint.read_bytes())
+                            self.assertEqual(report["outcome"], "incomplete")
+                            self.assertTrue(report["release_verified"])
+                            self.assertEqual(fixture.cloud.pods, {})
+                            self.assertEqual(sum(c[0] == "DELETE" for c in fixture.cloud.calls), 1)
+                            self.assertEqual(checkpoint.stat().st_mode & 0o777, 0o600)
+                        finally:
+                            fixture.doCleanups()

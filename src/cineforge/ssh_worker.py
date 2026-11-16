@@ -194,8 +194,12 @@ class SSHWorker:
         self._claimed = PrivateRunDirectory(self.state_dir).__enter__()
         return self
 
+    @preserve_interruption
     def __exit__(self, kind: type[BaseException] | None, value: BaseException | None,
                  traceback: TracebackType | None) -> None:
+        # Record the body's cancellation before either finalizer can replace it.
+        if value is not None:
+            remember_interruption(value)
         try:
             self.close()
         finally:
