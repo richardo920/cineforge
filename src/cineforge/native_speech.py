@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from cineforge.audio_pcm import PCM16Wave, inspect_pcm16_wav
+from cineforge.interruptions import preserve_interruption, remember_interruption
 from cineforge.native_speech_integrity import (
     NativeSpeechError,
     NativeSpeechSelection,
@@ -25,7 +26,13 @@ from cineforge.native_speech_integrity import (
 )
 from cineforge.native_speech_pcm import pcm_wav
 from cineforge.native_speech_pins import NETWORK_POLICY, PCM_POLICY
-from cineforge.native_speech_process import OwnedChildResult, pack, run_child, unpack
+from cineforge.native_speech_process import (
+    OwnedChildInterrupted,
+    OwnedChildResult,
+    pack,
+    run_child,
+    unpack,
+)
 from cineforge.speech import QwenBaseRequest
 
 _BOOTSTRAP = ("import os,sys;sys.path.insert(0,sys.argv[1]);"
@@ -103,6 +110,7 @@ class NativeSpeechRuntime:
         import copy
         return copy.deepcopy(self._receipt)
 
+    @preserve_interruption
     def synthesize(self, request: QwenBaseRequest, reference: PCM16Wave) -> bytes:
         self._admit_call()
         self._receipt = None
@@ -119,7 +127,8 @@ class NativeSpeechRuntime:
                     or hashlib.sha256(source).hexdigest() != request.reference.sha256):
                 raise NativeSpeechError("native speech reference differs from request")
             declaration = request.to_dict()
-        except BaseException:
+        except BaseException as interruption_error:
+            remember_interruption(interruption_error)
             failed = True
         if failed or declaration is None:
             raise NativeSpeechError("native speech reference rejected") from None
@@ -153,6 +162,7 @@ class NativeSpeechRuntime:
         if self._success_count >= 16:
             raise NativeSpeechError("native speech evidence capacity exhausted")
 
+    @preserve_interruption
     def receipt_for(self, request: QwenBaseRequest | OriginalVoiceDesign,
                     payload: bytes) -> dict[str, Any]:
         """Revalidate an owned result, never a caller-supplied serialized receipt.
@@ -180,7 +190,8 @@ class NativeSpeechRuntime:
                                    operation, digest(declaration))
             import copy
             result = copy.deepcopy(receipt)
-        except BaseException:
+        except BaseException as interruption_error:
+            remember_interruption(interruption_error)
             failed = True
         if failed or result is None:
             raise NativeSpeechError("native receipt does not match actual request and bytes") from None
@@ -221,8 +232,16 @@ class NativeSpeechRuntime:
                 package_root = str(Path(__file__).resolve().parent.parent)
                 command = (self._selection.interpreter.path, "-I", "-B", "-S", "-c",
                            _BOOTSTRAP, package_root)
-                child = run_child(command, payload=pack(header, reference), env=environment,
-                                  cwd=directory, deadline=deadline)
+                try:
+                    child = run_child(command, payload=pack(header, reference), env=environment,
+                                      cwd=directory, deadline=deadline)
+                except OwnedChildInterrupted as error:
+                    # Retain recovery facts before TemporaryDirectory finalization,
+                    # which can itself fail and replace the pending cancellation.
+                    cancelled = True
+                    uncertain = error.cleanup_uncertain
+                    process_id = error.owned_process_id
+                    raise
                 if type(child) is not OwnedChildResult:
                     raise NativeSpeechError("owned native speech result is missing")
                 process_id = child.process_id
@@ -244,10 +263,13 @@ class NativeSpeechRuntime:
             attempt = NativeAttempt(identity, "provisional", owned_process_id=process_id)
             if time.monotonic() >= deadline:
                 raise NativeSpeechError("native speech deadline exceeded")
-        except KeyboardInterrupt:
+        except KeyboardInterrupt as error:
             cancelled = True
+            if isinstance(error, OwnedChildInterrupted):
+                uncertain = error.cleanup_uncertain
+                process_id = error.owned_process_id
         except BaseException as error:
-            uncertain = isinstance(error, NativeSpeechError) and error.cleanup_uncertain
+            uncertain = uncertain or isinstance(error, NativeSpeechError) and error.cleanup_uncertain
             # A late filesystem cleanup failure after the owned child returned is
             # also unresolved cleanup, rather than an apparently reusable runtime.
             uncertain = uncertain or isinstance(error, OSError) and process_id is not None
@@ -256,7 +278,9 @@ class NativeSpeechRuntime:
             failed = True
         if cancelled:
             self._receipt = None
-            self.last_attempt = NativeAttempt(identity, "interrupted", owned_process_id=process_id)
+            self.last_attempt = NativeAttempt(identity, "interrupted", uncertain, process_id)
+            if uncertain:
+                self._unresolved = self.last_attempt
             raise KeyboardInterrupt from None
         if failed or result is None or pending_receipt is None or key is None:
             self._receipt = None

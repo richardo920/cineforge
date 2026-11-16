@@ -432,14 +432,15 @@ class RunpodPodProvisioner:
         now = self._clock()
         return now + (deadline - now) / 4
 
+    @preserve_interruption
     def _clean(self, lease: _Lease) -> None:
         deadline = self._clock() + self._cleanup
         lease.snapshot = replace(lease.snapshot, state="cleanup_pending")
         # Persistence failure must not prevent cleanup of an already known resource.
         try:
             self._emit(lease)
-        except ProvisioningError:
-            pass
+        except (ProvisioningError, KeyboardInterrupt) as error:
+            remember_interruption(error)
         retry_interval = max(1.0, self._interval)
         next_delete = self._clock()
         # Initial ownership read followed by at most _max_polls confirmation reads.
@@ -450,6 +451,8 @@ class RunpodPodProvisioner:
                 pod = self._get(lease, deadline, cleanup=True)
             except ProvisioningError:
                 pass  # Retry inspection; never DELETE without fresh ownership proof.
+            except KeyboardInterrupt as error:
+                remember_interruption(error)
             else:
                 if pod is None:
                     self._emit(lease, state="released")
@@ -460,13 +463,16 @@ class RunpodPodProvisioner:
                     try:
                         self._call("DELETE", "/v2/pods/" + str(lease.snapshot.resource_id),
                                    self._cleanup_request_deadline(deadline))
-                    except ProvisioningError:
-                        pass
+                    except (ProvisioningError, KeyboardInterrupt) as error:
+                        remember_interruption(error)  # Reconcile a lost DELETE acknowledgement.
                     next_delete = self._clock() + retry_interval
             if poll == self._max_polls:
                 break
             if poll > 0:
-                self._sleep(min(self._interval, max(0, deadline - self._clock())))
+                try:
+                    self._sleep(min(self._interval, max(0, deadline - self._clock())))
+                except KeyboardInterrupt as error:
+                    remember_interruption(error)
         raise ProvisioningError("owned worker release was not confirmed", lease.snapshot)
 
     @preserve_interruption

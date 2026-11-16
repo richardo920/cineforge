@@ -10,6 +10,7 @@ from typing import Any, Protocol
 
 from cineforge.comfy_precision import POLICY, precision_receipt, precision_request
 from cineforge.comfy_runtime_plan import comfy_plan, comfy_subject, comfy_worker
+from cineforge.interruptions import preserve_interruption, remember_interruption
 from cineforge.native_remote_plan import NR_BLOB_MAX, nr_digest, nr_encode, nr_hash, nr_json
 
 
@@ -52,6 +53,7 @@ class CheckedComfyRuntime:
     _checked: object = field(repr=False)
 
     @classmethod
+    @preserve_interruption
     def reviewed(cls, plan: dict[str, Any], verifier: ComfyClosureVerifier) -> CheckedComfyRuntime:
         raw = None
         try:
@@ -59,7 +61,8 @@ class CheckedComfyRuntime:
             if not 1 <= len(encoded) <= NR_BLOB_MAX:
                 raise ValueError
             raw = encoded
-        except BaseException:
+        except BaseException as interruption_error:
+            remember_interruption(interruption_error)
             pass
         if raw is None:
             raise ValueError("invalid closed Comfy declaration")
@@ -70,6 +73,7 @@ class CheckedComfyRuntime:
         result.current()
         return result
 
+    @preserve_interruption
     def current(self) -> dict[str, Any]:
         valid = None
         try:
@@ -81,7 +85,8 @@ class CheckedComfyRuntime:
                 raise ValueError
             proof.require(plan)
             valid = plan
-        except BaseException:
+        except BaseException as interruption_error:
+            remember_interruption(interruption_error)
             pass
         if valid is None:
             raise ValueError("current independently checked Comfy closure required")
@@ -147,6 +152,7 @@ class ClosedComfyRuntime:
             comfy_call_expires_unix=min(self._expires_unix, time.time() + cap - time.monotonic()),
             **fields)
 
+    @preserve_interruption
     def prepare(self, worker: Any, selection: Any, *, deadline: float) -> dict[str, Any]:
         if self._attempted:
             raise ValueError("closed Comfy setup already consumed")
@@ -188,7 +194,8 @@ class ClosedComfyRuntime:
                 raise ValueError
             self._prepared = True
             return {"verification": reply["verification"], "runtime": reply["runtime"]}
-        except BaseException:
+        except BaseException as interruption_error:
+            remember_interruption(interruption_error)
             self._poison()
             raise ValueError("closed Comfy setup incomplete or unconfirmed; never replay") from None
 
@@ -205,6 +212,7 @@ class ClosedComfyRuntime:
                 or fact["execution_sha256"] != hashlib.sha256(nr_encode(plan["execution"])).hexdigest()):
             raise ValueError("closed Comfy installed closure differs")
 
+    @preserve_interruption
     def verify(self, worker: Any, selection: Any, *, deadline: float) -> None:
         if not self._prepared:
             raise ValueError("closed Comfy preparation required")
@@ -217,11 +225,13 @@ class ClosedComfyRuntime:
             worker._require_s2v(selection)
             if time.monotonic() >= deadline:
                 raise ValueError
-        except BaseException:
+        except BaseException as interruption_error:
+            remember_interruption(interruption_error)
             self._poison()
             raise ValueError("closed Comfy current verification failed") from None
 
 
+    @preserve_interruption
     def begin_precision(self, worker: Any, selection: Any, *, deadline: float) -> dict[str, Any]:
         """Consume one exact active intent before POST; ACK loss poisons, never replay."""
         from cineforge.native_remote_package import native_package
@@ -263,10 +273,12 @@ class ClosedComfyRuntime:
             self._precision = reply
             self._precision_posted = False
             return dict(reply)
-        except BaseException:
+        except BaseException as interruption_error:
+            remember_interruption(interruption_error)
             self._poison()
             raise ValueError("actual precision begin incomplete; never replay") from None
 
+    @preserve_interruption
     def finish_precision(self, worker: Any, selection: Any, prompt_id: str,
                          *, deadline: float) -> dict[str, Any]:
         if self._precision is None or not self._precision_posted:
@@ -287,7 +299,8 @@ class ClosedComfyRuntime:
             if time.monotonic() >= deadline:
                 raise ValueError
             return reply
-        except BaseException:
+        except BaseException as interruption_error:
+            remember_interruption(interruption_error)
             self._poison()
             raise ValueError("actual model precision missing, failed or stale; never replay") from None
 

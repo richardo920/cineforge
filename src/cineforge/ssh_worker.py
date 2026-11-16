@@ -464,6 +464,7 @@ class SSHWorker:
             raise WorkerError("worker verification identity differs")
         return result
 
+    @preserve_interruption
     def _prepare_closed_comfy(self, selection: S2VSelection, runtime: ClosedComfyRuntime,
                               deadline: float) -> WorkerVerification:
         result = None
@@ -486,7 +487,8 @@ class SSHWorker:
             self.check()
             if time.monotonic() >= deadline:
                 raise ValueError
-        except BaseException:
+        except BaseException as interruption_error:
+            remember_interruption(interruption_error)
             failed = True
             runtime._poison()
         if failed or result is None or observed is None:

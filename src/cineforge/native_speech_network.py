@@ -14,6 +14,7 @@ import platform
 import socket
 import sys
 
+from cineforge.interruptions import preserve_interruption, remember_interruption
 from cineforge.native_speech_integrity import NativeBinary, NativeSpeechError, verify_binary
 from cineforge.native_speech_pins import NETWORK_POLICY
 
@@ -23,6 +24,7 @@ class _Compare(ctypes.Structure):
                 ("datum_a", ctypes.c_uint64), ("datum_b", ctypes.c_uint64)]
 
 
+@preserve_interruption
 def deny_network(library: NativeBinary, deadline: float) -> str:
     """Fail closed unless no_new_privs and the complete inherited filter load succeed."""
     failed = False
@@ -79,7 +81,8 @@ def deny_network(library: NativeBinary, deadline: float) -> str:
             result = NETWORK_POLICY
         finally:
             seccomp.seccomp_release(context)
-    except BaseException:
+    except BaseException as interruption_error:
+        remember_interruption(interruption_error)
         failed = True
     if failed or result is None:
         raise NativeSpeechError("required speech socket isolation unavailable") from None

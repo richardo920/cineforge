@@ -674,7 +674,7 @@ class NativeProcessTests(unittest.TestCase):
             return process
         def late_finish(*args):
             uncertain = _finish(*args)
-            self.assertFalse(uncertain)
+            self.assertEqual(uncertain, (False, False))
             clock[0] = 104.0  # Scheduler resumes after original deadline103.
             return uncertain
         with contextlib.ExitStack() as stack:
@@ -746,7 +746,7 @@ class NativeProcessTests(unittest.TestCase):
             stdin=SimpleNamespace(close=failure("stdin")), stdout=SimpleNamespace(close=failure("stdout")))
         selector = SimpleNamespace(close=failure("selector"))
         with patch("os.killpg", failure("group")):
-            self.assertTrue(_finish(process, selector, time.monotonic() + 3))
+            self.assertEqual(_finish(process, selector, time.monotonic() + 3), (True, False))
         self.assertEqual(calls, ["group", "fallback", "wait", "selector", "stdin", "stdout"])
 
 
