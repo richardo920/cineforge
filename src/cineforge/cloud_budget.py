@@ -802,6 +802,12 @@ class CloudBudgetSession:
             return tuple(LeaseSnapshot.from_dict(r["snapshot"])
                          for r in self._data.get("records", {}).values())
 
+    def snapshot_for(self, key: str) -> LeaseSnapshot | None:
+        """Read only the already-recorded lifecycle for one acquisition identity."""
+        with self._lock:
+            record = self._data.get("records", {}).get(key)
+            return None if record is None else LeaseSnapshot.from_dict(record["snapshot"])
+
     @property
     def uncertain_identities(self) -> dict[str, tuple[str, ...]]:
         with self._lock:
