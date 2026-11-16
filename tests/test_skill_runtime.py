@@ -10,7 +10,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 import cineforge.skill_runtime as skill_runtime
-
 from cineforge.contracts import Shot
 from cineforge.rights import (
     EvidenceRef,
@@ -177,6 +176,10 @@ class RuntimeTests(unittest.TestCase):
 
     def test_cache_identity_includes_source_review_receipt(self) -> None:
         review = replace(self.entry.review, reviewer="another-reviewer")
+        self.assert_receipt_variant(entry=replace(self.entry, review=review))
+
+    def test_cache_identity_includes_review_evidence_uri_receipt(self) -> None:
+        review = replace(self.entry.review, evidence_uri="urn:review:other")
         self.assert_receipt_variant(entry=replace(self.entry, review=review))
 
     def test_cache_identity_includes_attributions_receipt(self) -> None:

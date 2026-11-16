@@ -267,6 +267,7 @@ class SkillRuntime:
             "entrypoint": entry.entrypoint, "permissions": entry.permissions.to_dict(),
             "source_review": ({"declaration_sha256": review.declaration_sha256,
                                "reviewer": review.reviewer,
+                               "evidence_uri": review.evidence_uri,
                                "evidence_sha256": review.evidence_sha256} if review else None),
             "attributions": [asdict(item) for item in attribution],
         }, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
