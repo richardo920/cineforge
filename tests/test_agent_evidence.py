@@ -2,9 +2,11 @@
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -309,6 +311,118 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("on:\n  push:\n    branches: [main]\n  pull_request:\n", workflow)
         self.assertNotIn("  push:\n  pull_request:", workflow)
         self.assertIn("python: ['3.11', '3.12', '3.13', '3.14']", workflow)
+
+    def test_dependency_review_required_check_name_is_unchanged(self):
+        workflow = (SCRIPT.parents[1] / ".github/workflows/ci.yml").read_text()
+        job = workflow.split("  dependencies:\n", 1)[1]
+        self.assertIn("    name: Dependency review\n", job)
+        self.assertNotIn("    if:", job.split("    steps:", 1)[0])
+
+    def test_dependency_audits_share_fail_closed_change_gate(self):
+        workflow = (SCRIPT.parents[1] / ".github/workflows/ci.yml").read_text()
+        job = workflow.split("  dependencies:\n", 1)[1]
+        gate = "if: ${{ !cancelled() && steps.changes.outputs.audit != 'false' }}"
+        self.assertEqual(job.count(gate), 2)
+        self.assertIn("- run: python -m pip_audit --strict\n        " + gate, job)
+        review = job.split("- uses: actions/dependency-review-action@", 1)[1]
+        self.assertIn(gate, review)
+        self.assertIn("base-ref: ${{ github.event.pull_request.base.sha || github.event.before }}",
+                      review)
+        self.assertIn("head-ref: ${{ github.event.pull_request.head.sha || github.sha }}", review)
+        self.assertIn("fetch-depth: 0", job)
+        self.assertIn("continue-on-error: true", job)
+        self.assertIn("audit=true", job)
+        self.assertIn('echo "audit=$audit" >> "$GITHUB_OUTPUT"', job)
+
+    def test_dependency_change_detection_with_real_git_and_invalid_refs(self):
+        workflow = (SCRIPT.parents[1] / ".github/workflows/ci.yml").read_text()
+        job = workflow.split("  dependencies:\n", 1)[1]
+        script = textwrap.dedent(job.split("        run: |\n", 1)[1]
+                                 .split("      - uses:", 1)[0])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def git(*args):
+                return subprocess.run(["git", *args], cwd=root, check=True,
+                                      capture_output=True, text=True).stdout.strip()
+
+            git("init")
+            git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.test",
+                "commit", "--allow-empty", "-m", "base")
+            base = git("rev-parse", "HEAD")
+            for filename in ("notes.txt", "pyproject.toml", "requirements-ci.txt",
+                             "config/dependency-policy.json"):
+                path = root / filename
+                path.parent.mkdir(exist_ok=True)
+                path.write_text("synthetic")
+                git("add", filename)
+                git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.test",
+                    "commit", "-m", "fixture")
+                head = git("rev-parse", "HEAD")
+                output = root / "output"
+                for candidate_base, expected in ((base, filename != "notes.txt"),
+                                                 ("0" * 40, True), ("missing", True),
+                                                 ("", True)):
+                    output.write_text("")
+                    env = {**os.environ, "BASE_SHA": candidate_base, "HEAD_SHA": head,
+                           "GITHUB_OUTPUT": str(output)}
+                    result = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", script],
+                                            cwd=root, env=env, capture_output=True, text=True)
+                    with self.subTest(filename=filename, base=candidate_base):
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertEqual(output.read_text(),
+                                         f"audit={str(expected).lower()}\n")
+                base = head
+            # A rename away from a watched path must still trigger the audits.
+            git("mv", "requirements-ci.txt", "renamed.txt")
+            git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.test",
+                "commit", "-m", "rename")
+            env = {**os.environ, "BASE_SHA": base, "HEAD_SHA": git("rev-parse", "HEAD"),
+                   "GITHUB_OUTPUT": str(root / "renamed-output")}
+            subprocess.run(["bash", "-e", "-o", "pipefail", "-c", script], cwd=root,
+                           env=env, capture_output=True, check=True)
+            self.assertEqual((root / "renamed-output").read_text(), "audit=true\n")
+
+    def test_scheduled_full_audit_runs_daily_and_reports_failure(self):
+        path = SCRIPT.parents[1] / ".github/workflows/dependency-audit-scheduled.yml"
+        self.assertTrue(path.is_file())
+        workflow = path.read_text()
+        self.assertIn("  schedule:\n    - cron: '23 8 * * *'", workflow)
+        self.assertNotIn("pull_request:", workflow)
+        self.assertNotIn("  push:", workflow)
+        self.assertIn("  contents: read\n  issues: write", workflow)
+        self.assertIn("cancel-in-progress: false", workflow)
+        self.assertIn("python -m pip_audit --strict\n", workflow)
+        self.assertIn('python -m pip_audit --strict -r "$RUNNER_TEMP/', workflow)
+        self.assertIn("project['project']['dependencies']", workflow)
+        self.assertIn("project['build-system']['requires']", workflow)
+        self.assertIn("if: ${{ failure() }}", workflow)
+        self.assertIn("'gh', 'issue', 'create'", workflow)
+        self.assertIn("gh api --paginate --slurp", workflow)
+        self.assertIn("if not any(marker in (issue.get('body') or '')", workflow)
+
+    def test_scheduled_issue_creation_deduplicates_open_failure_reports(self):
+        workflow = (SCRIPT.parents[1] / ".github/workflows/dependency-audit-scheduled.yml").read_text()
+        script = textwrap.dedent(workflow.rsplit("          python - <<'PY'\n", 1)[1]
+                                 .rsplit("          PY", 1)[0])
+        marker = "<!-- cineforge:scheduled-dependency-audit-failure -->"
+        with tempfile.TemporaryDirectory() as directory:
+            env = {"RUNNER_TEMP": directory, "GITHUB_SERVER_URL": "https://github.com",
+                   "GITHUB_REPOSITORY": REPO, "GITHUB_RUN_ID": "123"}
+            for pages, expected in (([[]], 1),
+                                    ([[{"body": None}], [{"body": marker}]], 0),
+                                    ([[{"body": marker, "pull_request": {}}]], 1)):
+                (Path(directory) / "open-issues.json").write_text(json.dumps(pages))
+                with self.subTest(pages=pages), patch.dict(os.environ, env), \
+                        patch("subprocess.run") as run:
+                    exec(compile(script, "scheduled-issue-step", "exec"), {})
+                    self.assertEqual(run.call_count, expected)
+                    if expected:
+                        command = run.call_args.args[0]
+                        self.assertEqual(command[:3], ["gh", "issue", "create"])
+                        self.assertIn(marker, command[-1])
+                        self.assertIn(f"https://github.com/{REPO}/actions/runs/123", command[-1])
+                        self.assertTrue(run.call_args.kwargs["check"])
 
     def test_privileged_workflow_concurrency_is_per_pr_with_main_fallback(self):
         workflow = (SCRIPT.parents[1] / ".github/workflows/agent-evidence.yml").read_text()
