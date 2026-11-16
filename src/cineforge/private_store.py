@@ -81,6 +81,7 @@ class PrivateRunDirectory:
         self._record_inode: int | None = None
         self._record_device: int | None = None
         self._pending: dict[str, _Pending | None] = {}
+        self._payload_names: set[str] = set()
 
     def __enter__(self) -> PrivateRunDirectory:
         descriptor = -1
@@ -226,6 +227,20 @@ class PrivateRunDirectory:
 
     def checkpoint(self, payload: bytes) -> None:
         self._write("run.json", payload, record=True)
+
+    def put_payload(self, payload: bytes, suffix: str) -> str:
+        """Persist bounded controller output under its content identity, without overwrite."""
+        if (type(payload) is not bytes or not 0 < len(payload) <= 64 * 1024 * 1024
+                or suffix not in ("wav", "mkv", "json")):
+            raise ArtifactStoreError("invalid private controller output")
+        name = "artifact-" + hashlib.sha256(payload).hexdigest() + "." + suffix
+        if name in self._payload_names:
+            if read_private_input(self.path / name, max_bytes=64 * 1024 * 1024) != payload:
+                raise ArtifactStoreError("private controller output changed")
+            return name
+        self._write(name, payload)
+        self._payload_names.add(name)
+        return name
 
     def put(self, result: ExecutionResult) -> Artifact:
         if (not isinstance(result, ExecutionResult) or not result.payload

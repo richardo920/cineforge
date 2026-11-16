@@ -12,6 +12,7 @@ import sys
 from typing import Any, NoReturn
 
 from cineforge import __version__
+from cineforge.a20_inputs import INPUT_NAMES, A20Error
 from cineforge.cloud_budget import CloudBudgetError
 from cineforge.cloud_smoke import (
     CloudSmokeError,
@@ -50,7 +51,7 @@ class _ArgumentParser(argparse.ArgumentParser):
 
 _STAGES = frozenset({"validate-plan", "mock-run", "comfy-run", "cloud-smoke",
                      "cloud-recover", "conditioning-preflight", "conditioning-run",
-                     "conditioning-recover"})
+                     "conditioning-recover", "a20-run"})
 
 
 def _stage() -> str:
@@ -59,6 +60,9 @@ def _stage() -> str:
 
 def _reason(error: Exception) -> str:
     """Closed vocabulary: subclass names, messages and chains are never displayed."""
+    if type(error) is A20Error:
+        fixed = {"A20_MISSING_" + name.upper(): "a20-missing-" + name for name in INPUT_NAMES}
+        return fixed.get(str(error), "a20")
     for known, reason in ((CloudBudgetError, "cloud-budget"), (CloudSmokeError, "cloud-smoke"),
                           (ComfyRunError, "comfy-run"), (ConditioningError, "conditioning"),
                           (ArtifactStoreError, "private-store"), (StorageError, "storage"),
@@ -95,6 +99,13 @@ def _main() -> None:
                "Retain private checkpoints; historical outcomes are unchanged.")
     parser.add_argument("--version", action="version", version=f"cineforge {__version__}")
     commands = parser.add_subparsers(dest="command")
+    a20 = commands.add_parser("a20-run", help="separately authorized A20 validation; no defaults")
+    a20.add_argument("--inputs", required=True, help="private JSON: " + ", ".join(INPUT_NAMES) + " paths")
+    a20.add_argument("--controller", required=True, help="explicit trusted operator Python; build_bindings(inputs)")
+    a20.add_argument("--controller-root", required=True, help="complete local controller code/data dependency root")
+    a20.add_argument("--controller-sha256", required=True, help="independently reviewed controller source digest")
+    a20.add_argument("--output-dir", required=True, help="new private directory outside Git")
+    a20.add_argument("--allow-live", action="store_true", help="separate cloud/native/workflow opt-in")
     validate = commands.add_parser("validate-plan", help="validate a synthetic JSON plan")
     validate.add_argument("plan", help="UTF-8 JSON plan with explicit models and devices")
     mock = commands.add_parser("mock-run", help="emit an offline metadata-only RunManifest")
@@ -155,6 +166,10 @@ def _main() -> None:
         parser.print_help()
         return
     reason = "unexpected"
+    if args.command == "a20-run":
+        from cineforge.a20_cli import command as a20_command
+        print(canonical_json(a20_command(args)).decode())
+        return
     if args.command.startswith("conditioning-"):
         from cineforge.conditioning_cli import command as conditioning_command
         m4_failed = False

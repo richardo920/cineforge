@@ -12,6 +12,10 @@ from cineforge.private_store import read_private_input
 _PACKAGE_FILES = (
     "__init__.py",
     "__main__.py",
+    "a20_cli.py",
+    "a20_delivery.py",
+    "a20_driver.py",
+    "a20_inputs.py",
     "audio.py",
     "audio_analysis.py",
     "audio_mix.py",
