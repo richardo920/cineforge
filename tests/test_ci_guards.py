@@ -27,6 +27,60 @@ class ArtifactTests(unittest.TestCase):
                 self.assertTrue(guard.check_blob(path, 1, mode))
         self.assertEqual(guard.check_blob(".env.example", 1, "100644"), [])
 
+    def test_source_directories_and_root_artifacts(self):
+        for name in sorted(guard.PRIVATE_PARTS):
+            for prefix in ("src/cineforge", "tests"):
+                with self.subTest(prefix=prefix, name=name):
+                    self.assertEqual(guard.check_blob(f"{prefix}/{name}/x.py", 1, "100644"), [])
+            for prefix in ("", "nested/"):
+                self.assertTrue(guard.check_blob(f"{prefix}{name}/x.py", 1, "100644"))
+
+    def test_fixture_suffix_size_boundary_and_negative_controls(self):
+        for suffix in sorted(guard.FIXTURE_SUFFIXES):
+            path = f"tests/fixtures/nested/tone{suffix.upper()}"
+            with self.subTest(suffix=suffix):
+                for size in (1024, 64 * 1024):
+                    self.assertEqual(guard.check_blob(path, size, "100644"), [])
+                for size in (64 * 1024 + 1, 200 * 1024):
+                    self.assertTrue(guard.check_blob(path, size, "100644"))
+                for prefix in ("src", "tests", "tests/fixtures-other", "nested/tests/fixtures",
+                               "tests/fixtures/private", "tests/fixtures/models"):
+                    self.assertTrue(guard.check_blob(f"{prefix}/tone{suffix}", 1, "100644"))
+
+    def test_prohibited_suffixes_and_credentials_remain_global(self):
+        for prefix in ("", "src/cineforge/", "tests/fixtures/"):
+            for name in ("model.safetensors", "model.pt", "clip.mp4", "key.pem",
+                         "credentials.json", ".env.production", "secrets/token.txt",
+                         ".secrets/token.txt"):
+                with self.subTest(prefix=prefix, name=name):
+                    self.assertTrue(guard.check_blob(prefix + name, 1, "100644"))
+
+    def test_gitignore_and_index_acceptance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            root.joinpath(".gitignore").write_text(
+                Path(__file__).resolve().parents[1].joinpath(".gitignore").read_text())
+            allowed = ["src/cineforge/models/__init__.py", "src/cineforge/artifacts/x.py",
+                       "tests/fixtures/tone.wav", "tests/fixtures/nested/tone.wav"]
+            blocked = [f"{name}/x.py" for name in
+                       ("models", "artifacts", "output", "outputs", "weights")]
+            for path in allowed + blocked:
+                target = root / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(b"x" * 1024)
+                result = subprocess.run(["git", "check-ignore", "--no-index", path],
+                                        cwd=root, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 1 if path in allowed else 0, path)
+                self.assertEqual(bool(guard.check_blob(path, 1024, "100644")), path in blocked)
+            subprocess.run(["git", "add", *allowed], cwd=root, check=True)
+            self.assertEqual(guard.tracked_artifacts(root), [])
+            target = root / "tests/fixtures/tone.wav"
+            target.write_bytes(b"x" * (200 * 1024))
+            subprocess.run(["git", "add", "tests/fixtures/tone.wav"], cwd=root, check=True)
+            target.write_bytes(b"x" * 1024)
+            self.assertIn("tests/fixtures/tone.wav", " ".join(guard.tracked_artifacts(root)))
+
     def test_staged_large_blob_cannot_hide_behind_small_working_file(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -37,6 +37,31 @@ def main() -> None:
                   "--root", str(fixture)], fixture, "potential secret detected")
         print("secret rejection fixture: PASS (invalid synthetic key only)")
 
+        # Exercise the index guard with trackable source and bounded synthetic media.
+        (fixture / ".gitignore").write_text((root / ".gitignore").read_text())
+        allowed = ["src/cineforge/models/__init__.py", "src/cineforge/artifacts/x.py",
+                   "tests/fixtures/tone.wav"]
+        for path in allowed:
+            target = fixture / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"x" * 1024)
+        subprocess.run(["git", "add", *allowed], cwd=fixture, check=True)
+        artifact_command = [sys.executable, str(root / "scripts/ci_guard.py"), "artifacts",
+                            "--root", str(fixture)]
+        subprocess.run(artifact_command, cwd=fixture, check=True, capture_output=True)
+        for path, size in [("tests/fixtures/tone.wav", 200 * 1024),
+                           ("tests/fixtures/model.safetensors", 1),
+                           ("src/cineforge/model.safetensors", 1),
+                           ("models/x.py", 1), ("artifacts/x.py", 1)]:
+            target = fixture / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"x" * size)
+            subprocess.run(["git", "add", "-f", path], cwd=fixture, check=True)
+            rejected(artifact_command, fixture, path + ": private/media/model/credential")
+            subprocess.run(["git", "rm", "--cached", "-f", path], cwd=fixture,
+                           check=True, capture_output=True)
+        print("source, small-fixture and prohibited-artifact fixtures: PASS")
+
         (fixture / "oversized.txt").write_bytes(b"x" * (1024 * 1024 + 1))
         subprocess.run(["git", "add", "oversized.txt"], cwd=fixture, check=True)
         rejected([sys.executable, str(root / "scripts/ci_guard.py"), "artifacts",
