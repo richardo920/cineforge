@@ -37,6 +37,67 @@ def reviewed(kind: str = "skill", name: str = "synthetic") -> RightsRecord:
 
 
 class RightsTests(unittest.TestCase):
+    def test_registration_order_selects_ref_and_preserves_history(self) -> None:
+        record = reviewed()
+        # A lexically lower ref still wins when directly registered last.
+        replacement = with_review(replace(record, ref=RightsRef("earlier-id", "v1")),
+                                  reviewer="reviewer", evidence=record.source)
+        other_revision = with_review(replace(record,
+            ref=RightsRef("other-subject", "v1"),
+            subject=replace(record.subject, revision="v2")),
+            reviewer="reviewer", evidence=record.source)
+        ledger = RightsLedger()
+        self.assertIsNone(ledger.active_ref(record.subject))
+        ledger.register(record)
+        self.assertEqual(ledger.active_ref(record.subject), record.ref)
+        ledger.register(other_revision)
+        ledger.register(replacement)
+        self.assertEqual(ledger.active_ref(record.subject), replacement.ref)
+        self.assertEqual(ledger.active_ref(other_revision.subject), other_revision.ref)
+        self.assertEqual(ledger.lookup(record.ref), record)
+        self.assertEqual(ledger.lookup(replacement.ref), replacement)
+        self.assertEqual(ledger.preflight_use(record.subject, record.ref, Use("reference")).reasons,
+                         ("superseded_rights",))
+        self.assertTrue(ledger.preflight_use(record.subject, replacement.ref,
+                                            Use("reference")).allowed)
+        for duplicate in (record, replace(replacement, subject=other_revision.subject)):
+            with self.assertRaisesRegex(RightsError, "duplicate immutable rights reference"):
+                ledger.register(duplicate)
+        self.assertEqual(ledger.active_ref(record.subject), replacement.ref)
+        self.assertEqual(ledger.active_ref(other_revision.subject), other_revision.ref)
+        self.assertEqual(ledger.lookup(replacement.ref), replacement)
+
+    def test_distinct_grant_after_revocation_must_pass_its_own_gates(self) -> None:
+        record = reviewed("voice")
+        for fields, reasons in (({}, ()), ({"review": None}, ("unreviewed_rights",)),
+                                ({"consent": None}, ("missing_consent",)),
+                                ({"source": None}, ("missing_provenance",))):
+            with self.subTest(fields=fields):
+                ledger = RightsLedger()
+                ledger.register(record)
+                ledger.revoke(record.ref, reason="Synthetic withdrawal")
+                revocation = ledger.revocation(record.ref)
+                self.assertEqual(ledger.active_ref(record.subject), record.ref)
+                replacement = with_review(replace(record, ref=RightsRef("fresh", "v1"),
+                                                   **fields),
+                                          reviewer="reviewer", evidence=record.source)
+                if "review" in fields:
+                    replacement = replace(replacement, review=None)
+                ledger.register(replacement)
+                self.assertEqual(ledger.active_ref(record.subject), replacement.ref)
+                result = ledger.preflight_use(record.subject, replacement.ref, Use("reference"))
+                self.assertEqual(result.reasons, reasons)
+                self.assertEqual(result.allowed, not reasons)
+                self.assertTrue(ledger.is_revoked(record.ref))
+                self.assertFalse(ledger.is_revoked(replacement.ref))
+                self.assertEqual(ledger.revocation(record.ref), revocation)
+                self.assertEqual(ledger.lookup(record.ref), record)
+                self.assertEqual(ledger.preflight_use(record.subject, record.ref,
+                    Use("reference")).reasons, ("revoked_rights", "superseded_rights"))
+                with self.assertRaises(RightsError):
+                    ledger.register(record)
+                self.assertEqual(ledger.active_ref(record.subject), replacement.ref)
+
     def test_review_and_live_revocation_keep_immutable_history(self) -> None:
         record = reviewed()
         ledger = RightsLedger()

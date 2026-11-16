@@ -280,11 +280,27 @@ class RightsLedger:
         self._revocations: dict[RightsRef, Revocation] = {}
 
     def register(self, record: RightsRecord) -> None:
+        """Append immutable history; the last registered ref wins for the exact subject.
+
+        Duplicate refs raise without changing state; superseded records remain in
+        lookup. A distinct ref may replace a revoked grant, but must pass its own
+        review, consent and provenance gates. The old ref stays revoked forever.
+        Registration order is caller-defined, not inferred from ref IDs or time.
+        """
         _instance(record, RightsRecord, "rights record")
         if record.ref in self._records:
             raise RightsError("duplicate immutable rights reference")
         self._records[record.ref] = record
         self._active[record.subject] = record.ref
+
+    def active_ref(self, subject: SubjectRef) -> RightsRef | None:
+        """Return the selected ref, or None if absent; selection is not permission.
+
+        Revocation retains this pointer without falling back to an earlier grant.
+        Use preflight_use to check revocation and the selected record's own gates.
+        """
+        _instance(subject, SubjectRef, "subject reference")
+        return self._active.get(subject)
 
     def lookup(self, ref: RightsRef) -> RightsRecord | None:
         _instance(ref, RightsRef, "rights reference")

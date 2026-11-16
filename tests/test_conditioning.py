@@ -12,6 +12,7 @@ import traceback
 import unittest
 import zlib
 from dataclasses import replace
+from itertools import permutations
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -472,6 +473,60 @@ class AdmissionTests(Fixture):
         path.write_bytes(canonical(data))
         with self.assertRaises(ConditioningError):
             load_context(path, self.gate.reference.path)
+
+    def test_context_rights_order_is_canonical_with_revoked_history(self):
+        path = self.context_file()
+        data = json.loads(path.read_bytes())
+        original = self.records[-1]
+        replacements = tuple(review_rights(replace(original, ref=RightsRef("zz-model", revision)),
+            reviewer="synthetic-reviewer", evidence=EVIDENCE) for revision in ("v10", "v2"))
+        winner = replacements[-1]  # Lexical v2 > v10; no numeric or time ordering.
+        data["model_rights"] = winner.ref.to_dict()
+        data["revocations"] = [original.ref.to_dict()]
+        for records in permutations((original, *replacements)):
+            with self.subTest(refs=[record.ref for record in records]):
+                data["rights"] = [r.to_dict() for r in (*records, *reversed(self.records[:-1]))]
+                path.write_bytes(canonical(data))
+                gate = load_context(path, self.gate.reference.path)
+                self.assertEqual(gate.ledger.active_ref(original.subject), winner.ref)
+                self.assertEqual(gate.ledger.lookup(original.ref), original)
+                self.assertTrue(gate.ledger.is_revoked(original.ref))
+                self.assertEqual(gate.ledger.preflight_use(original.subject, original.ref,
+                    Use("execute")).reasons, ("revoked_rights", "superseded_rights"))
+                self.assertTrue(gate.ledger.preflight_use(winner.subject, winner.ref,
+                                                        Use("execute")).allowed)
+
+    def test_context_revoked_winner_never_falls_back_and_duplicate_refs_fail(self):
+        path = self.context_file()
+        data = json.loads(path.read_bytes())
+        original = self.records[-1]
+        older = review_rights(replace(original, ref=RightsRef("a-model", "v1")),
+                              reviewer="synthetic-reviewer", evidence=EVIDENCE)
+        for records in ((older, original), (original, older)):
+            data["rights"] = [r.to_dict() for r in (*self.records[:-1], *records)]
+            data["revocations"] = [original.ref.to_dict()]
+            path.write_bytes(canonical(data))
+            with self.assertRaises(ConditioningError):
+                load_context(path, self.gate.reference.path)
+        data["revocations"] = []
+        data["rights"] = [r.to_dict() for r in (*self.records, original)]
+        path.write_bytes(canonical(data))
+        with self.assertRaises(ConditioningError):
+            load_context(path, self.gate.reference.path)
+
+    def test_context_still_requires_exactly_one_character_reference(self):
+        path = self.context_file()
+        data = json.loads(path.read_bytes())
+        reference = self.character.references[0]
+        character = with_character_review(replace(self.character,
+            references=(reference, replace(reference, reference_id="second"))),
+            reviewer="synthetic-reviewer", evidence=EVIDENCE)
+        data["character"] = character.to_dict()
+        path.write_bytes(canonical(data))
+        with patch("cineforge.conditioning.VerifiedConditioning") as constructor:
+            with self.assertRaises(ConditioningError):
+                load_context(path, self.gate.reference.path)
+        constructor.assert_not_called()
 
     def test_offline_cli_proposes_only_and_initializes_persistent_scope_without_keys(self):
         args = SimpleNamespace(command="conditioning-preflight", context=str(self.context_file()),
