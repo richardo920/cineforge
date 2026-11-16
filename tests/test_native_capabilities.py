@@ -4,6 +4,7 @@ import contextlib
 import copy
 import hashlib
 import os
+import secrets
 import tempfile
 import time
 import unittest
@@ -11,6 +12,7 @@ from dataclasses import asdict
 from pathlib import Path
 from unittest.mock import patch
 
+from stable_test_temp import stable_temporary_directory
 from test_native_remote import RemoteFixture, recipe
 
 from cineforge import native_remote as controller
@@ -22,7 +24,7 @@ from cineforge.native_remote_plan import nr_digest
 
 class FixedFileMeasurementTests(unittest.TestCase):
     def setUp(self):
-        temporary = tempfile.TemporaryDirectory(prefix="cf-fixed-native-")
+        temporary = stable_temporary_directory(prefix="cf-fixed-native-")
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name).resolve()
         self.root.chmod(0o700)
@@ -113,6 +115,53 @@ class FixedFileMeasurementTests(unittest.TestCase):
                 bootstrap.nr_cap_file(str(self.alias), self.deadline)
             self.assertTrue(changed)
 
+    def read_with_shared_tmpdir_churn(self, alias):
+        read = os.read
+        changed = False
+        entry = Path(tempfile.gettempdir()) / (
+            f"cf-native-churn-{os.getpid()}-{secrets.token_hex(8)}"
+        )
+
+        def churn(fd, count):
+            nonlocal changed
+            result = read(fd, count)
+            if result and not changed:
+                changed = True
+                entry.mkdir(mode=0o700)
+                try:
+                    pass
+                finally:
+                    entry.rmdir()
+            return result
+
+        try:
+            with patch.object(bootstrap.os, "read", churn):
+                return bootstrap.nr_cap_file(str(alias), self.deadline)
+        finally:
+            if entry.exists():
+                entry.rmdir()
+            self.assertTrue(changed)
+
+    def test_shared_tmpdir_churn_during_read_succeeds_from_stable_fixture(self):
+        expected = hashlib.sha256(self.body.read_bytes()).hexdigest()
+        result = self.read_with_shared_tmpdir_churn(self.alias)
+        self.assertEqual(result["sha256"], expected)
+
+    def test_shared_tmpdir_churn_during_read_refuses_tmpdir_resident_body(self):
+        with tempfile.TemporaryDirectory(prefix="cf-native-shared-") as temporary:
+            root = Path(temporary).resolve()
+            root.chmod(0o700)
+            body = root / "body"
+            body.write_bytes(self.body.read_bytes())
+            body.chmod(0o600)
+            alias = root / "alias"
+            alias.symlink_to(body.name)
+            with (
+                patch.object(bootstrap, "NR_CAP_ROOTS", (str(root) + "/",)),
+                self.assertRaisesRegex(ValueError, "^native ancestor changed during read$"),
+            ):
+                self.read_with_shared_tmpdir_churn(alias)
+
     def test_expired_or_slow_read_never_returns_measurement(self):
         with patch.object(bootstrap.os, "open", side_effect=AssertionError("open")):
             with self.assertRaises(ValueError):
@@ -137,11 +186,15 @@ class FixedFileMeasurementTests(unittest.TestCase):
 class CapabilityChannelTests(RemoteFixture):
     def setUp(self):
         super().setUp()
+        temporary = stable_temporary_directory(prefix="cf-cap-driver-")
+        self.addCleanup(temporary.cleanup)
+        self.driver_root = Path(temporary.name).resolve()
         self.measurements = 0
         self.change_facts = False
         for item in (
             patch.object(bootstrap, "nr_capabilities", self.facts),
-            patch.object(controller, "NR_CAP_ROOTS", (str(self.root) + "/",)),
+            patch.object(controller, "NR_CAP_ROOTS",
+                         (str(self.root) + "/", str(self.driver_root) + "/")),
         ):
             item.start()
             self.addCleanup(item.stop)
@@ -211,11 +264,12 @@ class CapabilityChannelTests(RemoteFixture):
         return facts
 
     def capture_driver_facts(self):
-        self.driver_ancestor = self.root / "driver-ancestor"
+        self.driver_ancestor = self.driver_root / "driver-ancestor"
         self.driver_ancestor.mkdir(mode=0o700)
         self.driver_body = self.driver_ancestor / "driver-body"
         bootstrap.nr_write(self.driver_body, b"synthetic driver bytes, never executed")
-        self.enterContext(patch.object(bootstrap, "NR_CAP_ROOTS", (str(self.root) + "/",)))
+        self.enterContext(patch.object(bootstrap, "NR_CAP_ROOTS",
+                                      (str(self.root) + "/", str(self.driver_root) + "/")))
         package, _ = native_package()
         self.bridge._initialize(package, time.monotonic() + 180)
         return self.bridge._call("native_capabilities")
