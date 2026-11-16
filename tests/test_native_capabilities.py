@@ -16,6 +16,7 @@ from test_native_remote import RemoteFixture, recipe
 from cineforge import native_remote as controller
 from cineforge import native_remote_bootstrap as bootstrap
 from cineforge.native_remote import RemoteNativeSpeechRuntime
+from cineforge.native_remote_package import native_package
 from cineforge.native_remote_plan import nr_digest
 
 
@@ -190,6 +191,83 @@ class CapabilityChannelTests(RemoteFixture):
         self.assertEqual(preflight["capabilities_sha256"], nr_digest(measured))
         self.assertEqual(self.measurements, 2)
         self.assertEqual(self.child_count, 0)
+
+    def driver_facts(self, deadline, binding):
+        facts = self.facts(deadline, binding)
+        binary = bootstrap.nr_cap_file(str(self.driver_body), deadline)
+        info = self.driver_ancestor.stat()
+        ancestor = [info.st_dev, info.st_ino, info.st_uid, info.st_mode,
+                    info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns]
+        # Synthetic mount evidence; file bytes and ancestor metadata are real.
+        binary["driver_mount"] = dict(
+            alias="/usr/bin/nvidia-smi", role="nvidia_smi", binding_sha256=nr_digest(binding),
+            identity=[1, 2, 65534, 0o100600, 1, binary["size_bytes"], 0, 0],
+            ancestors=[[str(self.driver_ancestor), ancestor]], links=[],
+            user_namespace="user:[12]", mount_namespace="mnt:[13]",
+            uid_map=[[0, 100000, 65536]], mount=[17, 1, "0:1", binary["path"], "ext4", "ro"],
+        )
+        row = next(row for row in facts["files"] if row["role"] == "nvidia_smi")
+        row.update(binary, status="measured")
+        return facts
+
+    def capture_driver_facts(self):
+        self.driver_ancestor = self.root / "driver-ancestor"
+        self.driver_ancestor.mkdir(mode=0o700)
+        self.driver_body = self.driver_ancestor / "driver-body"
+        bootstrap.nr_write(self.driver_body, b"synthetic driver bytes, never executed")
+        self.enterContext(patch.object(bootstrap, "NR_CAP_ROOTS", (str(self.root) + "/",)))
+        package, _ = native_package()
+        self.bridge._initialize(package, time.monotonic() + 180)
+        return self.bridge._call("native_capabilities")
+
+    def test_preflight_allows_driver_ancestor_mtime_change_without_refreshing_capture(self):
+        with patch.object(bootstrap, "nr_capabilities", self.driver_facts):
+            captured = self.capture_driver_facts()
+            saved = bootstrap.nr_read(self.remote / "capabilities.json")
+            info = self.driver_ancestor.stat()
+            os.utime(self.driver_ancestor, ns=(info.st_atime_ns, info.st_mtime_ns + 10**9))
+            self.assertNotEqual(self.driver_ancestor.stat().st_mtime_ns, info.st_mtime_ns)
+            self.bridge._call("native_preflight", capabilities_sha256=nr_digest(captured))
+        self.assertTrue((self.remote / "preflight.json").exists())
+        self.assertFalse((self.remote / "failed").exists())
+        self.assertEqual(bootstrap.nr_read(self.remote / "capabilities.json"), saved)
+        self.assertEqual(self.measurements, 2)
+
+    def test_preflight_rejects_actual_driver_body_change(self):
+        with patch.object(bootstrap, "nr_capabilities", self.driver_facts):
+            captured = self.capture_driver_facts()
+            original = self.driver_body.read_bytes()
+            self.driver_body.write_bytes(b"x" * len(original))
+            self.static_failure(lambda: self.bridge._call(
+                "native_preflight", capabilities_sha256=nr_digest(captured)))
+        self.assertFalse((self.remote / "preflight.json").exists())
+        self.assertTrue((self.remote / "failed").exists())
+
+    def test_capability_identity_keeps_every_other_field_exact(self):
+        with patch.object(bootstrap, "nr_capabilities", self.driver_facts):
+            captured = self.capture_driver_facts()
+        original = copy.deepcopy(captured)
+        row_index = next(i for i, row in enumerate(captured["files"]) if "driver_mount" in row)
+        mutations = [lambda facts: facts.update(policy="changed")]
+        for field in captured["files"][row_index]:
+            if field != "driver_mount":
+                mutations.append(lambda facts, field=field:
+                    facts["files"][row_index].update({field: "changed"}))
+        for field in captured["files"][row_index]["driver_mount"]:
+            if field != "ancestors":
+                mutations.append(lambda facts, field=field:
+                    facts["files"][row_index]["driver_mount"].update({field: "changed"}))
+        for index in range(4):
+            def change_ancestor(facts, index=index):
+                facts["files"][row_index]["driver_mount"]["ancestors"][0][1][index] += 1
+            mutations.append(change_ancestor)
+        for index, mutate in enumerate(mutations):
+            with self.subTest(mutation=index):
+                changed = copy.deepcopy(captured)
+                mutate(changed)
+                self.assertNotEqual(bootstrap.nr_capability_identity(changed),
+                                    bootstrap.nr_capability_identity(captured))
+        self.assertEqual(captured, original)
 
     def test_direct_stage_keeps_existing_preflight_without_capability_rpc(self):
         self.bridge.stage(recipe(), b"x")

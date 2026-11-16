@@ -18,7 +18,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from cineforge.native_driver import read_native_file
+from cineforge.native_driver import _driver_verification_identity, read_native_file
 from cineforge.native_remote_plan import (
     NR_BLOB_MAX,
     NR_CHUNK,
@@ -74,6 +74,13 @@ def nr_capabilities(deadline: float, binding: dict[str, Any]) -> dict[str, Any]:
     nr_check(deadline)
     return {"version": 1, "policy": NR_CAP_POLICY, "binding_sha256": nr_digest(binding),
             "interpreter_path": interpreter, "files": files}
+
+
+def nr_capability_identity(facts: dict[str, Any]) -> bytes:
+    return nr_encode(dict(facts, files=[
+        _driver_verification_identity(row) if "driver_mount" in row else row
+        for row in facts["files"]
+    ]))
 
 
 def nr_private(path: Path, *, directory: bool = False) -> os.stat_result:
@@ -339,7 +346,8 @@ def _nr_dispatch(request: dict[str, Any], deadline: float) -> tuple[dict[str, An
                     nr_hash(request["capabilities_sha256"])
                     captured = nr_read(root / "capabilities.json")
                     if (hashlib.sha256(captured).hexdigest() != request["capabilities_sha256"]
-                            or nr_encode(nr_capabilities(deadline, binding)) != captured):
+                            or nr_capability_identity(nr_capabilities(deadline, binding))
+                            != nr_capability_identity(nr_json(captured))):
                         raise ValueError("fixed native capability facts changed before staging")
                 result = nr_preflight(deadline, profile_id=request["profile"]["id"])
                 if "capabilities_sha256" in request:
