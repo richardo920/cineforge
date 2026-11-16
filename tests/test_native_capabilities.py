@@ -27,6 +27,7 @@ class FixedFileMeasurementTests(unittest.TestCase):
         temporary = stable_temporary_directory(prefix="cf-fixed-native-")
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name).resolve()
+        self.assertFalse(self.root.is_relative_to(Path(tempfile.gettempdir()).resolve()))
         self.root.chmod(0o700)
         self.body = self.root / "fixed-native-body"
         self.body.write_bytes(b"inert synthetic bytes, never executed or imported")
