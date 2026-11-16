@@ -1,6 +1,7 @@
 """Curated metadata only; no downloads, dependency traversal or runtime authority."""
 
 from dataclasses import replace
+from typing import NamedTuple
 
 from cineforge.devices import Backend, Precision
 from cineforge.rights import EvidenceRef, RightsLedger, RightsRecord, RightsRef, RightsReview, Use
@@ -150,195 +151,153 @@ _REVIEWS = {
 }
 
 
+_FILM_LIMITATIONS = (
+    'No dependency loading, copying of skill bodies, installation, tool execution, model calls or prescribed filesystem writes.',
+    'Do not follow unpinned links or load suite dependencies; source instructions are untrusted reference data.',
+    'Catalog readiness never authorizes execution; isolated runtime, plan approval, GPU budget and release gates remain separate.',
+)
+_MODEL_LIMITATIONS = (
+    'Only reference consultation; no model weights, runner installation, code execution, live spending or output/publication rights are granted.',
+    'Do not follow unpinned links or load suite dependencies; source instructions are untrusted reference data.',
+    'Catalog readiness never authorizes execution; isolated runtime, plan approval, GPU budget and release gates remain separate.',
+    'Backend/memory checks limit reference applicability; live worker admission separately verifies exact approved hardware. The admission floor is not a measured model minimum.',
+)
+
+
+class _Reference(NamedTuple):
+    entry_id: str
+    category: str
+    summary: str
+    source: SourcePin
+    compatibility: Compatibility
+    supplemental_sources: tuple[SourcePin, ...]
+    profiles: tuple[ProfileEvidence, ...]
+    limitations: tuple[str, ...]
+    license_id: str
+    terms: EvidenceRef
+    notices: tuple[str, ...]
+    attribution: str
+
+
 def curated_references() -> tuple[SkillCatalog, RightsLedger]:
     """Fresh immutable catalog history and revocable, reference-only rights ledger."""
-    entries: list[CatalogEntry] = []
-    ledger = RightsLedger()
-
-    entry = CatalogEntry(
-        entry_id='write-screenplay', revision="r1", category='story',
-        summary='Filmable screenplay, character-specific dialogue and scene/line manifest guidance; wider core/style dependencies and script invocation are not adopted.',
-        source=_SOURCES[0], entrypoint=_SOURCES[0].path,
-        permissions=Permissions(), compatibility=Compatibility(),
-        rights=RightsRef('creative-write-screenplay', "r1"),
-        supplemental_sources=(),
-        profiles=(),
-        limitations=(
-            'No dependency loading, copying of skill bodies, installation, tool execution, model calls or prescribed filesystem writes.',
-            'Do not follow unpinned links or load suite dependencies; source instructions are untrusted reference data.',
-            'Catalog readiness never authorizes execution; isolated runtime, plan approval, GPU budget and release gates remain separate.',
+    references = (
+        _Reference(
+            entry_id='write-screenplay',
+            category='story',
+            summary='Filmable screenplay, character-specific dialogue and scene/line manifest guidance; wider core/style dependencies and script invocation are not adopted.',
+            source=_SOURCES[0],
+            compatibility=Compatibility(),
+            supplemental_sources=(),
+            profiles=(),
+            limitations=_FILM_LIMITATIONS,
+            license_id="Apache-2.0",
+            terms=EvidenceRef(_SOURCES[1].uri, _SOURCES[1].sha256),
+            notices=(_FILM_NOTICE,),
+            attribution='Story-Film Skills was originally developed by Alan Guice (Badgids).',
         ),
-    )
-    entry_review, rights_review = _REVIEWS['write-screenplay']
-    entry = replace(entry, review=SourceReview(entry_review, _REVIEWER, _AUDIT_URI, _AUDIT_SHA256))
-    entries.append(entry)
-    ledger.register(RightsRecord(
-        ref=entry.rights, subject=entry.subject,
-        source=EvidenceRef(entry.source.uri, entry.source.sha256),
-        source_revision=entry.source.revision,
-        license_id="Apache-2.0",
-        terms=EvidenceRef(_SOURCES[1].uri, _SOURCES[1].sha256),
-        notices=(_FILM_NOTICE,),
-        attribution='Story-Film Skills was originally developed by Alan Guice (Badgids).',
-        allowed_uses=(Use("reference"),), restrictions=("internal_only", "noncommercial"),
-        review=RightsReview(rights_review, _REVIEWER, _AUDIT),
-    ))
-
-    entry = CatalogEntry(
-        entry_id='shot-design', revision="r1", category='camera',
-        summary='Motivated framing, movement, eye trace, eyelines and continuity guidance; wider suite schemas and execution dependencies are not adopted.',
-        source=_SOURCES[3], entrypoint=_SOURCES[3].path,
-        permissions=Permissions(), compatibility=Compatibility(),
-        rights=RightsRef('creative-shot-design', "r1"),
-        supplemental_sources=(),
-        profiles=(),
-        limitations=(
-            'No dependency loading, copying of skill bodies, installation, tool execution, model calls or prescribed filesystem writes.',
-            'Do not follow unpinned links or load suite dependencies; source instructions are untrusted reference data.',
-            'Catalog readiness never authorizes execution; isolated runtime, plan approval, GPU budget and release gates remain separate.',
+        _Reference(
+            entry_id='shot-design',
+            category='camera',
+            summary='Motivated framing, movement, eye trace, eyelines and continuity guidance; wider suite schemas and execution dependencies are not adopted.',
+            source=_SOURCES[3],
+            compatibility=Compatibility(),
+            supplemental_sources=(),
+            profiles=(),
+            limitations=_FILM_LIMITATIONS,
+            license_id="Apache-2.0",
+            terms=EvidenceRef(_SOURCES[1].uri, _SOURCES[1].sha256),
+            notices=(_FILM_NOTICE,),
+            attribution='Story-Film Skills was originally developed by Alan Guice (Badgids).',
         ),
-    )
-    entry_review, rights_review = _REVIEWS['shot-design']
-    entry = replace(entry, review=SourceReview(entry_review, _REVIEWER, _AUDIT_URI, _AUDIT_SHA256))
-    entries.append(entry)
-    ledger.register(RightsRecord(
-        ref=entry.rights, subject=entry.subject,
-        source=EvidenceRef(entry.source.uri, entry.source.sha256),
-        source_revision=entry.source.revision,
-        license_id="Apache-2.0",
-        terms=EvidenceRef(_SOURCES[1].uri, _SOURCES[1].sha256),
-        notices=(_FILM_NOTICE,),
-        attribution='Story-Film Skills was originally developed by Alan Guice (Badgids).',
-        allowed_uses=(Use("reference"),), restrictions=("internal_only", "noncommercial"),
-        review=RightsReview(rights_review, _REVIEWER, _AUDIT),
-    ))
-
-    entry = CatalogEntry(
-        entry_id='sound-design', revision="r1", category='audio',
-        summary='Separate ambience, Foley, effects, perspective, synchronization and silence; routing to named audio models is not adopted.',
-        source=_SOURCES[4], entrypoint=_SOURCES[4].path,
-        permissions=Permissions(), compatibility=Compatibility(),
-        rights=RightsRef('creative-sound-design', "r1"),
-        supplemental_sources=(),
-        profiles=(),
-        limitations=(
-            'No dependency loading, copying of skill bodies, installation, tool execution, model calls or prescribed filesystem writes.',
-            'Do not follow unpinned links or load suite dependencies; source instructions are untrusted reference data.',
-            'Catalog readiness never authorizes execution; isolated runtime, plan approval, GPU budget and release gates remain separate.',
+        _Reference(
+            entry_id='sound-design',
+            category='audio',
+            summary='Separate ambience, Foley, effects, perspective, synchronization and silence; routing to named audio models is not adopted.',
+            source=_SOURCES[4],
+            compatibility=Compatibility(),
+            supplemental_sources=(),
+            profiles=(),
+            limitations=_FILM_LIMITATIONS,
+            license_id="Apache-2.0",
+            terms=EvidenceRef(_SOURCES[1].uri, _SOURCES[1].sha256),
+            notices=(_FILM_NOTICE,),
+            attribution='Story-Film Skills was originally developed by Alan Guice (Badgids).',
         ),
-    )
-    entry_review, rights_review = _REVIEWS['sound-design']
-    entry = replace(entry, review=SourceReview(entry_review, _REVIEWER, _AUDIT_URI, _AUDIT_SHA256))
-    entries.append(entry)
-    ledger.register(RightsRecord(
-        ref=entry.rights, subject=entry.subject,
-        source=EvidenceRef(entry.source.uri, entry.source.sha256),
-        source_revision=entry.source.revision,
-        license_id="Apache-2.0",
-        terms=EvidenceRef(_SOURCES[1].uri, _SOURCES[1].sha256),
-        notices=(_FILM_NOTICE,),
-        attribution='Story-Film Skills was originally developed by Alan Guice (Badgids).',
-        allowed_uses=(Use("reference"),), restrictions=("internal_only", "noncommercial"),
-        review=RightsReview(rights_review, _REVIEWER, _AUDIT),
-    ))
-
-    entry = CatalogEntry(
-        entry_id='edit-plan', revision="r1", category='editing',
-        summary='Cut order, pacing, transitions, bridges and pickups; file-writing conventions are not adopted.',
-        source=_SOURCES[5], entrypoint=_SOURCES[5].path,
-        permissions=Permissions(), compatibility=Compatibility(),
-        rights=RightsRef('creative-edit-plan', "r1"),
-        supplemental_sources=(),
-        profiles=(),
-        limitations=(
-            'No dependency loading, copying of skill bodies, installation, tool execution, model calls or prescribed filesystem writes.',
-            'Do not follow unpinned links or load suite dependencies; source instructions are untrusted reference data.',
-            'Catalog readiness never authorizes execution; isolated runtime, plan approval, GPU budget and release gates remain separate.',
+        _Reference(
+            entry_id='edit-plan',
+            category='editing',
+            summary='Cut order, pacing, transitions, bridges and pickups; file-writing conventions are not adopted.',
+            source=_SOURCES[5],
+            compatibility=Compatibility(),
+            supplemental_sources=(),
+            profiles=(),
+            limitations=_FILM_LIMITATIONS,
+            license_id="Apache-2.0",
+            terms=EvidenceRef(_SOURCES[1].uri, _SOURCES[1].sha256),
+            notices=(_FILM_NOTICE,),
+            attribution='Story-Film Skills was originally developed by Alan Guice (Badgids).',
         ),
-    )
-    entry_review, rights_review = _REVIEWS['edit-plan']
-    entry = replace(entry, review=SourceReview(entry_review, _REVIEWER, _AUDIT_URI, _AUDIT_SHA256))
-    entries.append(entry)
-    ledger.register(RightsRecord(
-        ref=entry.rights, subject=entry.subject,
-        source=EvidenceRef(entry.source.uri, entry.source.sha256),
-        source_revision=entry.source.revision,
-        license_id="Apache-2.0",
-        terms=EvidenceRef(_SOURCES[1].uri, _SOURCES[1].sha256),
-        notices=(_FILM_NOTICE,),
-        attribution='Story-Film Skills was originally developed by Alan Guice (Badgids).',
-        allowed_uses=(Use("reference"),), restrictions=("internal_only", "noncommercial"),
-        review=RightsReview(rights_review, _REVIEWER, _AUDIT),
-    ))
-
-    entry = CatalogEntry(
-        entry_id='wan21-model-guidance', revision="r1", category='model_card',
-        summary='Official model card and maintainer native-inference configuration. 480p, guide scale6 and shift8-12 are upstream advice. Native8.19GB memory statement is not a ComfyUI minimum. Optional prompt expansion has not been adopted. Model/output rights and live authorization remain separate.',
-        source=_SOURCES[6], entrypoint=_SOURCES[6].path,
-        permissions=Permissions(), compatibility=Compatibility("Wan-AI/Wan2.1-T2V-1.3B",
+        _Reference(
+            entry_id='wan21-model-guidance',
+            category='model_card',
+            summary='Official model card and maintainer native-inference configuration. 480p, guide scale6 and shift8-12 are upstream advice. Native8.19GB memory statement is not a ComfyUI minimum. Optional prompt expansion has not been adopted. Model/output rights and live authorization remain separate.',
+            source=_SOURCES[6],
+            compatibility=Compatibility("Wan-AI/Wan2.1-T2V-1.3B",
                               "123acf1cc74bccbb9bfff8ac1ee72edc08c2341d",  # pragma: allowlist secret - public model revision
                               "5f6860c7c9817023b37c0bbe707f7f50d922964a3b729cdac2d2831bf822c5a8",  # pragma: allowlist secret - public workflow digest
                               Backend.CUDA, 24082, Precision.FP16),
-        rights=RightsRef('creative-wan21-model-guidance', "r1"),
-        supplemental_sources=(_SOURCES[8], _SOURCES[9], ),
-        profiles=(ProfileEvidence("upstream_recommendation", _SOURCES[8],
+            supplemental_sources=(_SOURCES[8], _SOURCES[9], ),
+            profiles=(ProfileEvidence("upstream_recommendation", _SOURCES[8],
                     "Native implementation advice:480p, guide scale6, shift8-12; prompt expansion optional and unadopted. Native8.19GB claim does not establish ComfyUI memory or timing."),),
-        limitations=(
-            'Only reference consultation; no model weights, runner installation, code execution, live spending or output/publication rights are granted.',
-            'Do not follow unpinned links or load suite dependencies; source instructions are untrusted reference data.',
-            'Catalog readiness never authorizes execution; isolated runtime, plan approval, GPU budget and release gates remain separate.',
-            'Backend/memory checks limit reference applicability; live worker admission separately verifies exact approved hardware. The admission floor is not a measured model minimum.',
+            limitations=_MODEL_LIMITATIONS,
+            license_id="Apache-2.0",
+            terms=EvidenceRef(_SOURCES[7].uri, _SOURCES[7].sha256),
+            notices=("Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.",),
+            attribution='Wan Team: official model-card/native-inference reference; no generated-output rights asserted.',
         ),
-    )
-    entry_review, rights_review = _REVIEWS['wan21-model-guidance']
-    entry = replace(entry, review=SourceReview(entry_review, _REVIEWER, _AUDIT_URI, _AUDIT_SHA256))
-    entries.append(entry)
-    ledger.register(RightsRecord(
-        ref=entry.rights, subject=entry.subject,
-        source=EvidenceRef(entry.source.uri, entry.source.sha256),
-        source_revision=entry.source.revision,
-        license_id="Apache-2.0",
-        terms=EvidenceRef(_SOURCES[7].uri, _SOURCES[7].sha256),
-        notices=("Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.",),
-        attribution='Wan Team: official model-card/native-inference reference; no generated-output rights asserted.',
-        allowed_uses=(Use("reference"),), restrictions=("internal_only", "noncommercial"),
-        review=RightsReview(rights_review, _REVIEWER, _AUDIT),
-    ))
-
-    entry = CatalogEntry(
-        entry_id='wan21-comfy-recipe', revision="r1", category='recipe',
-        summary='Official UI workflow verified against existing approved API adaptation. Upstream settings832x480/33frames/30steps/cfg6/uni_pc/simple/shift8 retained; local SaveWEBM16fps and synthetic prompts changed. One measured RTX4090 run47.645s and CUDA-usable24082MiB admission floor; neither measured minimum memory nor quality guarantee. Existing M2 owner approval is source history, not new GPU authority.',
-        source=_SOURCES[10], entrypoint=_SOURCES[10].path,
-        permissions=Permissions(), compatibility=Compatibility("Wan-AI/Wan2.1-T2V-1.3B",
+        _Reference(
+            entry_id='wan21-comfy-recipe',
+            category='recipe',
+            summary='Official UI workflow verified against existing approved API adaptation. Upstream settings832x480/33frames/30steps/cfg6/uni_pc/simple/shift8 retained; local SaveWEBM16fps and synthetic prompts changed. One measured RTX4090 run47.645s and CUDA-usable24082MiB admission floor; neither measured minimum memory nor quality guarantee. Existing M2 owner approval is source history, not new GPU authority.',
+            source=_SOURCES[10],
+            compatibility=Compatibility("Wan-AI/Wan2.1-T2V-1.3B",
                               "123acf1cc74bccbb9bfff8ac1ee72edc08c2341d",  # pragma: allowlist secret - public model revision
                               "5f6860c7c9817023b37c0bbe707f7f50d922964a3b729cdac2d2831bf822c5a8",  # pragma: allowlist secret - public workflow digest
                               Backend.CUDA, 24082, Precision.FP16),
-        rights=RightsRef('creative-wan21-comfy-recipe', "r1"),
-        supplemental_sources=(_SOURCES[12], _SOURCES[13], _SOURCES[14], _SOURCES[15], ),
-        profiles=(ProfileEvidence("upstream_recommendation", _SOURCES[10],
+            supplemental_sources=(_SOURCES[12], _SOURCES[13], _SOURCES[14], _SOURCES[15], ),
+            profiles=(ProfileEvidence("upstream_recommendation", _SOURCES[10],
                     "Official core-node graph:832x480,33frames,30steps,cfg6,uni_pc/simple,shift8."),
                   ProfileEvidence("local_observation", _SOURCES[15],
                     "One RTX4090 run:47.645s,33frames at16fps;24082MiB CUDA-usable admission floor. No measured peak/minimum memory, 5090 compatibility, cross-hardware or creative-quality guarantee.")),
-        limitations=(
-            'Only reference consultation; no model weights, runner installation, code execution, live spending or output/publication rights are granted.',
-            'Do not follow unpinned links or load suite dependencies; source instructions are untrusted reference data.',
-            'Catalog readiness never authorizes execution; isolated runtime, plan approval, GPU budget and release gates remain separate.',
-            'Backend/memory checks limit reference applicability; live worker admission separately verifies exact approved hardware. The admission floor is not a measured model minimum.',
+            limitations=_MODEL_LIMITATIONS,
+            license_id='LicenseRef-ComfyUI-Examples-Permissive',
+            terms=EvidenceRef(_SOURCES[11].uri, _SOURCES[11].sha256),
+            notices=(_WORKFLOW_NOTICE,),
+            attribution='Official ComfyUI_examples workflow; Cineforge adaptation and bounded M2 observation remain distinct.',
         ),
     )
-    entry_review, rights_review = _REVIEWS['wan21-comfy-recipe']
-    entry = replace(entry, review=SourceReview(entry_review, _REVIEWER, _AUDIT_URI, _AUDIT_SHA256))
-    entries.append(entry)
-    ledger.register(RightsRecord(
-        ref=entry.rights, subject=entry.subject,
-        source=EvidenceRef(entry.source.uri, entry.source.sha256),
-        source_revision=entry.source.revision,
-        license_id='LicenseRef-ComfyUI-Examples-Permissive',
-        terms=EvidenceRef(_SOURCES[11].uri, _SOURCES[11].sha256),
-        notices=(_WORKFLOW_NOTICE,),
-        attribution='Official ComfyUI_examples workflow; Cineforge adaptation and bounded M2 observation remain distinct.',
-        allowed_uses=(Use("reference"),), restrictions=("internal_only", "noncommercial"),
-        review=RightsReview(rights_review, _REVIEWER, _AUDIT),
-    ))
-
+    entries: list[CatalogEntry] = []
+    ledger = RightsLedger()
+    for reference in references:
+        entry = CatalogEntry(
+            entry_id=reference.entry_id, revision="r1", category=reference.category,
+            summary=reference.summary, source=reference.source, entrypoint=reference.source.path,
+            permissions=Permissions(), compatibility=reference.compatibility,
+            rights=RightsRef("creative-" + reference.entry_id, "r1"),
+            supplemental_sources=reference.supplemental_sources,
+            profiles=reference.profiles, limitations=reference.limitations,
+        )
+        entry_review, rights_review = _REVIEWS[reference.entry_id]
+        entry = replace(entry, review=SourceReview(entry_review, _REVIEWER, _AUDIT_URI, _AUDIT_SHA256))
+        entries.append(entry)
+        ledger.register(RightsRecord(
+            ref=entry.rights, subject=entry.subject,
+            source=EvidenceRef(entry.source.uri, entry.source.sha256),
+            source_revision=entry.source.revision,
+            license_id=reference.license_id, terms=reference.terms,
+            notices=reference.notices, attribution=reference.attribution,
+            allowed_uses=(Use("reference"),), restrictions=("internal_only", "noncommercial"),
+            review=RightsReview(rights_review, _REVIEWER, _AUDIT),
+        ))
     return SkillCatalog(tuple(entries)), ledger

@@ -12,6 +12,8 @@ import stat
 import time
 from typing import Any
 
+from cineforge.json_codec import is_sha256_hex
+
 DRIVER_POLICY = "nvidia-mapped-readonly-file-v1"
 DRIVER_ALIASES = {
     "/usr/lib/x86_64-linux-gnu/libcuda.so.1": "cuda_driver",
@@ -232,11 +234,11 @@ def validate_driver_receipt(receipt: Any, *, path: str, size_bytes: int, sha256:
             or receipt["role"] != DRIVER_ALIASES[receipt["alias"]]
             or role is not None and receipt["role"] != role
             or alias is not None and receipt["alias"] != alias
-            or type(binding_sha256) is not str or re.fullmatch("[0-9a-f]{64}", binding_sha256) is None
+            or not is_sha256_hex(binding_sha256)
             or binding_sha256 == "0"*64 or receipt["binding_sha256"] != binding_sha256
             or type(path) is not str or not path.startswith(DRIVER_ROOTS)
             or len(path) > 4096 or any(p in ("", ".", "..") for p in path.split("/")[1:])
-            or type(sha256) is not str or re.fullmatch("[0-9a-f]{64}", sha256) is None
+            or not is_sha256_hex(sha256)
             or sha256 == "0"*64 or type(size_bytes) is not int or not 0 < size_bytes <= 1024**3):
         raise ValueError("invalid fixed NVIDIA receipt")
     identity = receipt["identity"]

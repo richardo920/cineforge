@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import json
 import os
 import re
 import stat
@@ -15,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from cineforge.interruptions import preserve_interruption, remember_interruption
+from cineforge.json_codec import is_sha256_hex, strict_loads
 from cineforge.paired_media import PNG_MAX_BYTES, SPEECH_MAX_BYTES, image_metadata, speech_metadata
 from cineforge.worker_bootstrap import BootstrapError, encode, private_write
 
@@ -23,7 +23,7 @@ MAX_PAIRS = 4
 
 
 def _sha(value: Any) -> None:
-    if type(value) is not str or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+    if not is_sha256_hex(value):
         raise ValueError
 
 
@@ -99,15 +99,7 @@ def _input_directory(root: Path) -> int:
 
 
 def _pair_json(raw: bytes) -> dict[str, Any]:
-    def unique(items: list[tuple[str, Any]]) -> dict[str, Any]:
-        result: dict[str, Any] = {}
-        for key, value in items:
-            if key in result:
-                raise ValueError
-            result[key] = value
-        return result
-    value = json.loads(raw, object_pairs_hook=unique,
-                       parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
+    value = strict_loads(raw)
     if not isinstance(value, dict):
         raise ValueError
     return value

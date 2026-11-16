@@ -1,5 +1,6 @@
 """Offline source provenance, review and immutable shot binding acceptance."""
 
+import hashlib
 import json
 import traceback
 import unittest
@@ -8,6 +9,7 @@ from unittest.mock import patch
 
 from cineforge.contracts import ContractError, Shot
 from cineforge.devices import Backend, GPUDevice, Precision
+from cineforge.json_codec import canonical_json
 from cineforge.rights import EvidenceRef, RightsLedger, RightsRecord, RightsRef, Use, with_review
 from cineforge.skills import (
     CatalogEntry,
@@ -249,6 +251,35 @@ class ReadinessTests(unittest.TestCase):
 
 
 class CuratedTests(unittest.TestCase):
+    def test_curated_full_catalog_and_ledger_match_pre_refactor_bytes(self) -> None:
+        from cineforge.curated_skills import curated_references
+
+        catalog, ledger = curated_references()
+        entries = [catalog.lookup(pin) for pin in catalog.pins]
+        value = {
+            "entries": [entry.to_dict() for entry in entries],
+            "rights": [ledger.lookup(entry.rights).to_dict() for entry in entries],
+            "active": [ledger.active_ref(entry.subject).to_dict() for entry in entries],
+            "revocations": [ledger.revocation(entry.rights) for entry in entries],
+        }
+        raw = canonical_json(value).encode("utf-8")
+        self.assertEqual(len(raw), 25984)
+        self.assertEqual(hashlib.sha256(raw).hexdigest(),
+                         "3d59cf1f4b330ab22365ad34cc1db401af2b2614bd99a42e2d33d0df6558b48f")  # pragma: allowlist secret - public curated metadata pin
+
+    def test_curated_loads_keep_independent_revocable_ledgers(self) -> None:
+        from cineforge.curated_skills import curated_references
+
+        catalog, ledger = curated_references()
+        other_catalog, other_ledger = curated_references()
+        pin = next(pin for pin in catalog.pins if pin.entry_id == "write-screenplay")
+        entry = catalog.lookup(pin)
+        ledger.revoke(entry.rights, reason="synthetic revocation")
+        self.assertFalse(catalog.reference_readiness(pin, shot=shot(), ledger=ledger).ready)
+        self.assertTrue(other_catalog.reference_readiness(
+            pin, shot=shot(), ledger=other_ledger).ready)
+        self.assertEqual(catalog.pins, other_catalog.pins)
+
     def test_curated_references_have_traceable_restricted_reference_rights(self) -> None:
         from cineforge.curated_skills import curated_references
 

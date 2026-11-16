@@ -23,7 +23,7 @@ from cineforge import worker_bootstrap as bootstrap
 from cineforge.comfy_runtime import ClosedComfyRuntime
 from cineforge.runpod import RunpodPodSpec
 from cineforge.s2v import S2VError, digest, select_s2v
-from cineforge.s2v_stage import paired_transfer
+from cineforge.s2v_stage import _pair_json, paired_transfer
 from cineforge.skills import bind_shot
 from cineforge.ssh_worker import SSHWorker, WorkerError
 from cineforge.worker_guard import WorkerGuardPlan
@@ -38,6 +38,20 @@ def reapprove(gate, **changes):
         if digest(subject) != approved:
             raise RuntimeError("CANARY stale authorization")
     return replace(gate, authorize=authorize)
+
+
+class PairJsonTests(unittest.TestCase):
+    def test_pair_json_rejects_duplicate_keys_at_every_depth(self):
+        for raw in (b'{"x":1,"x":2}', b'{"outer":{"x":1,"x":2}}'):
+            with self.subTest(raw=raw), self.assertRaises(ValueError):
+                _pair_json(raw)
+
+    def test_pair_json_rejects_nonfinite_constants_and_keeps_object_root_policy(self):
+        for raw in (b'{"x":NaN}', b'{"x":Infinity}', b'{"x":-Infinity}', b'[]', b'null'):
+            with self.subTest(raw=raw), self.assertRaises(ValueError):
+                _pair_json(raw)
+        self.assertEqual(_pair_json(b'{"items":[1,{"x":2}],"status":"receiving"}'),
+                         {"items": [1, {"x": 2}], "status": "receiving"})
 
 
 class PairTransferTests(unittest.TestCase):
@@ -157,6 +171,26 @@ class PairTransferTests(unittest.TestCase):
         self.static_failure(lambda: self.driver.prepare(self.selection, runtime=runtime))
         self.assertIsNone(self.driver.s2v_verification)
         self.assertTrue(self.driver._s2v_setup_attempted)
+
+    def corrupt_pair_state(self, raw):
+        def corrupt(request):
+            if request["operation"] == "s2v_pair_chunk":
+                record, = self.remote.glob("s2v-*.json")
+                record.write_bytes(raw)
+        self.fault = corrupt
+        with self.assertRaises(WorkerError) as caught:
+            self.driver.stage_s2v(self.selection)
+        self.assertEqual(str(caught.exception),
+                         "private paired transfer incomplete or unconfirmed; never replay")
+        self.assertIsNone(caught.exception.__context__)
+        self.assertIsNone(caught.exception.__cause__)
+        self.assertFalse(tuple((self.remote / "ComfyUI/input").iterdir()))
+
+    def test_duplicate_pair_state_keeps_static_failure_without_publication(self):
+        self.corrupt_pair_state(b'{"CANARY":1,"CANARY":2}')
+
+    def test_nonfinite_pair_state_keeps_static_failure_without_publication(self):
+        self.corrupt_pair_state(b'{"CANARY":NaN}')
 
     def test_complete_pair_exact_bytes_metadata_and_consumed_repeated_request(self):
         proof = self.driver.stage_s2v(self.selection)
