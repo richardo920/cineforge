@@ -16,12 +16,15 @@ permissions:
   contents: read
 # Serialize privileged status writes; each run resolves fresh refs and comments.
 concurrency:
-  group: cineforge-agent-evidence
+  group: cineforge-agent-evidence-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number || 'main' }}
   cancel-in-progress: false
 jobs:
   evidence:
     name: Verify trusted agent evidence
-    if: github.ref == 'refs/heads/main' && (github.event_name != 'issue_comment' || github.event.issue.pull_request)
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      (github.event_name != 'issue_comment' || github.event.issue.pull_request) &&
+      (github.event_name != 'issue_comment' || contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))
     runs-on: ubuntu-latest
     timeout-minutes: 5
     # Configure this environment with a main-only deployment branch policy.

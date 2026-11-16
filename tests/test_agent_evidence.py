@@ -292,7 +292,59 @@ class FakeAPI:
         self.statuses.append((head, state, description))
 
 
+def workflow_job_runs(event_name, event, ref="refs/heads/main"):
+    # Mirrors the YAML job expression; string assertions below bind it to the workflow.
+    return ref == "refs/heads/main" and (
+        event_name != "issue_comment" or (
+            bool(event.get("issue", {}).get("pull_request"))
+            and event.get("comment", {}).get("author_association")
+            in ("OWNER", "MEMBER", "COLLABORATOR")
+        )
+    )
+
+
 class WorkflowTests(unittest.TestCase):
+    def test_privileged_workflow_concurrency_is_per_pr_with_main_fallback(self):
+        workflow = (SCRIPT.parents[1] / ".github/workflows/agent-evidence.yml").read_text()
+        self.assertIn(
+            "group: cineforge-agent-evidence-${{ github.event.pull_request.number || "
+            "github.event.issue.number || inputs.pr_number || 'main' }}", workflow,
+        )
+        self.assertNotIn("group: cineforge-agent-evidence", map(str.strip, workflow.splitlines()))
+        self.assertIn("cancel-in-progress: false", workflow)
+        self.assertIn("  push:\n    branches: [main]\n", workflow)
+
+    def test_privileged_workflow_job_guard_requires_trusted_pr_commenter(self):
+        workflow = (SCRIPT.parents[1] / ".github/workflows/agent-evidence.yml").read_text()
+        job_if = " ".join(workflow.split("    if:", 1)[1].split("    runs-on:", 1)[0].split())
+        self.assertEqual(
+            job_if,
+            ">- github.ref == 'refs/heads/main' && "
+            "(github.event_name != 'issue_comment' || github.event.issue.pull_request) && "
+            "(github.event_name != 'issue_comment' || "
+            "contains(fromJSON('[\"OWNER\", \"MEMBER\", \"COLLABORATOR\"]'), "
+            "github.event.comment.author_association))",
+        )
+
+    def test_privileged_workflow_job_guard_event_payloads(self):
+        associations = ("NONE", "CONTRIBUTOR", "FIRST_TIMER", "FIRST_TIME_CONTRIBUTOR",
+                        "OWNER", "MEMBER", "COLLABORATOR")
+        for association in associations:
+            event = {
+                "issue": {"number": 12, "pull_request": {"url": PR_URL}},
+                "comment": {"author_association": association},
+            }
+            with self.subTest(event="issue_comment", association=association):
+                self.assertEqual(workflow_job_runs("issue_comment", event),
+                                 association in ("OWNER", "MEMBER", "COLLABORATOR"))
+            with self.subTest(event="pull_request_target", association=association):
+                self.assertTrue(workflow_job_runs("pull_request_target", event))
+        self.assertFalse(workflow_job_runs("issue_comment", {
+            "issue": {"number": 12}, "comment": {"author_association": "OWNER"},
+        }))
+        self.assertTrue(workflow_job_runs("pull_request_target", {"number": 12}))
+        self.assertFalse(workflow_job_runs("pull_request_target", {}, ref="refs/heads/other"))
+
     def test_publish_only_after_current_context_validation(self):
         bundle = evidence.sign_payload(payload(), KEY)
         api = FakeAPI(bundle)
