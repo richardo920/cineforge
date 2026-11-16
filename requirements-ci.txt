@@ -6,3 +6,4 @@ pip-audit==2.9.0
 ruff==0.14.3
 setuptools==84.2.1
 wheel==0.48.0
+# RF-07 A2 live verification only — throwaway; triggers the watched-file gate without changing any pin.
