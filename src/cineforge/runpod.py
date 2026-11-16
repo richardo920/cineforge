@@ -396,6 +396,8 @@ class RunpodPodProvisioner:
 
     def _get(self, lease: _Lease, deadline: float, *,
              cleanup: bool = False) -> dict[str, Any] | None:
+        if cleanup:
+            deadline = self._cleanup_request_deadline(deadline)
         reply = self._call("GET", "/v2/pods/" + str(lease.snapshot.resource_id), deadline)
         if reply.status == 404:
             return None
@@ -412,6 +414,11 @@ class RunpodPodProvisioner:
             raise ProvisioningError("cloud provisioner does not own this resource")
         return self._leases[self._ids[identity]]
 
+    def _cleanup_request_deadline(self, deadline: float) -> float:
+        # Reserve time for retries and fresh absence checks within the same budget.
+        now = self._clock()
+        return now + (deadline - now) / 4
+
     def _clean(self, lease: _Lease) -> None:
         deadline = self._clock() + self._cleanup
         lease.snapshot = replace(lease.snapshot, state="cleanup_pending")
@@ -420,20 +427,33 @@ class RunpodPodProvisioner:
             self._emit(lease)
         except ProvisioningError:
             pass
-        pod = self._get(lease, deadline, cleanup=True)
-        if pod is not None:
-            # Status/action hints are not deletion evidence or permission to own a
-            # foreign resource. Attempt DELETE for an exact owned identity, then
-            # require fresh absence even when the provider reports TERMINATED.
+        retry_interval = max(1.0, self._interval)
+        next_delete = self._clock()
+        # Initial ownership read followed by at most _max_polls confirmation reads.
+        for poll in range(self._max_polls + 1):
+            if self._clock() >= deadline:
+                break
             try:
-                self._call("DELETE", "/v2/pods/" + str(lease.snapshot.resource_id), deadline)
+                pod = self._get(lease, deadline, cleanup=True)
             except ProvisioningError:
-                pass  # A lost acknowledgement is reconciled by a fresh owned-ID GET.
-        for _ in range(self._max_polls):
-            if self._get(lease, deadline, cleanup=True) is None:
-                self._emit(lease, state="released")
-                return
-            self._sleep(min(self._interval, max(0, deadline - self._clock())))
+                pass  # Retry inspection; never DELETE without fresh ownership proof.
+            else:
+                if pod is None:
+                    self._emit(lease, state="released")
+                    return
+                if poll < self._max_polls and self._clock() >= next_delete:
+                    # Status/action hints cannot confirm deletion. Only target the
+                    # exact owned ID, including when a previous DELETE never arrived.
+                    try:
+                        self._call("DELETE", "/v2/pods/" + str(lease.snapshot.resource_id),
+                                   self._cleanup_request_deadline(deadline))
+                    except ProvisioningError:
+                        pass
+                    next_delete = self._clock() + retry_interval
+            if poll == self._max_polls:
+                break
+            if poll > 0:
+                self._sleep(min(self._interval, max(0, deadline - self._clock())))
         raise ProvisioningError("owned worker release was not confirmed", lease.snapshot)
 
     def release(self, device_id: str) -> None:
