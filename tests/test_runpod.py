@@ -6,6 +6,7 @@ import math
 import traceback
 import unittest
 from dataclasses import replace
+from unittest.mock import patch
 
 from cineforge.devices import Backend, GPUDevice, ModelSpec, Precision
 from cineforge.provisioning import Provisioner
@@ -477,11 +478,11 @@ class RunpodLifecycleTests(unittest.TestCase):
         with self.assertRaises(CleanupUncertainError):
             p.release("pod_1")
         self.assertEqual(p.snapshots[0].state, "cleanup_uncertain")
-        self.assertEqual(sum(c[0] == "DELETE" for c in self.cloud.calls), 1)
+        self.assertEqual(sum(c[0] == "DELETE" for c in self.cloud.calls), 2)
         self.cloud.delete_effect = True
         p.release("pod_1")
         self.assertEqual(p.snapshots[0].state, "released")
-        self.assertEqual(sum(c[0] == "DELETE" for c in self.cloud.calls), 2)
+        self.assertEqual(sum(c[0] == "DELETE" for c in self.cloud.calls), 3)
         self.assertEqual(self.cloud.calls[-1][:2], ("GET", "/v2/pods/pod_1"))
 
     def test_unowned_identity_never_reaches_transport(self):
@@ -498,6 +499,107 @@ class RunpodLifecycleTests(unittest.TestCase):
         self.cloud.delete_lost = True
         p.release("pod_1")
         self.assertEqual(p.snapshots[0].state, "released")
+
+    def test_delete_that_never_arrives_is_retried_and_confirmed(self):
+        p = self.provider(cleanup_timeout_seconds=5, max_polls=10,
+                          poll_interval_seconds=.25)
+        self.acquire(p)
+        request = self.cloud.request
+        deletes = []
+
+        def lose_first(method, path, *args, **kwargs):
+            if method == "DELETE":
+                deletes.append((self.clock(), path))
+                if len(deletes) == 1:
+                    raise ConnectionError("synthetic connection reset before delivery")
+            return request(method, path, *args, **kwargs)
+
+        with patch.object(self.cloud, "request", side_effect=lose_first):
+            p.release("pod_1")
+        self.assertEqual(deletes, [(0, "/v2/pods/pod_1"), (1, "/v2/pods/pod_1")])
+        self.assertFalse(self.cloud.pods)
+        self.assertEqual(self.events[-1][1].state, "released")
+        self.assertEqual(self.cloud.calls[-1][:2], ("GET", "/v2/pods/pod_1"))
+
+    def test_slow_cleanup_requests_reserve_time_for_recovery(self):
+        for slow_method in ("GET", "DELETE"):
+            with self.subTest(method=slow_method):
+                self.setUp()
+                p = self.provider(request_timeout_seconds=30, cleanup_timeout_seconds=20,
+                                  max_polls=30)
+                self.acquire(p)
+                request = self.cloud.request
+                attempts = []
+                delayed = False
+
+                def slow_once(method, path, *args, **kwargs):
+                    nonlocal delayed
+                    timeout = kwargs["timeout_seconds"]
+                    attempts.append((method, self.clock(), timeout))
+                    if method == slow_method and not delayed:
+                        delayed = True
+                        self.clock.sleep(timeout)
+                        raise TimeoutError("synthetic request used its entire allowance")
+                    return request(method, path, *args, **kwargs)
+
+                with patch.object(self.cloud, "request", side_effect=slow_once):
+                    p.release("pod_1")
+                self.assertTrue(delayed)
+                self.assertLess(self.clock(), 20)
+                self.assertEqual(p.snapshots[0].state, "released")
+                self.assertGreater(sum(method == slow_method for method, _, _ in attempts), 1)
+                for _, started, timeout in attempts:
+                    self.assertGreater(timeout, 0)
+                    self.assertLessEqual(timeout, (20 - started) / 4)
+
+    def test_cleanup_delete_retries_are_rate_limited_and_deadline_bounded(self):
+        for interval, max_polls, cleanup in ((.1, 100, 3.5), (0, 20, 3.5), (2, 10, 7)):
+            with self.subTest(interval=interval):
+                self.setUp()
+                p = self.provider(poll_interval_seconds=interval, max_polls=max_polls,
+                                  cleanup_timeout_seconds=cleanup)
+                self.acquire(p)
+                self.cloud.delete_effect = False
+                request = self.cloud.request
+                deletes, gets = [], []
+
+                def track(method, path, *args, **kwargs):
+                    (deletes if method == "DELETE" else gets).append(self.clock())
+                    return request(method, path, *args, **kwargs)
+
+                with patch.object(self.cloud, "request", side_effect=track):
+                    with self.assertRaisesRegex(
+                            ProvisioningError, "^owned worker release was not confirmed$"):
+                        p._clean(p._leases["first"])
+                self.assertLessEqual(self.clock(), cleanup)
+                self.assertLessEqual(len(gets), max_polls + 1)
+                self.assertTrue(deletes)
+                self.assertTrue(all(b - a >= max(1, interval)
+                                    for a, b in zip(deletes, deletes[1:])))
+                if interval < 1:
+                    self.assertLess(len(deletes), len(gets))
+                if interval == 0:
+                    self.assertEqual(len(deletes), 1)
+
+    def test_cleanup_rechecks_ownership_before_every_delete_retry(self):
+        p = self.provider()
+        self.acquire(p)
+        self.cloud.delete_effect = False
+        self.cloud.get_change = lambda pod: (
+            pod if self.clock() == 0 else {**pod, "name": "foreign"})
+        with self.assertRaises(CleanupUncertainError):
+            p.release("pod_1")
+        self.assertEqual(sum(c[0] == "DELETE" for c in self.cloud.calls), 1)
+        self.assertIn("pod_1", self.cloud.pods)
+
+    def test_noncleanup_request_timeouts_are_unchanged(self):
+        p = self.provider(request_timeout_seconds=30, startup_timeout_seconds=40)
+        self.acquire(p)
+        self.assertTrue(all(timeout == 30 for timeout, _ in self.cloud.bounds))
+        self.cloud.bounds.clear()
+        p.inspect_lease("pod_1")
+        p.inspect("pod_1")
+        self.assertTrue(all(timeout == 30 for timeout, _ in self.cloud.bounds))
 
     def test_unconfirmed_cleanup_retains_owned_id_and_can_be_reconciled_later(self):
         p = self.provider()
