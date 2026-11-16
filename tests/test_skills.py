@@ -123,11 +123,11 @@ class PrivacyTests(unittest.TestCase):
         for record in records:
             for value in (self.marker, {"value": self.marker}, [self.marker], True, None, 2):
                 with self.subTest(kind=type(record).__name__, schema_type=type(value).__name__):
-                    self.assert_private_error(lambda: replace(record, schema_version=value))
+                    self.assert_private_error(lambda *, record=record, value=value: replace(record, schema_version=value))
                     data = record.to_dict()
                     data["schema_version"] = value
-                    self.assert_private_error(lambda: type(record).from_dict(data))
-                    self.assert_private_error(lambda: type(record).from_json(json.dumps(data)))
+                    self.assert_private_error(lambda *, data=data, record=record: type(record).from_dict(data))
+                    self.assert_private_error(lambda *, data=data, record=record: type(record).from_json(json.dumps(data)))
 
     def test_nested_record_and_parser_errors_hide_input_and_chained_errors(self) -> None:
         entry = reviewed_entry()
@@ -135,15 +135,15 @@ class PrivacyTests(unittest.TestCase):
             data = entry.to_dict()
             data[name]["schema_version"] = self.marker
             with self.subTest(nested=name):
-                self.assert_private_error(lambda: CatalogEntry.from_dict(data))
-                self.assert_private_error(lambda: CatalogEntry.from_json(json.dumps(data)))
+                self.assert_private_error(lambda *, data=data: CatalogEntry.from_dict(data))
+                self.assert_private_error(lambda *, data=data: CatalogEntry.from_json(json.dumps(data)))
         data = bind_shot(shot(), (entry.pin,)).to_dict()
         data["skills"][0]["schema_version"] = self.marker
         self.assert_private_error(lambda: ShotSkills.from_json(json.dumps(data)))
         for raw in ('{"' + self.marker + '":1,"' + self.marker + '":2}',
                     '{"schema_version":"' + self.marker + '"',
                     '{"schema_version":NaN,"source":"' + self.marker + '"}'):
-            self.assert_private_error(lambda: SourcePin.from_json(raw))
+            self.assert_private_error(lambda *, raw=raw: SourcePin.from_json(raw))
 
     def test_direct_field_validation_does_not_leak_parser_or_unicode_context(self) -> None:
         source = reviewed_entry().source

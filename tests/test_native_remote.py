@@ -351,10 +351,10 @@ class RemoteTests(RemoteFixture):
                                           data=base64.b64encode(data).decode())
                         case.bridge._call("native_chunk", **common, offset=NR_CHUNK,
                                           data=base64.b64encode(b"y").decode())
-                        case.static_failure(lambda: case.bridge._call("native_finish", **common))
+                        case.static_failure(lambda *, case=case, common=common: case.bridge._call("native_finish", **common))
                     else:
                         payload = data+b"x" if fault == "oversize" else data
-                        case.static_failure(lambda: case.bridge._call("native_chunk", **common,
+                        case.static_failure(lambda *, case=case, common=common, fault=fault, payload=payload: case.bridge._call("native_chunk", **common,
                             offset=0 if fault == "oversize" else NR_CHUNK,
                             data=base64.b64encode(payload).decode()))
                     self.assertTrue(case.bridge._unresolved)
@@ -385,11 +385,11 @@ class RemoteTests(RemoteFixture):
                         case.bridge.select(case.selected)
                     case.lost = operation
                     action = (
-                        (lambda: case.bridge.preview(case.design))
+                        (lambda *, case=case: case.bridge.preview(case.design))
                         if operation == "native_invoke"
-                        else (lambda: case.bridge.select(case.selected))
+                        else (lambda *, case=case: case.bridge.select(case.selected))
                         if operation == "native_select"
-                        else (lambda: case.bridge.stage(recipe(), b"x"))
+                        else (lambda *, case=case: case.bridge.stage(recipe(), b"x"))
                     )
                     case.static_failure(action)
                     calls = len(case.requests)
@@ -554,7 +554,7 @@ class RemoteTests(RemoteFixture):
                 case.setUp()
                 try:
 
-                    def tamper(request, reply):
+                    def tamper(request, reply, *, fault=fault):
                         reply = copy.deepcopy(reply)
                         if request["operation"] == "native_setup":
                             if fault == "oversize":
@@ -571,7 +571,7 @@ class RemoteTests(RemoteFixture):
                         return reply
 
                     case.mutate = tamper
-                    case.static_failure(lambda: case.bridge.stage(recipe(), b"x"))
+                    case.static_failure(lambda *, case=case: case.bridge.stage(recipe(), b"x"))
                     self.assertTrue(case.bridge._unresolved)
                     self.assertEqual(case.bridge._proofs, {})
                     self.assertEqual(case.child_count, 0)
@@ -950,7 +950,7 @@ assert not any(n.startswith(('qwen_tts','torch','numpy','transformers')) for n i
                 target.mkdir(mode=0o700)
                 manifest = {}
 
-                def call():
+                def call(*, archive=archive, manifest=manifest, target=target):
                     remote._install_wheel(
                         archive,
                         target,

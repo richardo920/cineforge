@@ -137,7 +137,7 @@ class StorageTests(unittest.TestCase):
                 original = provider.status
                 calls = 0
 
-                def status(job_id):
+                def status(job_id, *, failure=failure, original=original):
                     nonlocal calls
                     calls += 1
                     if calls == 2:

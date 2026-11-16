@@ -97,7 +97,7 @@ class FixedFileMeasurementTests(unittest.TestCase):
             self.body.write_bytes(b"original synthetic body")
             changed = False
 
-            def mutate(fd, count):
+            def mutate(fd, count, *, alias_change=alias_change):
                 nonlocal changed
                 result = read(fd, count)
                 if result and not changed:
@@ -352,7 +352,7 @@ class CapabilityChannelTests(RemoteFixture):
     def test_invalid_deadlines_make_no_rpc_or_measurement(self):
         for cap in (False, float("nan"), float("inf"), "later", time.monotonic() - 1):
             with self.subTest(cap=cap):
-                self.static_failure(lambda: self.bridge.measure_capabilities(absolute_deadline=cap))
+                self.static_failure(lambda *, cap=cap: self.bridge.measure_capabilities(absolute_deadline=cap))
         self.assertEqual(self.requests, [])
         self.assertEqual(self.measurements, 0)
 
@@ -418,7 +418,7 @@ class CapabilityChannelTests(RemoteFixture):
             with self.subTest(index=index):
                 self.remote = self.root / f"remote-invalid-{index}"
                 self.bridge = RemoteNativeSpeechRuntime(self.worker, allow_native=True)
-                self.mutate = lambda request, result: (mutate(result) or result)
+                self.mutate = lambda request, result, *, mutate=mutate: (mutate(result) or result)
                 self.static_failure(self.bridge.measure_capabilities)
                 self.assertTrue(self.bridge._unresolved)
                 self.assertFalse((self.remote / "package.blob").exists())

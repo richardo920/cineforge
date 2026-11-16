@@ -320,7 +320,7 @@ class WorkflowTests(unittest.TestCase):
             original = api.pages
             calls = 0
 
-            def moving_comments(path):
+            def moving_comments(path, api=api, mode=mode, original=original):
                 nonlocal calls
                 calls += 1
                 comments = original(path)

@@ -335,7 +335,7 @@ class SpeechTests(unittest.TestCase):
 
     def test_runtime_cancellation_and_system_exit_do_not_expose_private_arguments(self):
         for exception in (KeyboardInterrupt, SystemExit):
-            def fail():
+            def fail(*, exception=exception):
                 raise exception("PRIVATE-RUNTIME-CANARY")
             self.runtime.action = fail
             try:

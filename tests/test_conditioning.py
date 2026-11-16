@@ -341,7 +341,7 @@ class AdmissionTests(Fixture):
         self.assertFalse(proposal["readiness"]["live_ready"])
         self.assertNotIn("approval", proposal)
         actual = [{k: value[k] for k in expected} for value, expected in
-                  zip(proposal["model"]["files"], profile.model_files())]
+                  zip(proposal["model"]["files"], profile.model_files(), strict=True)]
         self.assertEqual(actual, profile.model_files())
         self.assertEqual((root / "config/comfy/WAN22-WORKFLOW-LICENSE").read_bytes(),
                          profile.WORKFLOW_LICENSE)

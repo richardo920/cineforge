@@ -174,7 +174,7 @@ class BundleTests(unittest.TestCase):
                                ("json_codec.py", "interruptions.py", "audio_pcm.py", "paired_media.py", "s2v_stage.py", "native_speech_pins.py",
                                 "native_driver.py", "native_remote_plan.py", "native_remote_bootstrap.py")}}
                 with patch("cineforge.worker_bundle.read_private_input",
-                           side_effect=lambda path, **kw: fixtures[path.name]):
+                           side_effect=lambda path, *, fixtures=fixtures, **kw: fixtures[path.name]):
                     with self.assertRaisesRegex(WorkerBundleError, "fixed reviewed worker"):
                         worker_source()
         with patch("cineforge.worker_bundle.read_private_input", side_effect=OSError("private-path")):

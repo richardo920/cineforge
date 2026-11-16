@@ -63,7 +63,7 @@ class ComfyPreparationTests(unittest.TestCase):
                 self.output = self.root / str(index)
                 calls = 0
 
-                def translate(template, request):
+                def translate(template, request, *, failure=failure):
                     nonlocal calls
                     calls += 1
                     if calls == 2:
@@ -107,23 +107,22 @@ class ComfyPreparationTests(unittest.TestCase):
         for index, invalid in enumerate((float("nan"), type(CANARY, (), {})())):
             with self.subTest(index=index):
                 self.output = self.root / str(index)
-                calls = 0
+                calls = [0]
 
-                def translate(template, request):
-                    nonlocal calls
-                    calls += 1
+                def translate(template, request, *, calls=calls):
+                    calls[0] += 1
                     return original(template, request)
 
-                def declaration(selection):
+                def declaration(selection, *, calls=calls, invalid=invalid):
                     data = declarations(selection)
-                    if calls >= 2:
+                    if calls[0] >= 2:
                         data["approval"]["spend_limit_usd"] = invalid
                     return data
 
                 with patch.object(WorkflowTemplate, "translate", translate), \
                         patch.object(ApprovedComfySelection, "declarations", property(declaration)):
                     self.assert_preflight_rejected()
-                self.assertEqual(calls, 2)
+                self.assertEqual(calls[0], 2)
 
     def test_real_reference_revocation_is_rechecked_at_third_translation(self):
         gate, records, _, _ = context(self.root)

@@ -608,7 +608,8 @@ class BudgetTests(unittest.TestCase):
                 release_claim = threading.Event()
                 errors, acquired, cleaned, refused_arming = [], [], [], []
                 with self.session() as session:
-                    def probe(snapshot, timeout):
+                    def probe(snapshot, timeout, *, probe_entered=probe_entered,
+                            refused_arming=refused_arming, resume_probe=resume_probe):
                         probe_entered.set()
                         if not resume_probe.wait(3):
                             raise AssertionError("probe was not resumed")
@@ -622,19 +623,21 @@ class BudgetTests(unittest.TestCase):
                         raise AssertionError("cleanup decision must deny new worker admission")
                     provider = self.provider(session, probe=probe, startup_timeout_seconds=300)
                     original_release = session._release
-                    def paused_release(*args):
+                    def paused_release(*args, cleanup_claimed=cleanup_claimed,
+                            original_release=original_release, release_claim=release_claim):
                         cleanup_claimed.set()
                         if not release_claim.wait(3):
                             raise AssertionError("cleanup was not resumed")
                         return original_release(*args)
-                    def acquire():
+                    def acquire(*, acquired=acquired, errors=errors, provider=provider):
                         try:
                             self.acquire(provider)
                         except ProvisioningError:
                             acquired.append("denied")
                         except BaseException as error:
                             errors.append(error)
-                    def cleanup():
+                    def cleanup(*, cleaned=cleaned, errors=errors, operation=operation,
+                            provider=provider):
                         try:
                             cleaned.append(getattr(session, operation)(provider))
                         except BaseException as error:
@@ -650,7 +653,7 @@ class BudgetTests(unittest.TestCase):
                             self.assertTrue(cleanup_claimed.wait(3))
                             # Keep even a future lock regression bounded: query on a daemon.
                             duplicate_results = []
-                            def duplicate_cleanup():
+                            def duplicate_cleanup(*, duplicate_results=duplicate_results, provider=provider):
                                 heartbeat_refused = False
                                 try:
                                     session.heartbeat("first")

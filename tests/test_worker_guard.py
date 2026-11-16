@@ -94,13 +94,13 @@ class GuardTests(unittest.TestCase):
             raise ValueError("fixture-sensitive-value")
         self.assertEqual(self.run_fake(heartbeat=invalid)[1]["reason"], "invalid_heartbeat")
         for value in (True, float("nan"), float("inf"), 200.):
-            self.assertEqual(self.run_fake(heartbeat=lambda: value)[1]["reason"],
+            self.assertEqual(self.run_fake(heartbeat=lambda *, value=value: value)[1]["reason"],
                              "invalid_heartbeat")
 
     def test_frozen_wall_monotonic_deadline_and_both_clock_rollbacks(self):
         for mode in ("frozen", "wall_rollback", "mono_rollback"):
             clock = Clock()
-            def sleep(seconds):
+            def sleep(seconds, *, clock=clock, mode=mode):
                 if mode == "frozen":
                     clock.mono += seconds
                 elif mode == "wall_rollback":
@@ -226,7 +226,7 @@ class GuardTests(unittest.TestCase):
             with self.subTest(initial=initial):
                 calls = []
                 reads = 0
-                def request(method, stop=False, timeout_seconds=3):
+                def request(method, stop=False, timeout_seconds=3, *, calls=calls, initial=initial):
                     nonlocal reads
                     calls.append((method, stop, timeout_seconds))
                     if method == "POST":
@@ -243,7 +243,7 @@ class GuardTests(unittest.TestCase):
     def test_already_exited_and_foreign_terminal_stop_without_post(self):
         for foreign in (False, True):
             calls = []
-            def request(method, stop=False, timeout_seconds=3):
+            def request(method, stop=False, timeout_seconds=3, *, calls=calls, foreign=foreign):
                 calls.append(method)
                 return dict(id="fixture-pod", env=dict(CINEFORGE_SESSION="fixture-session",
                     CINEFORGE_LEASE="foreign" if foreign else "0"*32), mounts={},
@@ -273,7 +273,7 @@ class GuardTests(unittest.TestCase):
             with self.subTest(status=status):
                 clock = Clock()
                 calls = []
-                def request(method, stop=False, timeout_seconds=3):
+                def request(method, stop=False, timeout_seconds=3, *, calls=calls, status=status):
                     calls.append((method, timeout_seconds))
                     return dict(id="fixture-pod", env=dict(CINEFORGE_SESSION="fixture-session",
                         CINEFORGE_LEASE="0"*32), mounts={}, status=status, actions=[])

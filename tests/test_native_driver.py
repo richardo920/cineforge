@@ -146,7 +146,7 @@ class DriverMountTests(unittest.TestCase):
         original_read = os.read
         for field in ("st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns"):
             with self.subTest(field=field):
-                def drift(fd, count):
+                def drift(fd, count, *, field=field):
                     data = original_read(fd, count)
                     if data:
                         self.directory_stats[field] += 1

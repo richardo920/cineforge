@@ -706,13 +706,13 @@ class ComfyBoundaryTests(unittest.TestCase):
                 if fault == "lost":
                     fixture.lost = "native_chunk"
 
-                    def action():
+                    def action(*, cutoff=cutoff, fixture=fixture):
                         return fixture.bridge._upload(
                             "comfy", nr_encode(plan()), comfy_expires_unix=cutoff
                         )
                 else:
 
-                    def action():
+                    def action(*, cutoff=cutoff, fault=fault, fixture=fixture):
                         return fixture.bridge._call(
                             "native_begin",
                             role="comfy",

@@ -163,7 +163,7 @@ class AudioAnalysisTests(unittest.TestCase):
     def test_cleanup_uncertainty_stays_explicit_in_unavailable_analysis(self) -> None:
         for failed_stage in ("identify", "measure"):
             class UncertainTool(FakeTool):
-                def identify(self, **limits):
+                def identify(self, *, failed_stage=failed_stage, **limits):
                     if failed_stage == "identify":
                         raise AudioProcessError("audio process cleanup incomplete or unconfirmed",
                                                 cleanup_uncertain=True)
@@ -431,7 +431,7 @@ class AudioProcessTests(unittest.TestCase):
                          {"stdout"}, {"killpg", "kill", "wait", "selector", "stdin", "stdout"}):
             with self.subTest(failures=failures):
                 calls = []
-                def step(name):
+                def step(name, *, calls=calls, failures=failures):
                     calls.append(name)
                     if name in failures:
                         raise PermissionError("private-cleanup-canary")
@@ -480,7 +480,7 @@ class AudioProcessTests(unittest.TestCase):
         original = subprocess.Popen
         for code, timeout in (("pass", 2), ("import time;time.sleep(5)", .1)):
             spawned = []
-            def launch(*args, **kwargs):
+            def launch(*args, spawned=spawned, **kwargs):
                 process = original(*args, **kwargs)
                 spawned.append(process)
                 return process

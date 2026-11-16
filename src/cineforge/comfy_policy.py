@@ -125,8 +125,8 @@ class ApprovedComfySelection:
             self._links(graph)
             object.__setattr__(self, "selection_json", canonical(selection).decode())
             object.__setattr__(self, "graph_json", canonical(graph).decode())
-            self.workflow  # Validate the complete execution template before any network I/O.
-            self.model
+            _ = self.workflow  # Validate the complete execution template before any network I/O.
+            _ = self.model
         except (KeyError, TypeError, ValueError, AttributeError, RecursionError):
             failed = True
         if failed:

@@ -362,7 +362,7 @@ class ComfyProviderTests(unittest.TestCase):
                     self.mode = "running"
                     self.histories = 0
 
-                def request(server, method, path, body=None, **kwargs):
+                def request(server, method, path, body=None, *, terminal=terminal, **kwargs):
                     if path.endswith("/cancel"):
                         server.calls.append((method, path, body,
                                              kwargs["timeout_seconds"], kwargs["max_bytes"]))
@@ -420,7 +420,7 @@ class ComfyProviderTests(unittest.TestCase):
         for raw in (b'{"cancelled":1}', b'{"cancelled":"true"}', b'{}',
                     b'{"cancelled":true,"unknown":1}', None):
             class BadAckFixture(ServerFixture):
-                def request(server, method, path, body=None, **kwargs):
+                def request(server, method, path, body=None, *, raw=raw, **kwargs):
                     if path.endswith("/cancel"):
                         server.calls.append((method, path, body,
                                              kwargs["timeout_seconds"], kwargs["max_bytes"]))

@@ -60,7 +60,7 @@ def _history_graph_matches(submitted: object, observed: object) -> bool:
                         for key, value in submitted.items()))
     if isinstance(submitted, list) and isinstance(observed, list):
         return (len(submitted) == len(observed)
-                and all(_history_graph_matches(a, b) for a, b in zip(submitted, observed)))
+                and all(_history_graph_matches(a, b) for a, b in zip(submitted, observed, strict=True)))
     return submitted == observed
 
 

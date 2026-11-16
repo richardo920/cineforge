@@ -255,24 +255,24 @@ class NativeSpeechTests(unittest.TestCase):
                 clock = [100.0]
                 runtime = NativeSpeechRuntime(self.selection, allow_native=True, timeout_seconds=5)
                 stack.enter_context(patch("cineforge.native_speech.time.monotonic",
-                                          side_effect=lambda: clock[0]))
+                                          side_effect=lambda *, clock=clock: clock[0]))
                 validate = runtime._validate_receipt
-                def child(*args, **kwargs):
+                def child(*args, clock=clock, phase=phase, **kwargs):
                     owned = self.fake_child(*args, **kwargs)
                     if phase == "child":
                         clock[0] = 106.0
                     return owned
-                def validation(*args):
+                def validation(*args, clock=clock, phase=phase, validate=validate):
                     validate(*args)
                     if phase == "validation":
                         clock[0] = 106.0
                 class Directory(original_temporary):
-                    def __exit__(self, *args):
+                    def __exit__(self, *args, clock=clock, phase=phase):
                         result = super().__exit__(*args)
                         if phase == "directory":
                             clock[0] = 106.0
                         return result
-                def copying(value, *args, **kwargs):
+                def copying(value, *args, clock=clock, phase=phase, **kwargs):
                     result = original_copy(value, *args, **kwargs)
                     if (phase == "proof" and isinstance(value, dict)
                             and value.get("owned_child_status")
@@ -307,7 +307,7 @@ class NativeSpeechTests(unittest.TestCase):
                 runtime = NativeSpeechRuntime(self.selection, allow_native=True,
                     timeout_seconds=5, absolute_deadline=caller_cap)
                 clock[0] = 106.0  # Scheduler delay between trusted construction and entry.
-                def child(*args, **kwargs):
+                def child(*args, expected=expected, **kwargs):
                     self.assertEqual(kwargs["deadline"], expected)
                     self.assertEqual(unpack(kwargs["payload"])[0]["deadline"], expected - 2)
                     return self.fake_child(*args, **kwargs)
@@ -362,15 +362,15 @@ class NativeSpeechTests(unittest.TestCase):
                         "reference_pcm_sha256": hashlib.sha256(reference).hexdigest()})}
                 header, _ = unpack(pack(header, b""))
                 order, checks = [], []
-                def policy(*args):
+                def policy(*args, order=order):
                     order.append("deny")
                     return NETWORK_POLICY
-                def verified(*args, **kwargs):
+                def verified(*args, checks=checks, order=order, **kwargs):
                     self.assertEqual(order[0], "deny")
                     order.append("verify")
                     checks.append(kwargs)
                     return HASH
-                def generate(*args):
+                def generate(*args, header=header, order=order):
                     self.assertEqual(order, ["deny", "verify", "verify", "verify"])
                     order.append("sdk")
                     return (*float_pcm([.1]*2400, 24000), response(header)[0]["hardware"])

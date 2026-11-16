@@ -50,7 +50,7 @@ def install_wheel(path: Path, target: Path, wheel: dict[str, Any],
         allowed_shared = {"site/" + entry["path"]: entry for entry in shared_files}
         if len(set(destinations)) != len(destinations):
             raise ValueError("closed Comfy wheel destination overlaps")
-        for original, relative in zip(names, destinations):
+        for original, relative in zip(names, destinations, strict=True):
             shared = allowed_shared.get(relative)
             if relative in manifest and shared is None:
                 raise ValueError("closed Comfy wheel destination overlaps")

@@ -38,7 +38,7 @@ def shots(character: CharacterPin, workflow_digest: str) -> tuple[Shot, ...]:
     return tuple(Shot(f"m4-identity-0{i+1}", "identity", 1, prompt, seed, profile.DURATION,
                       profile.MODEL_ID, profile.MODEL_REVISION, workflow_digest,
                       character.to_key())
-                 for i, (prompt, seed) in enumerate(zip(profile.PROMPTS, profile.SEEDS)))
+                 for i, (prompt, seed) in enumerate(zip(profile.PROMPTS, profile.SEEDS, strict=True)))
 
 
 @dataclass(frozen=True)
@@ -283,7 +283,7 @@ class ConditioningSelection(ApprovedComfySelection):
                 or self.graph_json != canonical(self.gate.graph).decode()
                 or self.license_bytes != profile.WORKFLOW_LICENSE):
             raise ComfyPolicyError("conditioning selection differs from exact approved subject")
-        self.workflow
+        _ = self.workflow
 
     @property
     def workflow(self) -> WorkflowTemplate:
