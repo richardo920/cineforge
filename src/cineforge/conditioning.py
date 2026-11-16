@@ -187,7 +187,8 @@ class VerifiedConditioning:
         self.require(ExecutionRequest(shot, profile.model()), self.workflow_digest)
         binding = self.bindings[self.requests.index(shot)]
         record = self.registry.lookup(self.character)
-        assert record is not None
+        if record is None:
+            raise AssertionError
         refs = (self.reference.artifact.permission.rights, self.model_rights,
                 *(self.catalog.lookup(pin).rights for pin in binding.skills))
         if record.likeness is not None:
@@ -311,7 +312,8 @@ class ConditioningSelection(ApprovedComfySelection):
 
     def require_execution_worker(self, worker: WorkerVerification) -> None:
         self.gate.require_submission(self.request(self.gate.requests[0]), worker.record["worker_id"])
-        assert self.gate.staging is not None
+        if self.gate.staging is None:
+            raise AssertionError
         runtime = strict_object(self.gate.staging.runtime_json)
         if (runtime["gpu_memory_mib"] != worker.record["gpu"]["memory_mib"]
                 or worker.record["image_digest"] != profile.IMAGE.split("@", 1)[1]

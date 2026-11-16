@@ -357,7 +357,8 @@ class SSHWorker:
         while not self._stop.wait(10):
             try:
                 self.check()
-                assert self.plan is not None
+                if self.plan is None:
+                    raise AssertionError
                 with self._remote_lock:
                     if not self._remote_suspended.is_set():
                         self._request({"operation": "heartbeat", "plan": self.plan.to_dict()},
@@ -427,10 +428,12 @@ class SSHWorker:
                 raise WorkerError("M5 requires a separately checked closed Comfy runtime")
             if self._s2v_setup_attempted:
                 raise WorkerError("M5 service setup already attempted; inspect owned worker state")
-            assert deadline is not None
+            if deadline is None:
+                raise AssertionError
             deadline = min(deadline, time.monotonic() + timeout)
             self._require_s2v(selection)
-            assert selection is not None
+            if selection is None:
+                raise AssertionError
             runtime._admit(self, deadline)
             if time.monotonic() >= deadline:
                 raise WorkerError("M5 preparation original deadline exhausted")
@@ -461,7 +464,8 @@ class SSHWorker:
             result = WorkerVerification.from_dict(reply["verification"])
             result.require_matches(self.selection)
             observed = self._runtime_evidence(reply["runtime"], s2v=True, profile_id=self.selection.worker_profile["id"])
-            assert self.plan is not None
+            if self.plan is None:
+                raise AssertionError
             if (result.record["worker_id"] != self.plan.pod_id
                     or result.record["image_digest"] != self.spec.image.split("@", 1)[1]):
                 raise ValueError
@@ -543,7 +547,8 @@ class SSHWorker:
                       self.budget.remaining_seconds(self._key)-120)
         if timeout <= 0:
             raise WorkerError("native speech absolute deadline exhausted")
-        assert self.plan is not None
+        if self.plan is None:
+            raise AssertionError
         result = self._request(dict(request, plan=self.plan.to_dict()), timeout,
                                absolute_deadline=absolute_deadline)
         self.native_admission()
@@ -1022,7 +1027,8 @@ class SupervisedComfyTransport:
         if (type(self.worker.selection) is S2VServiceContext
                 and method == "POST" and path == "/prompt"):
             self.worker.verify_comfy_current(absolute_deadline=deadline)
-            assert self.worker._closed_comfy is not None
+            if self.worker._closed_comfy is None:
+                raise AssertionError
             self.worker._closed_comfy.require_precision_post(self.worker, body, deadline=deadline)
         reserve = 120 if type(self.worker.selection) is S2VServiceContext else 0
         remaining = min(require_time(deadline, clock),

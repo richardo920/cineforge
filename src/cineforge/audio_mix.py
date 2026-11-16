@@ -466,7 +466,8 @@ def mix_scene(sheet: CueSheet, sources: tuple[SpeechArtifact | ImportedStemArtif
         if before.tool != expected_tool or before.measurement_status != "measured":
             raise MixError("mix loudness or true peak unavailable or undefined")
         loudness, peak = before.integrated_lufs.value, before.true_peak_dbtp.value
-        assert loudness is not None and peak is not None
+        if loudness is None or peak is None:
+            raise AssertionError
         gain_db = preset.target_lufs - loudness
         if peak + gain_db > preset.max_true_peak_dbtp - preset.peak_safety_db:
             raise MixError("preset target unattainable by supported linear gain")

@@ -139,7 +139,8 @@ class ClosedComfyRuntime:
         return plan
 
     def _call(self, operation: str, deadline: float, **fields: Any) -> dict[str, Any]:
-        assert self._bridge._deadline is not None and self._expires_unix is not None
+        if self._bridge._deadline is None or self._expires_unix is None:
+            raise AssertionError
         cap = min(deadline, self._bridge._deadline)
         return self._bridge._call(operation, controller_deadline=cap,
             comfy_expires_unix=self._expires_unix,
@@ -152,7 +153,8 @@ class ClosedComfyRuntime:
         plan = self._admit(worker, deadline)
         worker._require_s2v(selection)
         self._attempted = True
-        assert self._bridge._deadline is not None and self._bridge._expires_unix is not None
+        if self._bridge._deadline is None or self._bridge._expires_unix is None:
+            raise AssertionError
         self._bridge._deadline = min(deadline, self._bridge._deadline)
         self._expires_unix = min(self._bridge._expires_unix,
                                 time.time() + self._bridge._deadline - time.monotonic())
@@ -236,7 +238,8 @@ class ClosedComfyRuntime:
         self._precision_used.add(language)
         nonce = uuid.uuid4().hex
         package, _ = native_package()
-        assert self._bridge._binding is not None
+        if self._bridge._binding is None:
+            raise AssertionError
         expected = dict(version=1, policy=POLICY, nonce=nonce,
             nonce_graph_sha256=nr_digest(strict_object(selection.graph_json)),
             selection_sha256=selection.approved_subject_sha256,

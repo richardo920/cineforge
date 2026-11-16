@@ -77,7 +77,8 @@ def run_audio_process(command: tuple[str, ...], *, payload: bytes, timeout_secon
         process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, start_new_session=True, bufsize=0,
             env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"})
-        assert process.stdin is not None and process.stdout is not None
+        if process.stdin is None or process.stdout is None:
+            raise AssertionError
         os.set_blocking(process.stdin.fileno(), False)
         os.set_blocking(process.stdout.fileno(), False)
         selector = selectors.DefaultSelector()

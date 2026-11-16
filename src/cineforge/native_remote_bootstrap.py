@@ -202,7 +202,8 @@ def nr_package(root: Path, *, install: bool = False) -> Path:
 def nr_preflight(deadline: float, *, profile_id: str = S2V_WORKER.profile_id) -> dict[str, Any]:
     configured = s2v_worker(profile_id)
     requirements = configured.reference_runtime
-    assert requirements is not None
+    if requirements is None:
+        raise AssertionError
     # Measurements precede network staging; no Torch/SDK imports or apt fallback.
     if (
         sys.implementation.name != "cpython"

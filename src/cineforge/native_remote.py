@@ -126,7 +126,8 @@ class RemoteNativeSpeechRuntime:
         result = None
         try:
             cap = self._deadline
-            assert cap is not None and self._binding is not None
+            if cap is None or self._binding is None:
+                raise AssertionError
             if controller_deadline is not None:
                 if (type(controller_deadline) not in (int, float)
                         or not math.isfinite(controller_deadline)):
@@ -159,7 +160,8 @@ class RemoteNativeSpeechRuntime:
         if self._unresolved or self._deadline is None or self._binding is None:
             raise NativeSpeechError("remote native work is unavailable or unresolved")
         worker = self._worker
-        assert isinstance(worker.selection, S2VServiceContext)
+        if not isinstance(worker.selection, S2VServiceContext):
+            raise AssertionError
         plan = worker.plan
         if (
             plan is None
@@ -178,15 +180,18 @@ class RemoteNativeSpeechRuntime:
             self._bound_worker()
             if self._binding["package"] != hashlib.sha256(package).hexdigest():
                 raise NativeSpeechError("fixed first party package changed")
-            assert self._deadline is not None
+            if self._deadline is None:
+                raise AssertionError
             self._deadline = min(self._deadline, started_deadline)
             return
         plan = worker.plan
-        assert plan is not None
+        if plan is None:
+            raise AssertionError
         self._deadline = min(started_deadline,
             time.monotonic() + worker.budget.remaining_seconds(worker._key) - 120)
         self._expires_unix = time.time() + self._deadline - time.monotonic()
-        assert isinstance(worker.selection, S2VServiceContext)
+        if not isinstance(worker.selection, S2VServiceContext):
+            raise AssertionError
         self._binding = {"worker": plan.pod_id, "session": plan.session_id,
             "scope": worker.selection.approval.subject_sha256,
             "guard": worker_guard_source_sha256(), "package": hashlib.sha256(package).hexdigest(),
@@ -228,7 +233,8 @@ class RemoteNativeSpeechRuntime:
             try:
                 self._worker.native_admission()
                 self._bound_worker()
-                assert self._deadline is not None
+                if self._deadline is None:
+                    raise AssertionError
                 if time.monotonic() >= self._deadline:
                     raise ValueError
                 self._capabilities_sha256 = nr_digest(result)
