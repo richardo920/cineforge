@@ -399,7 +399,8 @@ def remote_operation(
             typed: QwenBaseRequest | OriginalVoiceDesign = QwenBaseRequest.from_dict(
                 header["request"]
             )
-            assert isinstance(typed, QwenBaseRequest)
+            if not isinstance(typed, QwenBaseRequest):
+                raise AssertionError
             use = {"English": "base-en", "Chinese": "base-zh"}[typed.language]
             nr_write(root / ("used-" + use), b"consumed before child launch")
             payload = runtime.synthesize(typed, inspect_pcm16_wav(reference))

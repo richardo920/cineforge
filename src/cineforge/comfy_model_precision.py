@@ -330,7 +330,8 @@ class ModelGuard:
             self._fail()
             raise ValueError("actual precision cleanup incomplete")
         self._time()
-        assert self.nonce is not None
+        if self.nonce is None:
+            raise AssertionError
         nr_write(self.root / "comfy-precision" / (self.nonce + ".closed.json"),
                  nr_encode(self._receipt(patcher)))
         self._time()
@@ -358,7 +359,8 @@ class ModelGuard:
         self._time()
 
     def _receipt(self, patcher: Any) -> dict[str, Any]:
-        assert self.request is not None
+        if self.request is None:
+            raise AssertionError
         return {"version": 1, "policy": POLICY, "request_sha256": nr_digest(self.request),
             "model_sha256": MODEL_SHA256, "header_sha256": HEADER_SHA256,
             "matrices_sha256": MATRICES_SHA256, "enforcer_sha256": self.expected["enforcer_sha256"],

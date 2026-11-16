@@ -257,7 +257,8 @@ class ConditioningBudgetApproval(BudgetApproval):
     @property
     def journal_directory(self) -> str:
         from cineforge.conditioning import ConditioningApproval
-        assert type(self.approval) is ConditioningApproval
+        if type(self.approval) is not ConditioningApproval:
+            raise AssertionError
         value: str = strict_object(self.approval.subject_json)["cloud"]["journal_directory"]
         return value
 

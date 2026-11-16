@@ -203,7 +203,8 @@ def bounded_process(command: list[str], *, timeout: float, cwd: Path | None = No
             env=clean_environment() if environment is None else environment,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             start_new_session=True, bufsize=0)
-        assert process.stdin is not None and process.stdout is not None
+        if process.stdin is None or process.stdout is None:
+            raise AssertionError
         output = bytearray()
         payload = payload or b""
         written = 0
