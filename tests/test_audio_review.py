@@ -84,7 +84,7 @@ class Verifier:
             try:
                 raise OSError("PRIVATE-CANARY/media.wav")
             except OSError:
-                raise self.error("PRIVATE-CANARY transcript")
+                raise self.error("PRIVATE-CANARY transcript") from None
         return TechnicalReview(snapshot.pin() if self.snapshot is None else self.snapshot,
             tuple(ReviewCheck(key, self.status) for key in TECHNICAL_CHECKLIST), EVIDENCE)
 
@@ -102,7 +102,7 @@ class AudioReviewTests(unittest.TestCase):
         self.assertEqual(snapshot.mix_settings_sha256, self.inputs["mix"].report.settings.digest())
         self.assertEqual(snapshot.dependencies, self.inputs["mix"].report.dependencies)
         self.assertEqual(tuple(item.language for item in snapshot.clips), ("en", "zh"))
-        for clip, supplied in zip(snapshot.clips, self.inputs["clips"]):
+        for clip, supplied in zip(snapshot.clips, self.inputs["clips"], strict=True):
             self.assertEqual(clip.speech.pin, supplied.speech.pin)
             self.assertEqual(clip.request.sha256, supplied.speech.request.digest())
             self.assertEqual(clip.utterance, supplied.speech.request.utterance)
@@ -313,7 +313,7 @@ class AudioReviewTests(unittest.TestCase):
             class Malformed:
                 calls = 0
 
-                def verify(self, snapshot):
+                def verify(self, snapshot, *, response=response):
                     self.calls += 1
                     return response
 
@@ -379,7 +379,7 @@ class AudioReviewTests(unittest.TestCase):
                 class Callback:
                     calls = 0
 
-                    def verify(self, snapshot):
+                    def verify(self, snapshot, *, proof=proof):
                         self.calls += 1
                         return proof
 

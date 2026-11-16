@@ -47,7 +47,7 @@ class S2VCallbackBoundaryTests(unittest.TestCase):
                     gate, _ = context(Path(temp).resolve())
                     original = getattr(gate, name)
                     armed, calls = [False], [0]
-                    def callback(*args):
+                    def callback(*args, armed=armed, at=at, calls=calls, gate=gate, original=original):
                         value = original(*args)
                         if armed[0]:
                             calls[0] += 1
@@ -68,7 +68,7 @@ class S2VCallbackBoundaryTests(unittest.TestCase):
             with self.subTest(change=change), tempfile.TemporaryDirectory() as temp:
                 gate, _ = context(Path(temp).resolve())
                 native, armed = gate.verify_speech, [False]
-                def callback(*args):
+                def callback(*args, armed=armed, change=change, gate=gate, native=native):
                     value = native(*args)
                     if armed[0]:
                         if change == "actor_bytes":
@@ -94,7 +94,7 @@ class S2VCallbackBoundaryTests(unittest.TestCase):
             with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temp:
                 gate, _ = context(Path(temp).resolve())
                 actor, native = gate.verify_actor, gate.verify_speech
-                def actor_callback(*args):
+                def actor_callback(*args, actor=actor, kind=kind):
                     value = actor(*args)
                     if kind.startswith("character_"):
                         change = {"revision": True} if kind.endswith("revision") else {"schema_version": True}
@@ -103,7 +103,7 @@ class S2VCallbackBoundaryTests(unittest.TestCase):
                         change = {"uri": True} if kind.endswith("type") else {"schema_version": True}
                         return forged(value, evidence=forged(value.evidence, **change))
                     return forged(value, reference_sha256=True) if kind == "actor_digest_type" else value
-                def native_callback(*args):
+                def native_callback(*args, kind=kind, native=native):
                     value = native(*args)
                     changes = {"zero_native_receipt": {"native_receipt_sha256": "0" * 64},
                         "native_worker_type": {"worker_id": True},

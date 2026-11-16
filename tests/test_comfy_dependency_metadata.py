@@ -260,13 +260,13 @@ class WheelNoticeTests(unittest.TestCase):
             now = [100.0]
             opener, _ = self.reader(zipfile.ZipFile.open, now=now, delay=delay)
 
-            def close(archive):
+            def close(archive, *, delay=delay, now=now):
                 original_close(archive)
                 if delay == "archive-close":
                     now[0] = 104.0
 
             with (
-                patch.object(worker.time, "monotonic", lambda: now[0]),
+                patch.object(worker.time, "monotonic", lambda *, now=now: now[0]),
                 patch.object(zipfile.ZipFile, "open", opener),
                 patch.object(zipfile.ZipFile, "close", close),
                 patch.object(worker, "_install_wheel") as extract,

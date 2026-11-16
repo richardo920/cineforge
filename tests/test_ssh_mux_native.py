@@ -133,7 +133,7 @@ class NativeMuxTests(unittest.TestCase):
                     path = self.root / "c"
                     master = Master(path, mode)
                     connected, stop = Event(), Event()
-                    def observe():
+                    def observe(*, connected=connected, monitor=monitor, stop=stop):
                         while not stop.is_set():
                             try:
                                 stream, _ = monitor.accept()

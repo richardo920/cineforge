@@ -328,7 +328,7 @@ class MixTests(unittest.TestCase):
         self.assertEqual(self.meter.calls, [])
         self.args = scene()
         for fault in (RuntimeError("CANARY"), AudioProcessError("CANARY", cleanup_uncertain=True)):
-            def fail():
+            def fail(*, fault=fault):
                 raise fault
             self.meter = Meter(action=fail)
             self.rejected()

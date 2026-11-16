@@ -2,7 +2,7 @@
 
 Private foundation for a modular AI filmmaking platform: brief → screenplay → storyboard → shots → edit → sound → review → delivery.
 
-**Status:** strict production metadata, offline mock runs, private ComfyUI execution and managed Runpod Pod smoke with budget, shutdown and recovery controls. [M3 evidence](docs/evidence/m3-live-shot.json) records one normal video run and one controlled failure; its telemetry-classification correction was verified offline without another GPU run.
+**Capabilities:** strict production metadata, offline mock checkpoint/resume, private ComfyUI execution, managed Runpod smoke/recovery, character conditioning, and audio contracts/analysis/mixing/review. Use `cineforge --help` for available commands; live runs require separate exact approvals.
 
 ## Quick start
 
@@ -18,7 +18,7 @@ cineforge mock-run examples/synthetic-plan.json --output-dir ./demo-run --resume
 python -m unittest discover -s tests -v
 ```
 
-Python 3.11+. Runtime has no third-party dependencies. `.env.example` lists future adapter settings; the package does not load `.env`.
+Python 3.11+. Runtime has no third-party dependencies. The package does not load `.env`. `.env.example` documents only the optional `RUNPOD_API_KEY` shell fallback for cloud commands; `--api-key-file` takes precedence. Mock runs need no credentials. Worker-guard credentials/Pod identity and fixed PyTorch launcher controls are injected worker inputs, not local configuration.
 
 The example wraps a `ProjectPlan` in `{schema_version: 1, plan, models, devices}` with explicit synthetic declarations; see its fields for the strict input schema. `validate-plan` checks the entire wrapper and emits its canonical domain `ProjectPlan`; `mock-run` consumes the wrapper and emits a canonical `RunManifest` only after all shots succeed.
 
@@ -45,7 +45,7 @@ The default endpoint is a separately established `http://127.0.0.1:8188` tunnel;
 
 ## Managed cloud smoke
 
-The M3 smoke reuses the approved paper-boat shot and a verified prepared-endpoint reference. [Measured cases](docs/evidence/m3-live-shot.json) retain the original CLI exits: success `0`, failure test `2` despite observed `EXITED` and deletion; the observer and guard classifiers were corrected/replayed offline. Supply external owned `0600` API/SSH files in private directories, `ffprobe`, and one durable budget directory for both attempts and recovery.
+Cloud smoke uses an exactly approved paper-boat selection and a verified prepared-endpoint reference. Supply external owned `0600` API/SSH files in private directories, `ffprobe`, and one durable budget directory for attempts and recovery. Historical runs and classifier corrections remain in [M3 evidence](docs/evidence/m3-live-shot.json); these examples grant no new live authorization.
 
 ```sh
 cineforge cloud-smoke --allow-live \
@@ -57,7 +57,7 @@ cineforge cloud-smoke --allow-live \
   --reference-run /path/to/prepared/run.json --output-dir /path/to/new-run
 ```
 
-The recorded approval permits at most two sequential RTX4090/US-IL-1 Pods within USD3; the second `--case post-acquire-failure` withdraws only the remote heartbeat, observes independent STOP, then verifies deletion. Keep the same session/key/budget; use a new output directory, never reset the journal to retry.
+The historical M3 scope capped two sequential RTX4090/US-IL-1 Pods within USD3. Within an authorized scope, `--case post-acquire-failure` withdraws only the remote heartbeat, observes independent STOP, then verifies deletion. Keep the same session/key/budget; use a new output directory, never reset the journal to retry.
 
 ```sh
 cineforge cloud-recover --allow-live \
@@ -78,7 +78,7 @@ Dependency review also queries advisory services in CI (network required; failur
 ## Layout
 
 - `src/cineforge/`: contracts, device declarations, fake execution provider, local storage, and CLI.
-- `tests/`: offline smoke tests; `.github/workflows/ci.yml`: CI.
+- `tests/`: offline unit and CLI tests; `.github/workflows/ci.yml`: CI.
 - `AGENTS.md`: contributor rules and agent review expectations.
 - [Design overview](docs/design/overview.md): vision, file structure, and subsystem contracts.
 - [Milestone plan](docs/plans/milestones.md): tasks, dependencies, and acceptance criteria.

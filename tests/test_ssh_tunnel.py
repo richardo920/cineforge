@@ -254,7 +254,7 @@ class TunnelTests(unittest.TestCase):
             self.assertEqual(fixture.processes[0].waits, [2])
         for fault in (KeyboardInterrupt(), RuntimeError("private-heartbeat-canary")):
             self.worker._stop.clear()
-            def check():
+            def check(*, fault=fault):
                 if self.worker._tunnel is not None:
                     raise fault
             with self.harness() as fixture, patch.object(self.worker, "check", side_effect=check):

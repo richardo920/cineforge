@@ -568,7 +568,9 @@ class ComfyRunTests(unittest.TestCase):
                 now = [0.0]
                 original_request = wire.request
 
-                def request(method, path, body=None, **kwargs):
+                def request(method, path, body=None, *, expected_bound=expected_bound, now=now,
+                        original_request=original_request, succeeded_at=succeeded_at,
+                        transfer_delay=transfer_delay, **kwargs):
                     raw = original_request(method, path, body, **kwargs)
                     if path.startswith("/history/"):
                         now[0] = succeeded_at
@@ -580,7 +582,7 @@ class ComfyRunTests(unittest.TestCase):
                 wire.request = request
                 with self.assertRaises(ComfyRunError):
                     self.execute(timeout_seconds=10, result_timeout_seconds=4,
-                                 request_timeout_seconds=10, transport=wire, clock=lambda: now[0])
+                                 request_timeout_seconds=10, transport=wire, clock=lambda *, now=now: now[0])
                 record = json.loads((self.output / "run.json").read_bytes())
                 self.assertEqual(record["outcome"], "incomplete")
                 self.assertEqual(record["known_run"]["job_id"], IDENTITY)

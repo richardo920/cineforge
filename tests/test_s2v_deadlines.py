@@ -105,7 +105,7 @@ class PairedDeadlineTests(unittest.TestCase):
     def test_currentness_samples_phase_and_lease_cap_before_slow_budget_callback(self):
         for remaining, after in ((121, 103), (600, 220)):
             self.now = 99.0
-            def budget(_):
+            def budget(_, *, after=after, remaining=remaining):
                 self.now = after
                 return remaining
             with (patch.object(self.driver.budget, 'remaining_seconds', budget),
@@ -228,7 +228,7 @@ class PairedDeadlineTests(unittest.TestCase):
                 self.f.remote = self.f.root / operation
                 (self.f.remote / 'ComfyUI/input').mkdir(parents=True, mode=0o700)
                 driver = self.f.new_driver()
-                def request(body, timeout, **kwargs):
+                def request(body, timeout, *, operation=operation, **kwargs):
                     reply = self.f.rpc(body, timeout, **kwargs)
                     if body['operation'] == operation:
                         self.now = 101

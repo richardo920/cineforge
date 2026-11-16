@@ -71,14 +71,15 @@ class CleanupCancellationTests(unittest.TestCase):
                 calls = []
                 interrupted = False
 
-                def sink(intent, snapshot):
+                def sink(intent, snapshot, *, original_sink=original_sink, phase=phase):
                     nonlocal interrupted
                     if snapshot.state == phase and not interrupted:
                         interrupted = True
                         raise KeyboardInterrupt("private-cleanup-canary")
                     return original_sink(intent, snapshot)
 
-                def request(method, path, body=None, **kwargs):
+                def request(method, path, body=None, *, calls=calls, original_request=original_request,
+                        phase=phase, **kwargs):
                     nonlocal interrupted
                     calls.append(method)
                     result = original_request(method, path, body, **kwargs)
@@ -94,7 +95,7 @@ class CleanupCancellationTests(unittest.TestCase):
                 with patch.object(fixture.cloud, "request", side_effect=request):
                     code, _, err = cli_fixtures.ErrorContractTests().invoke(
                         ["mock-run", "x"], patch("cineforge.cli.load_mock_plan",
-                            side_effect=lambda *a: provider.release("pod_1")))
+                            side_effect=lambda *a, provider=provider: provider.release("pod_1")))
                 self.assertEqual(code, 130)
                 self.assertIn("CF_INTERRUPTED", err)
                 self.assertNotIn("private-cleanup-canary", err)
@@ -278,7 +279,7 @@ class SSHContextCancellationTests(unittest.TestCase):
                         if phase == "reap":
                             process.wait.side_effect = OSError("private-finalizer-canary")
 
-                        def enter(worker):
+                        def enter(worker, *, claimed=claimed, phase=phase, process=process):
                             worker._stop = Mock()
                             worker._thread = Mock()
                             worker._claimed = claimed
@@ -296,7 +297,7 @@ class SSHContextCancellationTests(unittest.TestCase):
                         def interrupt(worker):
                             os.kill(os.getpid(), signal.SIGINT)
 
-                        def run(*args, **kwargs):
+                        def run(*args, fixture=fixture, module=module, **kwargs):
                             if module is managed:
                                 return fixture.run_smoke("context-interrupt")
                             return fixture.run_case("context-interrupt")

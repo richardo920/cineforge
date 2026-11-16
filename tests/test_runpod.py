@@ -264,7 +264,7 @@ class RunpodLifecycleTests(unittest.TestCase):
     def test_missing_or_old_host_cuda_fails_before_runtime_probe_and_cleans_up(self):
         for cuda in (None, "12.7", "bad-version"):
             self.cloud = FakeCloud()
-            self.cloud.get_change = lambda p: {**p, "cudaVersion": cuda}
+            self.cloud.get_change = lambda p, *, cuda=cuda: {**p, "cudaVersion": cuda}
             p = self.provider()
             with self.assertRaises(ProvisioningError):
                 self.acquire(p)
@@ -308,7 +308,7 @@ class RunpodLifecycleTests(unittest.TestCase):
                 self.acquire(p)
                 restored = self.provider()
                 restored.restore_owned(p.intent("first"), replace(p.snapshots[0], state="created"))
-                self.cloud.get_change = lambda pod: {**pod, field: value}
+                self.cloud.get_change = lambda pod, *, field=field, value=value: {**pod, field: value}
                 self.probes.clear()
                 self.events.clear()
                 with self.assertRaises(ProvisioningError):
@@ -461,7 +461,7 @@ class RunpodLifecycleTests(unittest.TestCase):
                              ("status", "NEW_PROVIDER_STATE")]:
             with self.subTest(field=field):
                 self.cloud = FakeCloud()
-                self.cloud.get_change = lambda pod: {**pod, field: value}
+                self.cloud.get_change = lambda pod, *, field=field, value=value: {**pod, field: value}
                 p = self.provider()
                 with self.assertRaises(ProvisioningError) as cm:
                     self.acquire(p)
@@ -532,7 +532,8 @@ class RunpodLifecycleTests(unittest.TestCase):
                 attempts = []
                 delayed = False
 
-                def slow_once(method, path, *args, **kwargs):
+                def slow_once(method, path, *args, attempts=attempts, request=request,
+                        slow_method=slow_method, **kwargs):
                     nonlocal delayed
                     timeout = kwargs["timeout_seconds"]
                     attempts.append((method, self.clock(), timeout))
@@ -563,7 +564,7 @@ class RunpodLifecycleTests(unittest.TestCase):
                 request = self.cloud.request
                 deletes, gets = [], []
 
-                def track(method, path, *args, **kwargs):
+                def track(method, path, *args, deletes=deletes, gets=gets, request=request, **kwargs):
                     (deletes if method == "DELETE" else gets).append(self.clock())
                     return request(method, path, *args, **kwargs)
 
@@ -575,7 +576,7 @@ class RunpodLifecycleTests(unittest.TestCase):
                 self.assertLessEqual(len(gets), max_polls + 1)
                 self.assertTrue(deletes)
                 self.assertTrue(all(b - a >= max(1, interval)
-                                    for a, b in zip(deletes, deletes[1:])))
+                                    for a, b in zip(deletes, deletes[1:], strict=False)))
                 if interval < 1:
                     self.assertLess(len(deletes), len(gets))
                 if interval == 0:

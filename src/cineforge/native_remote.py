@@ -263,7 +263,7 @@ class RemoteNativeSpeechRuntime:
                 or type(result["files"]) is not list or len(result["files"]) != len(NR_CAP_ALIASES)):
             raise ValueError("invalid fixed native measurements")
         total = 0
-        for row, (role, alias) in zip(result["files"], NR_CAP_ALIASES):
+        for row, (role, alias) in zip(result["files"], NR_CAP_ALIASES, strict=True):
             if type(row) is not dict or row.get("role") != role or row.get("alias") != alias:
                 raise ValueError("fixed native measurement alias differs")
             if row.get("status") == "missing" and set(row) == {"role", "alias", "status"}:

@@ -883,7 +883,7 @@ class PrecisionSupervisedTransportTests(unittest.TestCase):
                 calls = []
 
                 class Wire:
-                    def request(self, method, path, body=None, **kw):
+                    def request(self, method, path, body=None, *, calls=calls, **kw):
                         calls.append((method, path, body, kw))
                         return b"{}"
 
