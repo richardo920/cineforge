@@ -23,12 +23,12 @@ build/
 dist/
 .DS_Store
 # Private or large production artifacts
-artifacts/
+/artifacts/
 assets/private/
-models/
-weights/
-output/
-outputs/
+/models/
+/weights/
+/output/
+/outputs/
 .cache/
 *.safetensors
 *.ckpt
@@ -42,3 +42,7 @@ outputs/
 *.mp3
 *.flac
 *.zip
+# Small synthetic test media is size-checked by ci_guard.
+!tests/fixtures/**/*.wav
+!tests/fixtures/**/*.mp3
+!tests/fixtures/**/*.flac

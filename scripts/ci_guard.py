@@ -13,10 +13,13 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 MAX_BLOB_BYTES = 1024 * 1024
-PRIVATE_PARTS = {"artifacts", "weights", "models", "private", "secrets", ".secrets"}
+MAX_FIXTURE_BYTES = 64 * 1024
+PRIVATE_PARTS = {"artifacts", "weights", "models", "private", "output", "outputs"}
+CREDENTIAL_PARTS = {"secrets", ".secrets"}
+FIXTURE_SUFFIXES = {".wav", ".mp3", ".flac", ".png", ".jpg", ".jpeg", ".webp"}
 PRIVATE_SUFFIXES = {
     ".safetensors", ".ckpt", ".pt", ".pth", ".onnx", ".mp4", ".mov", ".mkv",
-    ".wav", ".mp3", ".flac", ".png", ".jpg", ".jpeg", ".webp", ".pem", ".key", ".zip",
+    ".pem", ".key", ".zip",
 }
 PIN = re.compile(r"([A-Za-z0-9][A-Za-z0-9_.-]*)==([A-Za-z0-9][A-Za-z0-9_.+!-]*)")
 
@@ -33,8 +36,16 @@ def check_blob(path: str, size: int, mode: str) -> list[str]:
         errors.append(f"{path}: only regular files allowed (mode {mode})")
     if size > MAX_BLOB_BYTES:
         errors.append(f"{path}: exceeds {MAX_BLOB_BYTES} byte Git blob limit")
-    if (set(part.lower() for part in parsed.parts) & PRIVATE_PARTS
-            or parsed.suffix.lower() in PRIVATE_SUFFIXES or "credentials" in parsed.name.lower()
+    directories = {part.lower() for part in parsed.parts[:-1]}
+    private_directory = bool(directories & PRIVATE_PARTS)
+    code_path = parsed.parts[:1] in {("src",), ("tests",)}
+    small_fixture = (parsed.parts[:2] == ("tests", "fixtures")
+                     and size <= MAX_FIXTURE_BYTES and not private_directory)
+    if (directories & CREDENTIAL_PARTS
+            or (private_directory and not code_path)
+            or parsed.suffix.lower() in PRIVATE_SUFFIXES
+            or (parsed.suffix.lower() in FIXTURE_SUFFIXES and not small_fixture)
+            or "credentials" in parsed.name.lower()
             or (parsed.name.startswith(".env") and parsed.name != ".env.example")):
         errors.append(f"{path}: private/media/model/credential artifact prohibited")
     return errors
