@@ -19,6 +19,7 @@ from cineforge.comfy_policy import ApprovedComfySelection, WorkerVerification
 from cineforge.contracts import ProjectPlan, Shot
 from cineforge.devices import Backend, GPUDevice, Precision
 from cineforge.interruptions import preserve_interruption, remember_interruption
+from cineforge.json_codec import is_sha256_hex
 from cineforge.paired_media import PNG_MAX_BYTES, image_metadata, speech_metadata
 from cineforge.private_store import read_private_input
 from cineforge.providers import ExecutionRequest
@@ -43,7 +44,7 @@ def model_subject() -> SubjectRef:
 
 
 def _sha(value: object) -> None:
-    if type(value) is not str or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+    if not is_sha256_hex(value):
         raise S2VError("invalid S2V evidence digest")
 
 

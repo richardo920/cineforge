@@ -8,6 +8,7 @@ import re
 from typing import Any
 from urllib.parse import urlsplit
 
+from cineforge.json_codec import is_sha256_hex
 from cineforge.native_speech_pins import BASE_FILES, DESIGN_FILES, RUNTIME_DISTRIBUTIONS, SDK_FILES
 
 NR_CHUNK = 128 * 1024
@@ -26,7 +27,7 @@ def nr_digest(value: Any) -> str:
 
 
 def nr_hash(value: Any) -> None:
-    if type(value) is not str or re.fullmatch(r"[0-9a-f]{64}", value) is None or value == "0" * 64:
+    if not is_sha256_hex(value) or value == "0" * 64:
         raise ValueError("invalid remote speech identity")
 
 
