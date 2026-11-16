@@ -258,7 +258,8 @@ class TunnelTests(unittest.TestCase):
                 if self.worker._tunnel is not None:
                     raise fault
             with self.harness() as fixture, patch.object(self.worker, "check", side_effect=check):
-                with self.assertRaises(WorkerError) as cm:
+                with self.assertRaises(KeyboardInterrupt if isinstance(fault, KeyboardInterrupt)
+                                       else WorkerError) as cm:
                     self.worker.endpoint()
                 self.assertNotIn("private-heartbeat", "".join(traceback.format_exception(cm.exception)))
                 self.assertIsNone(self.worker._tunnel)
@@ -336,7 +337,7 @@ class TunnelTests(unittest.TestCase):
                     fixture.control_delay = .5
                 else:
                     fixture.clock_fault = KeyboardInterrupt()
-                with self.assertRaises(WorkerError):
+                with self.assertRaises(KeyboardInterrupt if kind == "clock" else WorkerError):
                     self.worker.endpoint()
                 self.assertNotIn("forward", fixture.events)
                 self.assertNotIn("health", fixture.events)

@@ -17,6 +17,7 @@ from threading import Lock
 from typing import Any
 
 from cineforge.audio_pcm import PCM16Wave
+from cineforge.interruptions import preserve_interruption, remember_interruption
 from cineforge.native_driver import validate_driver_receipt
 from cineforge.native_remote_bootstrap import NR_CAP_ALIASES, NR_CAP_POLICY, NR_CAP_ROOTS
 from cineforge.native_remote_package import native_package
@@ -118,6 +119,7 @@ class RemoteNativeSpeechRuntime:
         self._proofs: dict[tuple[str, str, str], RemoteNativeProof] = {}
         self.last_attempt: str | None = None
 
+    @preserve_interruption
     def _call(self, operation: str, *, controller_deadline: float | None = None,
               **fields: Any) -> dict[str, Any]:
         self._bound_worker()
@@ -147,7 +149,8 @@ class RemoteNativeSpeechRuntime:
             )
             if time.monotonic() >= cap:
                 raise ValueError
-        except BaseException:
+        except BaseException as interruption_error:
+            remember_interruption(interruption_error)
             failed = True
         if failed or result is None:
             self._unresolved = True
@@ -198,6 +201,7 @@ class RemoteNativeSpeechRuntime:
             "source": hashlib.sha256(worker._source).hexdigest(),
             "phase_expires_unix": self._expires_unix}
 
+    @preserve_interruption
     def measure_capabilities(self, *, absolute_deadline: float | None = None) -> dict[str, Any]:
         """Measure fixed protected native files once; no install, import or readiness.
 
@@ -224,7 +228,8 @@ class RemoteNativeSpeechRuntime:
             result = self._call("native_capabilities")
             self._validate_capabilities(result)
             result = copy.deepcopy(result)
-        except BaseException:
+        except BaseException as interruption_error:
+            remember_interruption(interruption_error)
             self._unresolved = True
             result = None
         finally:
@@ -241,7 +246,8 @@ class RemoteNativeSpeechRuntime:
                 self._capabilities_payload = nr_encode(result)
                 if time.monotonic() >= self._deadline:
                     raise ValueError
-            except BaseException:
+            except BaseException as interruption_error:
+                remember_interruption(interruption_error)
                 self._unresolved = True
                 result = None
         if result is None:
@@ -334,6 +340,7 @@ class RemoteNativeSpeechRuntime:
             raise NativeSpeechError("remote native result identity differs")
         return result
 
+    @preserve_interruption
     def stage(self, recipe: dict[str, Any], built_sox_wheel: bytes) -> dict[str, Any]:
         if not self._lock.acquire(blocking=False):
             raise NativeSpeechError("concurrent remote native work refused")
@@ -348,13 +355,15 @@ class RemoteNativeSpeechRuntime:
             self._bound_worker()
             if self._deadline is None or time.monotonic() >= self._deadline:
                 raise ValueError
-        except BaseException:
+        except BaseException as interruption_error:
+            remember_interruption(interruption_error)
             self._unresolved = True
             failed = True
         if failed or result is None:
             raise NativeSpeechError("native staging exceeded final admission", cleanup_uncertain=True)
         return result
 
+    @preserve_interruption
     def _stage(self, recipe: dict[str, Any], built_sox_wheel: bytes) -> dict[str, Any]:
         """Network staging opt-in. Returns measurements, never a selected execution gate."""
         if self._staging_attempted:
@@ -372,7 +381,8 @@ class RemoteNativeSpeechRuntime:
             raise NativeSpeechError("built native wheel differs from reviewed recipe")
         try:
             package, _ = native_package()
-        except BaseException:
+        except BaseException as interruption_error:
+            remember_interruption(interruption_error)
             raise NativeSpeechError("fixed first party native package unavailable") from None
         self._initialize(package, started_deadline)
         self._staging_attempted = True
@@ -403,7 +413,8 @@ class RemoteNativeSpeechRuntime:
             if self._deadline is None or time.monotonic() >= self._deadline:
                 raise ValueError
             return copy.deepcopy(result)
-        except BaseException:
+        except BaseException as interruption_error:
+            remember_interruption(interruption_error)
             self._unresolved = True
             raise NativeSpeechError(
                 "remote native staging incomplete or unconfirmed", cleanup_uncertain=True
@@ -417,6 +428,7 @@ class RemoteNativeSpeechRuntime:
         finally:
             self._lock.release()
 
+    @preserve_interruption
     def _select(self, selection: NativeSpeechSelection) -> None:
         if (
             type(selection) is not NativeSpeechSelection
@@ -446,7 +458,8 @@ class RemoteNativeSpeechRuntime:
             if self._call("native_select") != {"selection_sha256": selection.subject_sha256()}:
                 raise ValueError
             self._selection = selection
-        except BaseException:
+        except BaseException as interruption_error:
+            remember_interruption(interruption_error)
             self._unresolved = True
             raise NativeSpeechError(
                 "remote native selection incomplete or unconfirmed", cleanup_uncertain=True
@@ -478,6 +491,7 @@ class RemoteNativeSpeechRuntime:
         finally:
             self._lock.release()
 
+    @preserve_interruption
     def _invoke_owned(
         self, request: QwenBaseRequest | OriginalVoiceDesign, reference: bytes
     ) -> bytes:
@@ -595,7 +609,8 @@ class RemoteNativeSpeechRuntime:
                 raise ValueError
             self._proofs[(operation, proof.request_sha256, proof.payload_sha256)] = proof
             return payload
-        except BaseException:
+        except BaseException as interruption_error:
+            remember_interruption(interruption_error)
             self._unresolved = True
             raise NativeSpeechError(
                 "remote native attempt incomplete or unconfirmed", cleanup_uncertain=True

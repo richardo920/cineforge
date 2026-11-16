@@ -89,7 +89,7 @@ class WorkerGuardPlan:
                     or type(data["schema_version"]) is not int or data["schema_version"] != 1):
                 raise ValueError
             result = cls(**{k: v for k, v in data.items() if k != "schema_version"})
-        except (Exception, KeyboardInterrupt):
+        except Exception:
             failed = True
         if failed or result is None:
             raise WorkerGuardError("invalid scoped worker guard plan")
@@ -134,7 +134,7 @@ class GuardReceipt:
             result = cls(WorkerGuardPlan.from_dict(data["plan"]), data["source_sha256"],
                          data["pid"], data["observed_unix"], data["operator_verified_alive"],
                          data["operator_verified_own_pod"])
-        except (Exception, KeyboardInterrupt):
+        except Exception:
             failed = True
         if failed or result is None:
             raise WorkerGuardError("invalid worker guard verification")
@@ -168,7 +168,7 @@ def read_private_json(path: str | Path) -> dict[str, Any]:
                 or info.st_size > 2048):
             raise ValueError
         result = _strict_json(os.read(descriptor, 2049))
-    except (Exception, KeyboardInterrupt):
+    except Exception:
         failed = True
     finally:
         if descriptor >= 0:
@@ -254,7 +254,7 @@ def worker_credential(plan: WorkerGuardPlan) -> str:
             parsed = dict(item.decode().split("=", 1) for item in raw.split(b"\0")
                           if b"=" in item)
             values = parsed
-        except (Exception, KeyboardInterrupt):
+        except Exception:
             raise WorkerGuardError("worker-scoped shutdown credential is unavailable") from None
     if values.get("RUNPOD_POD_ID") != plan.pod_id:
         raise WorkerGuardError("worker identity differs from guard plan")
@@ -315,7 +315,7 @@ def verify_own_pod(plan: WorkerGuardPlan, *, allow_live: bool = False) -> bool:
         raise WorkerGuardError("worker verification needs explicit live opt-in")
     try:
         return _owned(_worker_request(plan)("GET", False, 3), plan)
-    except (Exception, KeyboardInterrupt):
+    except Exception:
         return False
 
 
@@ -393,7 +393,7 @@ def stop_own_pod(plan: WorkerGuardPlan, *, allow_live: bool = False,
                 return True
             sleep(min(.25, remaining()))
         return False
-    except (Exception, KeyboardInterrupt):
+    except Exception:
         return False
 
 
@@ -430,31 +430,38 @@ def run_guard(plan: WorkerGuardPlan, heartbeat: Callable[[], float],
     previous_heartbeat = 0.0
     idle_anchor_mono = started_mono
     reason = "deadline"
-    while True:
-        now, mono = clock(), monotonic()
-        if (not _finite(now) or not _finite(mono) or now < previous_wall
-                or mono < previous_mono):
-            reason = "clock_rollback"
-            break
-        previous_wall, previous_mono = now, mono
-        if now >= plan.stop_at_unix or mono >= stop_mono:
-            break
-        try:
-            beat = heartbeat()
-            if not _finite(beat) or beat > now + 5 or beat < previous_heartbeat:
-                raise ValueError
-        except (Exception, KeyboardInterrupt):
-            reason = "invalid_heartbeat"
-            break
-        if beat > previous_heartbeat:
-            previous_heartbeat = beat
-            idle_anchor_mono = mono
-        if now - beat >= plan.idle_seconds or mono - idle_anchor_mono >= plan.idle_seconds:
-            reason = "idle"
-            break
-        sleep(min(poll_seconds, max(0, stop_mono - mono)))
+    interrupted = False
+    try:
+        while True:
+            now, mono = clock(), monotonic()
+            if (not _finite(now) or not _finite(mono) or now < previous_wall
+                    or mono < previous_mono):
+                reason = "clock_rollback"
+                break
+            previous_wall, previous_mono = now, mono
+            if now >= plan.stop_at_unix or mono >= stop_mono:
+                break
+            try:
+                beat = heartbeat()
+                if not _finite(beat) or beat > now + 5 or beat < previous_heartbeat:
+                    raise ValueError
+            except Exception:
+                reason = "invalid_heartbeat"
+                break
+            if beat > previous_heartbeat:
+                previous_heartbeat = beat
+                idle_anchor_mono = mono
+            if now - beat >= plan.idle_seconds or mono - idle_anchor_mono >= plan.idle_seconds:
+                reason = "idle"
+                break
+            sleep(min(poll_seconds, max(0, stop_mono - mono)))
+    except KeyboardInterrupt:
+        interrupted = True
+        reason = "interrupted"
     shutdown_started = monotonic()
     if not _finite(shutdown_started):
+        if interrupted:
+            raise KeyboardInterrupt from None
         return {"status": "compute_stop_unconfirmed", "reason": reason,
                 "attempts": 0, "resource_deleted": False}
     shutdown_deadline = shutdown_started + max_stop_attempts * attempt_timeout_seconds \
@@ -476,6 +483,7 @@ def run_guard(plan: WorkerGuardPlan, heartbeat: Callable[[], float],
                 destination.put(remaining > 0 and (
                     stop() if bounded_stop is None else bounded_stop(remaining, deadline)) is True)
             except (Exception, KeyboardInterrupt):
+                # A child-thread failure cannot cancel the main signal recipient.
                 destination.put(False)
 
         Thread(target=invoke, daemon=True).start()
@@ -485,21 +493,49 @@ def run_guard(plan: WorkerGuardPlan, heartbeat: Callable[[], float],
                 if _finite(wait) and wait > 0 else False
             now = monotonic()
             if confirmed and _finite(now) and shutdown_started <= now < attempt_deadline:
+                if interrupted:
+                    break
                 return {"status": "compute_stop_confirmed", "reason": reason,
                         "attempts": attempt + 1, "resource_deleted": False}
+        except KeyboardInterrupt:
+            interrupted = True
         except queue.Empty:
             pass
         if attempt + 1 < max_stop_attempts:
             remaining = shutdown_deadline - monotonic()
             if not _finite(remaining) or remaining <= 0:
                 break
-            sleep(min(1, remaining))
+            try:
+                sleep(min(1, remaining))
+            except KeyboardInterrupt:
+                interrupted = True
+    if interrupted:
+        raise KeyboardInterrupt from None
     return {"status": "compute_stop_unconfirmed", "reason": reason,
             "attempts": attempts, "resource_deleted": False}
 
 
+class _GuardParser(argparse.ArgumentParser):
+    def error(self, message: str) -> Any:
+        super().error("[stage=worker-guard code=CF_USAGE] invalid command arguments; use --help")
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Own-worker deadline guard (no account key).")
+    """Keep existing 0/2 results; Ctrl-C returns 130 without private diagnostics."""
+    interrupted = False
+    try:
+        return _main()
+    except KeyboardInterrupt:
+        interrupted = True
+    if interrupted:
+        print('{"status":"guard_interrupted","code":"CF_INTERRUPTED","resource_deleted":false}')
+    return 130
+
+
+def _main() -> int:
+    parser = _GuardParser(description="Own-worker deadline guard (no account key).",
+        epilog="Exit codes: 0 confirmed; 2 usage/application/unconfirmed; 130 interruption "
+               "after bounded owned shutdown attempts. Historical records are unchanged.")
     parser.add_argument("--plan", required=True)
     parser.add_argument("--heartbeat", required=True)
     parser.add_argument("--allow-live", action="store_true")
@@ -521,10 +557,10 @@ def main() -> int:
                            bounded_stop=lambda remaining, deadline: stop_own_pod(
                                plan, allow_live=True, timeout_seconds=remaining,
                                absolute_deadline=deadline))
-    except (Exception, KeyboardInterrupt):
+    except Exception:
         failed = True
     if failed or answer is None:
-        print('{"status":"guard_failed","resource_deleted":false}')
+        print('{"status":"guard_failed","code":"CF_APPLICATION","resource_deleted":false}')
         return 2
     print(json.dumps(answer, sort_keys=True))
     return 0 if answer["status"] == "compute_stop_confirmed" else 2

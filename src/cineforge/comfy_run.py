@@ -21,6 +21,7 @@ from cineforge.comfy_transport import (
     require_time,
 )
 from cineforge.contracts import ProjectPlan, RunManifest, RunStatus, ShotRun
+from cineforge.interruptions import preserve_interruption, remember_interruption
 from cineforge.private_store import PrivateRunDirectory
 from cineforge.workflows import canonical, strict_object
 
@@ -98,6 +99,7 @@ def _verify_nodes(transport: ComfyTransport, selection: ApprovedComfySelection,
         raise ComfyRunError("worker output node is not executable")
 
 
+@preserve_interruption
 def execute_comfy(
     plan: ProjectPlan, selection: ApprovedComfySelection, worker: WorkerVerification,
     output_dir: str | Path, *, allow_live: bool = False,
@@ -188,7 +190,8 @@ def execute_comfy(
         }
         prepared_record = canonical(record)
         require_time(inference_deadline, clock)
-    except (Exception, KeyboardInterrupt):
+    except (Exception, KeyboardInterrupt) as interruption_error:
+        remember_interruption(interruption_error)
         failed = True
     if (failed or provider is None or bounded is None or request is None
             or record is None or prepared_record is None):
@@ -234,7 +237,8 @@ def execute_comfy(
                               manifest=completed.to_dict())
                 store.checkpoint(canonical(record))
                 require_time(deadline, clock)
-            except (Exception, KeyboardInterrupt):
+            except (Exception, KeyboardInterrupt) as interruption_error:
+                remember_interruption(interruption_error)
                 failed = True
                 # One bounded attempt, for this instance's confirmed job only. A missing
                 # acknowledgement/history never becomes a fabricated cancelled state.
@@ -246,16 +250,19 @@ def execute_comfy(
                     try:
                         run = provider.cancel(run.job_id)
                         record["cancellation"]["confirmed_terminal"] = run.status in TERMINAL
-                    except (Exception, KeyboardInterrupt):
+                    except (Exception, KeyboardInterrupt) as interruption_error:
+                        remember_interruption(interruption_error)
                         pass
                 record.update(outcome="incomplete", known_run=None if run is None else run.to_dict())
                 if run is not None:
                     record["server_output"] = provider.output_descriptor(run.job_id)
                 try:
                     store.checkpoint(canonical(record))
-                except (Exception, KeyboardInterrupt):
+                except (Exception, KeyboardInterrupt) as interruption_error:
+                    remember_interruption(interruption_error)
                     pass
-    except (Exception, KeyboardInterrupt):
+    except (Exception, KeyboardInterrupt) as interruption_error:
+        remember_interruption(interruption_error)
         failed = True
     if failed or completed is None:
         raise ComfyRunError("ComfyUI run incomplete; inspect private run.json before any new submission")

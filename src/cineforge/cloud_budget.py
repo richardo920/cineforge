@@ -16,6 +16,7 @@ from urllib.parse import quote
 from cineforge.cloud_journal import CloudJournal
 from cineforge.comfy_policy import ApprovedComfySelection
 from cineforge.devices import ModelSpec
+from cineforge.interruptions import preserve_interruption, remember_interruption
 from cineforge.runpod import (
     AcquisitionIntent,
     CleanupUncertainError,
@@ -88,6 +89,7 @@ class BudgetApproval:
             raise CloudBudgetError("invalid bounded budget approval")
 
     @classmethod
+    @preserve_interruption
     def from_proposal(cls, proposal: dict[str, Any], *, expected_subject_sha256: str,
                       expected_model_workflow_sha256: str, model: ModelSpec,
                       selection: ApprovedComfySelection) -> BudgetApproval:
@@ -168,7 +170,8 @@ class BudgetApproval:
                          float(subject["aggregate_limit_usd"]), subject["max_create_attempts"],
                          1, float(subject["worker_lifetime_limit_seconds"]),
                          float(subject["compute_price_ceiling_usd_per_hour"]), 80)
-        except (Exception, KeyboardInterrupt):
+        except (Exception, KeyboardInterrupt) as interruption_error:
+            remember_interruption(interruption_error)
             failed = True
         if failed or result is None:
             raise CloudBudgetError("proposal does not match independently approved scope")
@@ -316,6 +319,7 @@ class CloudBudgetSession:
         self._entered = False
         self._cleanup_inflight: set[str] = set()
 
+    @preserve_interruption
     def __enter__(self) -> CloudBudgetSession:
         from cineforge.s2v_service import S2VBudgetApproval
         self._journal.__enter__()
@@ -340,7 +344,8 @@ class CloudBudgetSession:
                     self._poisoned = True
             self._entered = True
             self._save()
-        except (Exception, KeyboardInterrupt):
+        except (Exception, KeyboardInterrupt) as interruption_error:
+            remember_interruption(interruption_error)
             failed = True
         if failed:
             self._journal.__exit__(None, None, None)
@@ -420,10 +425,12 @@ class CloudBudgetSession:
         self._data["last_wall"] = max(self._data["last_wall"], self._effective)
         return self._effective
 
+    @preserve_interruption
     def _save(self) -> None:
         try:
             self._journal.checkpoint(canonical(self._data))
-        except (Exception, KeyboardInterrupt):
+        except (Exception, KeyboardInterrupt) as interruption_error:
+            remember_interruption(interruption_error)
             self._poisoned = True
             raise CloudBudgetError("durable cloud budget checkpoint failed") from None
 
@@ -460,6 +467,7 @@ class CloudBudgetSession:
             # Identity checkpoint is synchronous and precedes probe/work in the driver.
             self._save()
 
+    @preserve_interruption
     def _fresh_quote(self, intent: AcquisitionIntent) -> dict[str, Any]:
         observed = self._now()
         path = ("/v2/catalog/gpus/" + quote(intent.spec.gpu_id, safe="")
@@ -497,7 +505,8 @@ class CloudBudgetSession:
             result = {"observed_unix": observed, "compute_hourly_usd": rate,
                       "gpu_id": catalog["id"], "region": location["id"],
                       "cuda_versions": available_cuda}
-        except (Exception, KeyboardInterrupt):
+        except (Exception, KeyboardInterrupt) as interruption_error:
+            remember_interruption(interruption_error)
             failed = True
         if failed or result is None:
             raise CloudBudgetError("fresh compatible regional compute quote unavailable")
@@ -626,6 +635,7 @@ class CloudBudgetSession:
                 finally:
                     self._cleanup_inflight.discard(intent.key)
 
+    @preserve_interruption
     def _release_claims(self, provisioner: RunpodPodProvisioner,
                         claims: list[tuple[AcquisitionIntent, LeaseSnapshot]],
                         uncertain: list[str] | None = None) -> tuple[str, ...]:
@@ -635,7 +645,8 @@ class CloudBudgetSession:
             release_failed = False
             try:
                 self._release(provisioner, intent, snapshot)
-            except (Exception, KeyboardInterrupt):
+            except (Exception, KeyboardInterrupt) as interruption_error:
+                remember_interruption(interruption_error)
                 release_failed = True
             if release_failed:
                 failed.append(intent.key)
@@ -664,6 +675,7 @@ class CloudBudgetSession:
                         claims.append(claim)
         return self._release_claims(provisioner, claims)
 
+    @preserve_interruption
     def recover_owned(self, provisioner: RunpodPodProvisioner, *, max_pages: int = 10) -> tuple[str, ...]:
         """GET-only discovery followed by verified owned deletion; never recreate/retry POST."""
         if type(max_pages) is not int or not 1 <= max_pages <= 20:
@@ -688,12 +700,14 @@ class CloudBudgetSession:
                     claim = self._claim_cleanup(record)
                     if claim is not None:
                         claims.append(claim)
-                except (Exception, KeyboardInterrupt):
+                except (Exception, KeyboardInterrupt) as interruption_error:
+                    remember_interruption(interruption_error)
                     # Discovery/checkpoint failure on a later record must not prevent
                     # releases already claimed, or other records' recovery attempts.
                     uncertain.append(snapshot.key)
         return self._release_claims(provisioner, claims, uncertain)
 
+    @preserve_interruption
     def _discover(self, record: dict[str, Any], max_pages: int) -> None:
         intent = AcquisitionIntent.from_dict(record["intent"])
         matches = []
@@ -734,7 +748,8 @@ class CloudBudgetSession:
                         or cursor in visited):
                     break
                 visited.add(cursor)
-        except (Exception, KeyboardInterrupt):
+        except (Exception, KeyboardInterrupt) as interruption_error:
+            remember_interruption(interruption_error)
             complete = False
         record["discovered_ids"] = sorted(set(record["discovered_ids"] + matches))
         if complete and len(record["discovered_ids"]) == 1:

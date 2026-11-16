@@ -52,8 +52,8 @@ def unpack(raw: bytes) -> tuple[dict[str, Any], bytes]:
 
 
 def _finish(process: subprocess.Popen[bytes] | None, selector: selectors.BaseSelector | None,
-            deadline: float) -> bool:
-    uncertain = False
+            deadline: float) -> tuple[bool, bool]:
+    uncertain = cancelled = False
     if process is not None:
         try:
             # The parent is not polled/reaped before this signal, retaining its PID
@@ -61,23 +61,27 @@ def _finish(process: subprocess.Popen[bytes] | None, selector: selectors.BaseSel
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-        except BaseException:
+        except BaseException as interruption_error:
+            cancelled = cancelled or isinstance(interruption_error, KeyboardInterrupt)
             uncertain = True
             try:
                 process.kill()
             except ProcessLookupError:
                 pass
-            except BaseException:
+            except BaseException as interruption_error:
+                cancelled = cancelled or isinstance(interruption_error, KeyboardInterrupt)
                 uncertain = True
         try:
             remaining = max(0.0, min(2.0, deadline - time.monotonic()))
             process.wait(timeout=remaining)
-        except BaseException:
+        except BaseException as interruption_error:
+            cancelled = cancelled or isinstance(interruption_error, KeyboardInterrupt)
             uncertain = True
     if selector is not None:
         try:
             selector.close()
-        except BaseException:
+        except BaseException as interruption_error:
+            cancelled = cancelled or isinstance(interruption_error, KeyboardInterrupt)
             uncertain = True
     if process is not None:
         for name in ("stdin", "stdout"):
@@ -85,9 +89,19 @@ def _finish(process: subprocess.Popen[bytes] | None, selector: selectors.BaseSel
                 stream = getattr(process, name)
                 if stream is not None:
                     stream.close()
-            except BaseException:
+            except BaseException as interruption_error:
+                cancelled = cancelled or isinstance(interruption_error, KeyboardInterrupt)
                 uncertain = True
-    return uncertain
+    return uncertain, cancelled
+
+
+class OwnedChildInterrupted(KeyboardInterrupt):
+    """Sanitized cancellation carrying only owned cleanup facts."""
+
+    def __init__(self, process_id: int | None, uncertain: bool) -> None:
+        super().__init__()
+        self.owned_process_id = process_id
+        self.cleanup_uncertain = uncertain
 
 
 def run_child(command: tuple[str, ...], *, payload: bytes, env: dict[str, str],
@@ -156,13 +170,17 @@ def run_child(command: tuple[str, ...], *, payload: bytes, env: dict[str, str],
     except BaseException:
         failed = True
     finally:
-        uncertain = _finish(process, selector, deadline)
+        uncertain, cleanup_cancelled = _finish(process, selector, deadline)
+        cancelled = cancelled or cleanup_cancelled
+    # Only the owned reap establishes the fixed child interruption exit code.
+    if process is not None and process.returncode in (130, -signal.SIGINT):
+        cancelled = True
+    if cancelled:
+        raise OwnedChildInterrupted(None if process is None else process.pid, uncertain) from None
     if uncertain:
         raise NativeSpeechError("native speech cleanup incomplete or unconfirmed",
                                 cleanup_uncertain=True,
                                 owned_process_id=None if process is None else process.pid) from None
-    if cancelled:
-        raise KeyboardInterrupt from None
     if failed or result is None or process is None or process.returncode != 0:
         raise NativeSpeechError("bounded native speech child failed",
                                 owned_process_id=None if process is None else process.pid) from None

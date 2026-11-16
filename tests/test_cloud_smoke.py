@@ -167,7 +167,8 @@ class ManagedSmokeTests(unittest.TestCase):
                 self.cloud = Cloud(Clock())
                 try:
                     self.run_smoke(mode=mode)
-                except CloudSmokeError:
+                except (CloudSmokeError, KeyboardInterrupt) as error:
+                    self.assertIsInstance(error, KeyboardInterrupt if mode == "interrupt" else CloudSmokeError)
                     self.assertNotIn("fixture-sensitive-value", traceback.format_exc())
                 else:
                     self.fail("managed failure was reported as success")

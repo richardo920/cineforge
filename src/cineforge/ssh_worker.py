@@ -31,6 +31,7 @@ from cineforge.comfy_transport import (
     require_time,
 )
 from cineforge.devices import Backend, GPUDevice
+from cineforge.interruptions import preserve_interruption, remember_interruption
 from cineforge.private_store import PrivateRunDirectory, read_private_input
 from cineforge.runpod import LeaseSnapshot, RunpodPodSpec, WorkerObservation
 from cineforge.runpod_transport import CloudTransport
@@ -53,6 +54,7 @@ class WorkerError(ValueError):
 MAX_CONTROL_NAMESPACES = 8
 
 
+@preserve_interruption
 def private_file(path: str | Path, *, max_bytes: int, read: bool = True) -> bytes:
     """External owned0600 input, no links or Git ancestors; never log path or bytes."""
     descriptor = -1
@@ -81,7 +83,8 @@ def private_file(path: str | Path, *, max_bytes: int, read: bool = True) -> byte
             data = os.read(descriptor, max_bytes + 1)
             if len(data) > max_bytes:
                 raise ValueError
-    except (Exception, KeyboardInterrupt):
+    except (Exception, KeyboardInterrupt) as interruption_error:
+        remember_interruption(interruption_error)
         failed = True
     finally:
         if descriptor >= 0:
@@ -97,6 +100,7 @@ def ssh_environment() -> dict[str, str]:
             "LANG": "C", "LC_ALL": "C"}
 
 
+@preserve_interruption
 def run_process(command: list[str], *, timeout: float, payload: bytes = b"",
                 check: Callable[[], None] = lambda: None, max_output: int = 65536,
                 decode_setup_failure: bool = False,
@@ -112,7 +116,8 @@ def run_process(command: list[str], *, timeout: float, payload: bytes = b"",
             **bounds)
     except worker_bootstrap.SetupFailure:
         raise
-    except (Exception, KeyboardInterrupt):
+    except (Exception, KeyboardInterrupt) as interruption_error:
+        remember_interruption(interruption_error)
         failed = True
     if failed or answer is None:
         raise WorkerError("bounded SSH process failed")
@@ -189,8 +194,12 @@ class SSHWorker:
         self._claimed = PrivateRunDirectory(self.state_dir).__enter__()
         return self
 
+    @preserve_interruption
     def __exit__(self, kind: type[BaseException] | None, value: BaseException | None,
                  traceback: TracebackType | None) -> None:
+        # Record the body's cancellation before either finalizer can replace it.
+        if value is not None:
+            remember_interruption(value)
         try:
             self.close()
         finally:
@@ -198,6 +207,7 @@ class SSHWorker:
                 claimed, self._claimed = self._claimed, None
                 claimed.__exit__(kind, value, traceback)
 
+    @preserve_interruption
     def _connection(self, snapshot: LeaseSnapshot, timeout: float) -> bool:
         # A previous connection must not survive a newly missing/rejected observation.
         self._host, self._port = "", 0
@@ -247,7 +257,8 @@ class SSHWorker:
                     or not 1 <= direct["port"] <= 65535):
                 raise ValueError
             self._host, self._port = str(address), direct["port"]
-        except (Exception, KeyboardInterrupt):
+        except (Exception, KeyboardInterrupt) as interruption_error:
+            remember_interruption(interruption_error)
             failed = True
         if failed:
             raise WorkerError("owned worker connection metadata rejected")
@@ -308,6 +319,7 @@ class SSHWorker:
             raise WorkerError("worker setup response rejected")
         return reply
 
+    @preserve_interruption
     def probe(self, snapshot: LeaseSnapshot, timeout: float) -> WorkerObservation | None:
         if self.plan is not None:
             self.check()
@@ -325,7 +337,8 @@ class SSHWorker:
             if remaining <= 0:
                 return None
             self._request({"operation": "ping"}, min(5, remaining), supervise=False)
-        except (Exception, KeyboardInterrupt):
+        except (Exception, KeyboardInterrupt) as interruption_error:
+            remember_interruption(interruption_error)
             return None
         remaining = min(timeout - (time.monotonic() - started),
                         self.budget.remaining_seconds(snapshot.key))
@@ -353,6 +366,7 @@ class SSHWorker:
         self._thread.start()
         return self.observation
 
+    @preserve_interruption
     def _supervise(self) -> None:
         while not self._stop.wait(10):
             try:
@@ -364,7 +378,8 @@ class SSHWorker:
                         self._request({"operation": "heartbeat", "plan": self.plan.to_dict()},
                             min(5, self.budget.remaining_seconds(self._key)), supervise=False)
                 self.budget.heartbeat(self._key)
-            except (Exception, KeyboardInterrupt):
+            except (Exception, KeyboardInterrupt) as interruption_error:
+                remember_interruption(interruption_error)
                 self._failed.set()
                 try:
                     self._close_tunnel()
@@ -372,6 +387,7 @@ class SSHWorker:
                     pass
                 break
 
+    @preserve_interruption
     def check(self) -> None:
         failed = False
         try:
@@ -386,7 +402,8 @@ class SSHWorker:
                     or self.plan is not None and self.budget.remaining_seconds(self._key) <= 0
                     or self._tunnel is not None and self._tunnel.poll() is not None):
                 raise ValueError
-        except (Exception, KeyboardInterrupt):
+        except (Exception, KeyboardInterrupt) as interruption_error:
+            remember_interruption(interruption_error)
             failed = True
         if failed:
             try:
@@ -451,6 +468,7 @@ class SSHWorker:
             raise WorkerError("worker verification identity differs")
         return result
 
+    @preserve_interruption
     def _prepare_closed_comfy(self, selection: S2VSelection, runtime: ClosedComfyRuntime,
                               deadline: float) -> WorkerVerification:
         result = None
@@ -473,7 +491,8 @@ class SSHWorker:
             self.check()
             if time.monotonic() >= deadline:
                 raise ValueError
-        except BaseException:
+        except BaseException as interruption_error:
+            remember_interruption(interruption_error)
             failed = True
             runtime._poison()
         if failed or result is None or observed is None:
@@ -507,6 +526,7 @@ class SSHWorker:
             worker_bootstrap.validate_m4_runtime(runtime)
         return strict_object(canonical(runtime))
 
+    @preserve_interruption
     def _require_s2v(self, selection: S2VSelection | None) -> None:
         failed = False
         try:
@@ -519,7 +539,8 @@ class SSHWorker:
             selection.request(selection.gate.shot)
             if trace["speech_native_proof"]["worker_id"] != self.plan.pod_id:
                 raise ValueError
-        except (Exception, KeyboardInterrupt):
+        except (Exception, KeyboardInterrupt) as interruption_error:
+            remember_interruption(interruption_error)
             failed = True
         if failed:
             raise WorkerError("current S2V request differs from guarded native worker scope")
@@ -556,6 +577,7 @@ class SSHWorker:
             raise WorkerError("native speech absolute deadline exceeded")
         return result
 
+    @preserve_interruption
     def run_guarded_native(self, invoke: NativeInvoker, *, allow_live: bool = False) -> Any:
         """Invoke trusted controller-local code once under the current M5 guard.
 
@@ -582,7 +604,8 @@ class SSHWorker:
             self.check()
             if time.monotonic() >= deadline:
                 raise ValueError
-        except (Exception, KeyboardInterrupt):
+        except (Exception, KeyboardInterrupt) as interruption_error:
+            remember_interruption(interruption_error)
             failed = True
         if failed:
             raise WorkerError("guarded native speech incomplete or unconfirmed")
@@ -593,6 +616,7 @@ class SSHWorker:
         """Observed preparation snapshot only; not a materialized graph authorization."""
         return self._prepared_s2v
 
+    @preserve_interruption
     def stage_s2v(self, selection: S2VSelection, *,
                   absolute_deadline: float | None = None) -> StagedS2VPair:
         """One consumed transfer under a trusted same-host cap; never replay lost ACKs.
@@ -611,11 +635,13 @@ class SSHWorker:
             candidate = min(candidate, sampled + remaining - 120)
             require_time(candidate, time.monotonic)
             deadline = candidate
-        except (Exception, KeyboardInterrupt):
+        except (Exception, KeyboardInterrupt) as interruption_error:
+            remember_interruption(interruption_error)
             pass
         if deadline is None:
             raise WorkerError("invalid or expired private paired-transfer deadline")
 
+        @preserve_interruption
         def window() -> None:
             valid = False
             try:
@@ -626,7 +652,8 @@ class SSHWorker:
                     raise ValueError
                 require_time(deadline, time.monotonic)
                 valid = True
-            except (Exception, KeyboardInterrupt):
+            except (Exception, KeyboardInterrupt) as interruption_error:
+                remember_interruption(interruption_error)
                 pass
             if not valid:
                 raise WorkerError("private paired transfer reached its deadline or cleanup reserve")
@@ -692,7 +719,8 @@ class SSHWorker:
                 self._require_s2v(selection)
                 self._comfy_selection = selection
                 result = StagedS2VPair(self.plan.pod_id, scope, subject, canonical(media).decode())
-            except (Exception, KeyboardInterrupt):
+            except (Exception, KeyboardInterrupt) as interruption_error:
+                remember_interruption(interruption_error)
                 failed = True
             if failed or result is None:
                 raise WorkerError("private paired transfer incomplete or unconfirmed; never replay")
@@ -741,6 +769,7 @@ class SSHWorker:
             self._control_socket_identity = identity
             return True
 
+    @preserve_interruption
     def _close_tunnel(self) -> None:
         failed = False
         with self._tunnel_lock:
@@ -753,7 +782,8 @@ class SSHWorker:
                     os.killpg(process.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
-                except (Exception, KeyboardInterrupt):
+                except (Exception, KeyboardInterrupt) as interruption_error:
+                    remember_interruption(interruption_error)
                     killed = False
                     failed = True
                 try:
@@ -761,7 +791,8 @@ class SSHWorker:
                         raise ValueError
                     if killed:
                         self._tunnel = None
-                except (Exception, KeyboardInterrupt):
+                except (Exception, KeyboardInterrupt) as interruption_error:
+                    remember_interruption(interruption_error)
                     failed = True
             if self._tunnel is None and self._control_dir is not None:
                 try:
@@ -773,7 +804,8 @@ class SSHWorker:
                         self._control_identity, self._control_socket_identity))
                     self._control_dir = None
                     self._control_identity = self._control_socket_identity = None
-                except (Exception, KeyboardInterrupt):
+                except (Exception, KeyboardInterrupt) as interruption_error:
+                    remember_interruption(interruption_error)
                     failed = True
         if failed:
             raise WorkerError("owned SSH tunnel cleanup is not confirmed") from None
@@ -816,6 +848,7 @@ class SSHWorker:
         if not self._control_ready():
             raise WorkerError("owned SSH control socket disappeared")
 
+    @preserve_interruption
     def endpoint(self, *, absolute_deadline: float | None = None) -> str:
         """Bound tunnel setup to a same-host parent cap, including owned finalizers."""
         deadline = None
@@ -830,7 +863,8 @@ class SSHWorker:
             candidate = min(candidate, sampled + remaining - reserve)
             require_time(candidate, time.monotonic)
             deadline = candidate
-        except (Exception, KeyboardInterrupt):
+        except (Exception, KeyboardInterrupt) as interruption_error:
+            remember_interruption(interruption_error)
             pass
         if deadline is None:
             raise WorkerError("invalid or expired private tunnel deadline")
@@ -838,7 +872,8 @@ class SSHWorker:
         try:
             endpoint = self._endpoint_with_deadline(deadline)
             self._tunnel_remaining(deadline)
-        except (Exception, KeyboardInterrupt):
+        except (Exception, KeyboardInterrupt) as interruption_error:
+            remember_interruption(interruption_error)
             endpoint = None
         if endpoint is None or time.monotonic() >= deadline:
             cleanup_failed = False
@@ -851,6 +886,7 @@ class SSHWorker:
             raise WorkerError("private owned tunnel readiness failed")
         return endpoint
 
+    @preserve_interruption
     def _endpoint_with_deadline(self, deadline: float) -> str:
         with self._endpoint_lock:
             failed = cleanup_failed = False
@@ -924,7 +960,8 @@ class SSHWorker:
                         self._endpoint = endpoint
                         return endpoint
                 raise ValueError
-            except (Exception, KeyboardInterrupt):
+            except (Exception, KeyboardInterrupt) as interruption_error:
+                remember_interruption(interruption_error)
                 failed = True
             finally:
                 if failed:
@@ -936,6 +973,7 @@ class SSHWorker:
                 raise WorkerError("private tunnel failed with unconfirmed cleanup")
             raise WorkerError("private owned tunnel readiness failed")
 
+    @preserve_interruption
     def execution_transport(self, *, absolute_deadline: float | None = None) -> SupervisedComfyTransport:
         # Constructor validation and the final fresh guard belong to the original
         # same-host setup window too; never derive a new cap after either one.
@@ -954,7 +992,8 @@ class SSHWorker:
                 self.endpoint(absolute_deadline=deadline), allow_live=True))
             self._tunnel_remaining(deadline)
             transport = candidate
-        except (Exception, KeyboardInterrupt):
+        except (Exception, KeyboardInterrupt) as interruption_error:
+            remember_interruption(interruption_error)
             pass
         if transport is None:
             cleanup_failed = False
@@ -967,6 +1006,7 @@ class SSHWorker:
             raise WorkerError("private transport handoff failed current guard or deadline")
         return transport
 
+    @preserve_interruption
     def verify_comfy_current(self, *, absolute_deadline: float | None = None) -> None:
         if type(self.selection) is not S2VServiceContext:
             return
@@ -983,7 +1023,8 @@ class SSHWorker:
             candidate = min(candidate, sampled + remaining - 120)
             require_time(candidate, time.monotonic)
             deadline = candidate
-        except (Exception, KeyboardInterrupt):
+        except (Exception, KeyboardInterrupt) as interruption_error:
+            remember_interruption(interruption_error)
             pass
         if deadline is None:
             raise WorkerError("invalid or expired current Comfy verification deadline")
@@ -992,18 +1033,21 @@ class SSHWorker:
             self._closed_comfy.verify(self, self._comfy_selection, deadline=deadline)
             require_time(deadline, time.monotonic)
             valid = True
-        except (Exception, KeyboardInterrupt):
+        except (Exception, KeyboardInterrupt) as interruption_error:
+            remember_interruption(interruption_error)
             pass
         if not valid:
             raise WorkerError("current Comfy verification incomplete or past original deadline")
 
+    @preserve_interruption
     def close(self) -> None:
         self._stop.set()
         failed = False
         try:
             if self._thread is not None:
                 self._thread.join(timeout=7)
-        except (Exception, KeyboardInterrupt):
+        except (Exception, KeyboardInterrupt) as interruption_error:
+            remember_interruption(interruption_error)
             failed = True
         try:
             self._close_tunnel()

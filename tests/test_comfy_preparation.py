@@ -71,7 +71,14 @@ class ComfyPreparationTests(unittest.TestCase):
                     return original(template, request)
 
                 with patch.object(WorkflowTemplate, "translate", translate):
-                    self.assert_preflight_rejected()
+                    if failure is KeyboardInterrupt:
+                        with self.assertRaises(KeyboardInterrupt) as caught:
+                            self.execute()
+                        self.assertNotIn(CANARY, "".join(traceback.format_exception(caught.exception)))
+                        self.assertEqual(self.wire.calls, [])
+                        self.assertFalse(self.output.exists())
+                    else:
+                        self.assert_preflight_rejected()
                 self.assertEqual(calls, 2)
 
     def test_late_approval_property_failure_is_static_before_claim(self):

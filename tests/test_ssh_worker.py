@@ -350,7 +350,7 @@ class SSHTests(unittest.TestCase):
             output = run_process([sys.executable, "-c",
                 "import os;print(os.environ.get('RUNPOD_API_KEY','absent'))"], timeout=2)
             self.assertEqual(output, b"absent\n")
-        with self.assertRaises(WorkerError):
+        with self.assertRaises(KeyboardInterrupt):
             run_process([sys.executable, "-c", "print('done')"], timeout=2,
                         check=lambda: (_ for _ in ()).throw(KeyboardInterrupt()))
 
@@ -358,7 +358,7 @@ class SSHTests(unittest.TestCase):
         exercise_descendant_pipe(self, self.root, "cineforge.ssh_worker", "run_process")
 
     def test_post_spawn_clock_interruption_reaps_ssh_child_and_closes_pipes(self):
-        exercise_post_spawn_clock_failure(self, run_process, WorkerError)
+        exercise_post_spawn_clock_failure(self, run_process, KeyboardInterrupt)
 
     def test_only_native_fetch_has_a_larger_bounded_response(self):
         worker = self.worker(allow_live=True)

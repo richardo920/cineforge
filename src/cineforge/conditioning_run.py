@@ -21,6 +21,7 @@ from cineforge.conditioning import (
     digest,
 )
 from cineforge.contracts import RunManifest
+from cineforge.interruptions import preserve_interruption, remember_interruption
 from cineforge.private_store import PrivateRunDirectory, read_private_input
 from cineforge.runpod import AcquisitionIntent, LeaseSnapshot, RunpodPodProvisioner, RunpodPodSpec
 from cineforge.runpod_transport import CloudTransport
@@ -118,6 +119,7 @@ def technical_result(manifest: RunManifest, directory: Path,
             "identity_review": "pending_human_review"}
 
 
+@preserve_interruption
 def run_conditioned(selection: ConditioningSelection, spec: RunpodPodSpec,
                     transport: CloudTransport, budget_dir: str | Path, output_dir: str | Path,
                     worker_factory: WorkerFactory, *, allow_live: bool = False,
@@ -193,7 +195,8 @@ def run_conditioned(selection: ConditioningSelection, spec: RunpodPodSpec,
                                 "manifest": manifest.to_dict()})
                             report["outcome"] = "generating"
                             store.checkpoint(canonical(report))
-                except (Exception, KeyboardInterrupt):
+                except (Exception, KeyboardInterrupt) as interruption_error:
+                    remember_interruption(interruption_error)
                     failed = True
                     report["outcome"] = "incomplete"
                     diagnostic = checked_setup_failure(getattr(worker, "setup_failure", None))
@@ -203,7 +206,8 @@ def run_conditioned(selection: ConditioningSelection, spec: RunpodPodSpec,
                     # must still enter finally and attempt deletion of the owned Pod.
                     try:
                         store.checkpoint(canonical(report))
-                    except (Exception, KeyboardInterrupt):
+                    except (Exception, KeyboardInterrupt) as interruption_error:
+                        remember_interruption(interruption_error)
                         pass
                 finally:
                     if provider is not None:
@@ -211,7 +215,8 @@ def run_conditioned(selection: ConditioningSelection, spec: RunpodPodSpec,
                             if snapshot.resource_id is not None and snapshot.state != "released":
                                 try:
                                     provider.release(snapshot.resource_id)
-                                except (Exception, KeyboardInterrupt):
+                                except (Exception, KeyboardInterrupt) as interruption_error:
+                                    remember_interruption(interruption_error)
                                     failed = True
                     report["leases"] = [s.to_dict() for s in budget.snapshots]
                     report["release_verified"] = (bool(budget.snapshots)
@@ -228,17 +233,20 @@ def run_conditioned(selection: ConditioningSelection, spec: RunpodPodSpec,
                         if len({m.artifacts[0].sha256 for m, _ in manifests}) != 3:
                             raise ConditioningError("M4 requires three distinct output artifacts")
                         report.update(outcome="pending_human_review", technical_results=media)
-                    except (Exception, KeyboardInterrupt):
+                    except (Exception, KeyboardInterrupt) as interruption_error:
+                        remember_interruption(interruption_error)
                         failed = True
                         report["outcome"] = "incomplete"
                     store.checkpoint(canonical(report))
-    except (Exception, KeyboardInterrupt):
+    except (Exception, KeyboardInterrupt) as interruption_error:
+        remember_interruption(interruption_error)
         failed = True
     if failed:
         raise ConditioningError("M4 run incomplete; retain private run and budget journals")
     return report
 
 
+@preserve_interruption
 def recover_conditioned(approval: ConditioningBudgetApproval, transport: CloudTransport,
                         budget_dir: str | Path, *, allow_live: bool = False) -> dict[str, Any]:
     """Owned recovery does not need reference bytes/current consent or create/probe anything."""
@@ -268,7 +276,8 @@ def recover_conditioned(approval: ConditioningBudgetApproval, transport: CloudTr
                 "uncertain_identities": budget.uncertain_identities}
             if not released:
                 raise ConditioningError("M4 owned recovery remains uncertain")
-    except (Exception, KeyboardInterrupt):
+    except (Exception, KeyboardInterrupt) as interruption_error:
+        remember_interruption(interruption_error)
         failed = True
     if failed or result is None:
         raise ConditioningError("M4 recovery incomplete; retain private budget journal")

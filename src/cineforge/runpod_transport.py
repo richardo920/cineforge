@@ -15,6 +15,8 @@ from threading import Thread, Timer
 from typing import Protocol
 from urllib.parse import parse_qsl, unquote, urlsplit
 
+from cineforge.interruptions import preserve_interruption, remember_interruption
+
 
 class CloudTransportError(ValueError):
     """Sanitized transport failure; a mutation's outcome may be unknown."""
@@ -31,6 +33,8 @@ def bounded_seconds(value: object) -> float:
 class CloudResponse:
     status: int
     body: bytes
+    # A complete POST acknowledgement must reach the owner before cancellation.
+    interrupted: bool = False
 
 
 class CloudTransport(Protocol):
@@ -67,6 +71,7 @@ def _request_path(method: str, path: object) -> bool:
         return False
 
 
+@preserve_interruption
 def _open_connection(deadline: float) -> http.client.HTTPSConnection:
     # DNS may outlive a socket timeout. Its daemon performs resolution only, never I/O
     # that could submit a late paid request after the caller's deadline.
@@ -107,7 +112,8 @@ def _open_connection(deadline: float) -> http.client.HTTPSConnection:
         finally:
             try:
                 raw.close()
-            except (Exception, KeyboardInterrupt):
+            except (Exception, KeyboardInterrupt) as interruption_error:
+                remember_interruption(interruption_error)
                 pass
     raise CloudTransportError("cloud TLS connection failed or exceeded deadline")
 
@@ -125,6 +131,7 @@ class RunpodHTTPTransport:
             raise CloudTransportError("invalid externally supplied cloud credentials or opt-in")
         self._api_key, self._allow_live = api_key, allow_live
 
+    @preserve_interruption
     def request(self, method: str, path: str, body: dict[str, object] | None = None,
                 *, timeout_seconds: float, max_bytes: int) -> CloudResponse:
         if not self._allow_live:
@@ -136,6 +143,7 @@ class RunpodHTTPTransport:
                 or method in ("GET", "DELETE") and body is not None):
             raise CloudTransportError("invalid cloud request or bounds")
         failed = False
+        close_interrupted = False
         encoded = None
         connection = None
         timer = None
@@ -181,7 +189,8 @@ class RunpodHTTPTransport:
                     answer = CloudResponse(response.status, b"".join(chunks))
                     break
                 chunks.append(chunk)
-        except (Exception, KeyboardInterrupt):
+        except (Exception, KeyboardInterrupt) as interruption_error:
+            remember_interruption(interruption_error)
             failed = True
         finally:
             if timer is not None:
@@ -189,12 +198,20 @@ class RunpodHTTPTransport:
             if connection is not None:
                 try:
                     connection.close()
-                except (Exception, KeyboardInterrupt):
+                except KeyboardInterrupt:
+                    close_interrupted = True
+                except Exception:
                     # Local socket cleanup cannot erase a complete create response's
                     # known identity, or leak diagnostics while masking a prior error.
                     pass
         # Raise outside the handler: arbitrary socket/HTTP errors cannot survive in
         # traceback context or expose a key, response body or provider diagnostic.
+        if close_interrupted and (failed or answer is None or method != "POST"):
+            remember_interruption(KeyboardInterrupt())
         if failed or answer is None:
             raise CloudTransportError("Runpod HTTPS request failed")
+        if close_interrupted:
+            if method == "POST":
+                return CloudResponse(answer.status, answer.body, interrupted=True)
+            remember_interruption(KeyboardInterrupt())
         return answer

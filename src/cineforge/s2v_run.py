@@ -18,6 +18,7 @@ from cineforge.comfy_policy import WorkerVerification
 from cineforge.comfy_run import execute_comfy
 from cineforge.comfy_transport import request_deadline, require_time
 from cineforge.contracts import RunManifest
+from cineforge.interruptions import preserve_interruption, remember_interruption
 from cineforge.private_store import PrivateRunDirectory, read_private_input
 from cineforge.s2v import S2VError, S2VSelection
 from cineforge.s2v_service import S2VServiceContext
@@ -26,6 +27,7 @@ from cineforge.worker_bootstrap import validate_s2v_runtime
 from cineforge.workflows import canonical, strict_object
 
 
+@preserve_interruption
 def inspect_s2v_media(path: Path, *, absolute_deadline: float | None = None,
                       clock: Callable[[], float] = time.monotonic) -> dict[str, Any]:
     """Fixed local Matroska/VP9 probe; no network protocols or arbitrary media URL."""
@@ -61,20 +63,23 @@ def inspect_s2v_media(path: Path, *, absolute_deadline: float | None = None,
         candidate = {"media_type": "video/webm", "codec": "vp9", "pixel_format": "yuv420p",
             "width": profile.WIDTH, "height": profile.HEIGHT, "decoded_frames": profile.FRAMES,
             "fps": float(profile.FPS), "duration_seconds": duration}
-    except (Exception, KeyboardInterrupt):
+    except (Exception, KeyboardInterrupt) as interruption_error:
+        remember_interruption(interruption_error)
         candidate = None
     # run_process has completed all owned-process cleanup before this checkout.
     # Never retain a candidate as success after any caught finalization failure.
     failed = False
     try:
         require_time(deadline, clock)
-    except (Exception, KeyboardInterrupt):
+    except (Exception, KeyboardInterrupt) as interruption_error:
+        remember_interruption(interruption_error)
         failed = True
     if failed or candidate is None:
         raise S2VError("bounded local S2V video inspection unavailable or rejected")
     return candidate
 
 
+@preserve_interruption
 def technical_result(selection: S2VSelection, manifest: RunManifest, directory: Path,
                      inspect_media: Callable[[Path], dict[str, Any]] = inspect_s2v_media,
                      *, absolute_deadline: float | None = None,
@@ -128,13 +133,15 @@ def technical_result(selection: S2VSelection, manifest: RunManifest, directory: 
             "speech_modification": "none", "soundtrack": "paired separately; video is silent",
             "visible_lip_sync": "not_assessed", "identity_review": "pending_human_review",
             "language_intelligibility": "not_assessed", "export_authority": "none"}
-    except (Exception, KeyboardInterrupt):
+    except (Exception, KeyboardInterrupt) as interruption_error:
+        remember_interruption(interruption_error)
         result = None
     failed = False
     try:
         if absolute_deadline is not None:
             require_time(absolute_deadline, clock)
-    except (Exception, KeyboardInterrupt):
+    except (Exception, KeyboardInterrupt) as interruption_error:
+        remember_interruption(interruption_error)
         failed = True
     if failed or result is None:
         raise S2VError("actual S2V video or paired speech timing contract rejected")
@@ -166,6 +173,7 @@ def _admit(selection: S2VSelection, verification: WorkerVerification, driver: SS
     _window(driver, deadline, clock)
 
 
+@preserve_interruption
 def run_s2v(selection: S2VSelection, verification: WorkerVerification, driver: SSHWorker,
             output_dir: str | Path, *, allow_live: bool = False,
             execute: Callable[..., RunManifest] = execute_comfy,
@@ -209,7 +217,8 @@ def run_s2v(selection: S2VSelection, verification: WorkerVerification, driver: S
             "human_review": "unavailable", "export_authority": "none"}
         _window(driver, deadline, clock)
         selection.gate.attempt.consume()
-    except (Exception, KeyboardInterrupt):
+    except (Exception, KeyboardInterrupt) as interruption_error:
+        remember_interruption(interruption_error)
         record = None
     if record is None:
         raise S2VError("S2V run preflight rejected or execution intent already consumed")
@@ -258,7 +267,8 @@ def run_s2v(selection: S2VSelection, verification: WorkerVerification, driver: S
                 record.update(outcome="generated", technical_candidate=measured,
                               human_review="unavailable")
                 checkpoint(store)
-            except (Exception, KeyboardInterrupt):
+            except (Exception, KeyboardInterrupt) as interruption_error:
+                remember_interruption(interruption_error)
                 failed = True
                 if "precision_intent" in record and driver._closed_comfy is not None:
                     driver._closed_comfy.abandon_precision()
@@ -266,9 +276,11 @@ def run_s2v(selection: S2VSelection, verification: WorkerVerification, driver: S
                 record.pop("technical_result", None)
                 try:
                     store.checkpoint(canonical(record))
-                except (Exception, KeyboardInterrupt):
+                except (Exception, KeyboardInterrupt) as interruption_error:
+                    remember_interruption(interruption_error)
                     pass
-    except (Exception, KeyboardInterrupt):
+    except (Exception, KeyboardInterrupt) as interruption_error:
+        remember_interruption(interruption_error)
         failed = True
     finalized = None
     if not failed:
@@ -283,7 +295,8 @@ def run_s2v(selection: S2VSelection, verification: WorkerVerification, driver: S
             finalized = strict_object(canonical(finalized))
             # Last observed checkout follows callbacks, validation and copying.
             _window(driver, deadline, clock)
-        except (Exception, KeyboardInterrupt):
+        except (Exception, KeyboardInterrupt) as interruption_error:
+            remember_interruption(interruption_error)
             finalized = None
     if failed or finalized is None:
         raise S2VError("S2V run incomplete; inspect private run/shot state before any new request")

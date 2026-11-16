@@ -252,7 +252,7 @@ class StorageTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 2)
             self.assertEqual(result.stdout, '')
-            self.assertIn('locked', result.stderr)
+            self.assertIn('reason=storage', result.stderr)
         execute_mock(self.plan, output_dir=self.output, resume=True)
 
     def test_symlinks_hardlinks_and_overwrite_are_rejected(self):

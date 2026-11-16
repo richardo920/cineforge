@@ -41,6 +41,7 @@ def worker_source() -> bytes:
             raise ValueError
         helpers = b""
         for name, imports in (
+            ("interruptions.py", ()),
             ("native_speech_pins.py", ()),
             ("native_driver.py", ()),
             ("native_remote_plan.py", (b"from cineforge.native_speech_pins import BASE_FILES, DESIGN_FILES, RUNTIME_DISTRIBUTIONS, SDK_FILES\n",)),
@@ -48,6 +49,7 @@ def worker_source() -> bytes:
             ("audio_pcm.py", ()) ,
             ("paired_media.py", (b"from cineforge.audio_pcm import inspect_pcm16_wav\n",)),
             ("s2v_stage.py", (
+                b"from cineforge.interruptions import preserve_interruption, remember_interruption\n",
                 b"from cineforge.paired_media import PNG_MAX_BYTES, SPEECH_MAX_BYTES, image_metadata, speech_metadata\n",
                 b"from cineforge.worker_bootstrap import BootstrapError, encode, private_write\n")),
         ):
