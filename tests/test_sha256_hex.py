@@ -4,6 +4,7 @@ import json
 import subprocess
 import sys
 import unittest
+from pathlib import Path
 
 from cineforge.json_codec import is_sha256_hex
 from cineforge.native_driver import DRIVER_ALIASES, DRIVER_POLICY, validate_driver_receipt
@@ -11,6 +12,7 @@ from cineforge.native_remote_plan import nr_hash
 from cineforge.s2v import S2VError, _sha
 from cineforge.s2v_stage import _sha as stage_sha
 from cineforge.worker_bundle import worker_source
+from tests.stable_test_temp import stable_temporary_directory
 
 
 class StringSubclass(str):
@@ -81,8 +83,11 @@ for raw in (b'{"x":1,"x":2}', b'{"x":NaN}'):
         results.append("rejected JSON")
 print(json.dumps(results))
 '''
-        result = subprocess.run([sys.executable, "-I", "-c", source.decode() + probe],
-                                capture_output=True, timeout=5)
+        with stable_temporary_directory(prefix="cf-sha256-bundle-") as temporary:
+            script = Path(temporary) / "worker_probe.py"
+            script.write_text(source.decode() + probe, encoding="utf-8")
+            result = subprocess.run([sys.executable, "-I", str(script)],
+                                    capture_output=True, timeout=5)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout), [True, True, False, False,
                          ["ValueError", ""], ["ValueError", "invalid remote speech identity"],
