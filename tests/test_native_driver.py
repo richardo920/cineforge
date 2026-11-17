@@ -13,9 +13,63 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from cineforge import native_driver as driver
+from cineforge.native_remote_bootstrap import NR_CAP_ALIASES
 from cineforge.native_speech_integrity import NativeBinary, NativeSpeechError, verify_binary
 
 BINDING = "a" * 64
+
+
+class DriverRoleTests(unittest.TestCase):
+    PTX_ALIASES = (
+        "/usr/lib/x86_64-linux-gnu/libnvidia-ptxjitcompiler.so.1",
+        "/usr/lib64/libnvidia-ptxjitcompiler.so.1",
+        "/usr/local/nvidia/lib64/libnvidia-ptxjitcompiler.so.1",
+    )
+
+    def test_ptx_jit_compiler_aliases_are_enrolled(self):
+        self.assertEqual(
+            {alias for alias, role in driver.DRIVER_ALIASES.items()
+             if role == "ptx_jit_compiler"}, set(self.PTX_ALIASES))
+        for alias in self.PTX_ALIASES:
+            with self.subTest(alias=alias):
+                self.assertEqual(driver.DRIVER_ALIASES[alias], "ptx_jit_compiler")
+
+    def test_capability_aliases_agree_with_all_driver_roles(self):
+        self.assertEqual(
+            tuple(alias for role, alias in NR_CAP_ALIASES if role == "ptx_jit_compiler"),
+            self.PTX_ALIASES)
+        driver_roles = set(driver.DRIVER_ALIASES.values())
+        self.assertEqual(
+            {(alias, role) for role, alias in NR_CAP_ALIASES if role in driver_roles},
+            set(driver.DRIVER_ALIASES.items()))
+
+    def test_versioned_ptx_jit_plan_binary_accepts_overflow_uid_receipt(self):
+        path = "/usr/lib/x86_64-linux-gnu/libnvidia-ptxjitcompiler.so.595.112.07"
+        # Same mapped-root/read-only-file declaration as the synthetic mount probes.
+        identity = [2049, 2, 65534, stat.S_IFREG | 0o644, 1, 37, 0, 0]
+        for alias in self.PTX_ALIASES:
+            with self.subTest(alias=alias):
+                ancestors = sorted({str(parent) for candidate in (path, alias)
+                                    for parent in Path(candidate).parents})
+                receipt = dict(
+                    policy=driver.DRIVER_POLICY, role="ptx_jit_compiler", alias=alias,
+                    binding_sha256=BINDING, identity=identity,
+                    user_namespace="user:[12]", mount_namespace="mnt:[13]",
+                    uid_map=[[0, 100000, 65536]],
+                    mount=[17, 1, ":".join(map(str, driver.linux_device_parts(identity[0]))),
+                           path, "ext4", "ro,relatime"],
+                    ancestors=[[parent, [2049, index + 3, 0, stat.S_IFDIR | 0o755,
+                                         2, 4096, 0, 0]]
+                               for index, parent in enumerate(ancestors)],
+                    links=[[alias, [2049, 1, 0, stat.S_IFLNK | 0o777, 1, len(path), 0, 0],
+                            path]],
+                )
+                binary = dict(path=path, size_bytes=identity[5], sha256="b" * 64,
+                              driver_mount=receipt)
+                driver.validate_driver_receipt(
+                    binary["driver_mount"], path=binary["path"],
+                    size_bytes=binary["size_bytes"], sha256=binary["sha256"],
+                    binding_sha256=BINDING, role="ptx_jit_compiler", alias=alias)
 
 
 class DriverMountTests(unittest.TestCase):

@@ -43,6 +43,9 @@ NR_CAP_ALIASES = tuple(sorted((role, path) for role, paths in (
                      "/usr/local/nvidia/lib64/libcuda.so.1")),
     ("nvml", ("/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1", "/usr/lib64/libnvidia-ml.so.1",
               "/usr/local/nvidia/lib64/libnvidia-ml.so.1")),
+    ("ptx_jit_compiler", ("/usr/lib/x86_64-linux-gnu/libnvidia-ptxjitcompiler.so.1",
+                          "/usr/lib64/libnvidia-ptxjitcompiler.so.1",
+                          "/usr/local/nvidia/lib64/libnvidia-ptxjitcompiler.so.1")),
 ) for path in paths))
 NR_CAP_ROOTS = ("/usr/bin/", "/usr/local/nvidia/bin/", "/usr/lib/x86_64-linux-gnu/",
                 "/usr/lib64/", "/usr/local/nvidia/lib64/")
