@@ -185,6 +185,41 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual((self.root/"guard.py").read_bytes(), source)
         self.assertEqual(json.loads((self.root/"heartbeat.json").read_text())["pod_id"], "pod_1")
 
+    def test_rearm_retires_old_verified_guard_and_verifies_new_pid(self):
+        plan = worker_guard.WorkerGuardPlan("pod_1", "fixture", "a"*32, time.time()+100, 30)
+        old = dict(plan.to_dict(), stop_at_unix=plan.stop_at_unix - 50)
+        source = b"synthetic guard source"
+        request = {"plan": plan.to_dict(), "guard_source": base64.b64encode(source).decode(),
+                   "guard_sha256": hashlib.sha256(source).hexdigest(), "controller_unix": time.time()}
+        from cineforge.worker_bootstrap import private_write
+        for name, data in (("plan.json", json.dumps(old).encode()), ("guard.py", source),
+                           ("guard-pid.json", b'{"pid":122}'), ("heartbeat.json", b'{}')):
+            private_write(self.root, name, data)
+        guard, process = Mock(), Mock(pid=123)
+        guard.verify_own_pod.return_value = True
+        process.poll.return_value = None
+        calls = []
+        def alive(root, pid):
+            calls.append(("alive", pid))
+            if pid == 122 and ("kill", 122) in calls:
+                raise BootstrapError("old PID absent")
+        def kill(pid, sig):
+            self.assertEqual(sig, signal.SIGKILL)
+            self.assertIn(("alive", 123), calls)
+            calls.append(("kill", pid))
+        with patch("cineforge.worker_bootstrap.worker_root", return_value=self.root), \
+                patch("cineforge.worker_bootstrap.load_guard", return_value=guard), \
+                patch("cineforge.worker_bootstrap.subprocess.Popen", return_value=process), \
+                patch("cineforge.worker_bootstrap.guard_alive", side_effect=alive), \
+                patch("cineforge.worker_bootstrap.os.kill", side_effect=kill), \
+                patch("cineforge.worker_bootstrap.runtime_probe", return_value={}):
+            result = arm(request, time.monotonic()+5)
+        self.assertEqual(result["receipt"]["pid"], 123)
+        self.assertEqual(calls, [("alive", 122), ("alive", 123), ("kill", 122),
+                                 ("alive", 122), ("alive", 123)])
+        self.assertEqual(json.loads((self.root / "guard-pid.json").read_bytes()), {"pid": 123})
+        self.assertEqual(json.loads((self.root / "plan.json").read_bytes()), plan.to_dict())
+
     def test_arm_rejects_source_tampering_before_worker_write(self):
         request = {"plan": {}, "guard_source": base64.b64encode(b"fixture").decode(),
                    "guard_sha256": "0"*64}

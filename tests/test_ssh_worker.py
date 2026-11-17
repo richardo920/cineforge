@@ -389,3 +389,121 @@ class SSHTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RetentionHeartbeatTests(unittest.TestCase):
+    def test_detached_beats_keep_guard_live_past_idle_and_exit_at_expiry(self):
+        from cineforge.retention_heartbeat import feed_until
+        from cineforge.worker_guard import run_guard
+
+        clock = Clock()
+        clock.wall, clock.mono = 10000., 100.
+        expiry = clock.wall + 600
+        beats = []
+        feed_until(expiry, lambda timeout: beats.append(clock.time()),
+                   clock=clock.time, monotonic=clock.monotonic, sleep=clock.sleep)
+        self.assertEqual(beats, list(range(10000, 10600, 10)))
+        self.assertEqual(clock.time(), expiry)
+        clock.wall, clock.mono = 10000., 100.
+        stops = []
+        plan = WorkerGuardPlan("pod_1", "fixture", "a"*32, expiry - 60, 120)
+        def latest():
+            return max(beat for beat in beats if beat <= clock.time())
+        result = run_guard(plan, latest, lambda: stops.append(clock.time()) or True,
+            clock=clock.time, monotonic=clock.monotonic, sleep=clock.sleep)
+        self.assertEqual(result["reason"], "deadline")
+        self.assertEqual(stops, [expiry - 60])
+        self.assertGreater(stops[0], 10000 + 120)
+
+    def test_heartbeat_failure_exits_and_guard_stops_on_idle(self):
+        from cineforge.retention_heartbeat import feed_until
+        from cineforge.worker_guard import run_guard
+
+        clock = Clock()
+        beats = []
+        def beat(timeout):
+            if len(beats) == 2:
+                raise RuntimeError("fake SSH failure")
+            beats.append(clock.time())
+        with self.assertRaises(RuntimeError):
+            feed_until(11000, beat, clock=clock.time,
+                       monotonic=clock.monotonic, sleep=clock.sleep)
+        stops = []
+        plan = WorkerGuardPlan("pod_1", "fixture", "a"*32, 10940, 120)
+        result = run_guard(plan, lambda: beats[-1],
+            lambda: stops.append(clock.time()) or True, clock=clock.time,
+            monotonic=clock.monotonic, sleep=clock.sleep)
+        self.assertEqual(result["reason"], "idle")
+        self.assertEqual(stops, [beats[-1] + 120])
+
+    def test_spawner_is_detached_private_and_injectable_without_running_a_child(self):
+        import stat
+        import subprocess
+        from unittest.mock import Mock
+
+        from cineforge.retention_heartbeat import spawn_heartbeat
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            child = Mock(pid=321)
+            child.poll.return_value = None
+            popen = Mock(return_value=child)
+            pid = spawn_heartbeat(root, ["/usr/bin/ssh", "fake"], {"operation": "heartbeat"},
+                                  14000, {"LANG": "C"}, popen=popen)
+            self.assertEqual(pid, 321)
+            args, kwargs = popen.call_args
+            self.assertEqual(args[0][:3], [sys.executable, "-I", "-c"])
+            self.assertTrue(kwargs["start_new_session"])
+            for stream in ("stdin", "stdout", "stderr"):
+                self.assertEqual(kwargs[stream], subprocess.DEVNULL)
+            path = root / "retention-heartbeat.json"
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            config = json.loads(path.read_bytes())
+            self.assertEqual(config["expires_unix"], 14000)
+            self.assertEqual(config["command"], ["/usr/bin/ssh", "fake"])
+            self.assertNotIn("budget", config)
+            with self.assertRaises(ValueError):
+                spawn_heartbeat(root, [], {}, float("inf"), {}, popen=popen)
+            self.assertEqual(popen.call_count, 1)
+
+    def test_worker_rearms_before_immediate_beat_and_detached_handoff(self):
+        from threading import Lock
+        from unittest.mock import Mock
+
+        worker = object.__new__(SSHWorker)
+        worker._remote_lock = Lock()
+        worker._remote_suspended = Event()
+        worker.check = Mock()
+        worker._key = "first"
+        worker.plan = WorkerGuardPlan("pod_1", "fixture", "a"*32, 11740, 120)
+        updated = WorkerGuardPlan("pod_1", "fixture", "a"*32, 15340, 120)
+        worker.budget = Mock()
+        worker.budget.remaining_seconds.return_value = 1000
+        worker.budget.guard_plan.return_value = updated
+        worker._profile = None
+        worker.selection = None
+        worker._source = worker_source()
+        worker._host, worker._port = "8.8.8.8", 2222
+        worker.private_key = Path("/synthetic-key")
+        worker.state_dir = Path("/synthetic-private-worker")
+        receipt = GuardReceipt(updated, worker_guard_source_sha256(), 123,
+                               time.time(), True, True)
+        worker._request = Mock(side_effect=[{"receipt": receipt.to_dict()},
+                                            {"status": "heartbeat"}])
+        def spawn(directory, command, request, expiry, environment):
+            worker.budget.arm_guard.assert_called_once_with("first", receipt)
+            self.assertEqual(worker.plan, updated)
+            self.assertEqual(worker._request.call_count, 2)
+            self.assertEqual(request["plan"], updated.to_dict())
+            self.assertEqual(expiry, 15400)
+            self.assertEqual(command[0], "/usr/bin/ssh")
+            self.assertIn("UserKnownHostsFile=/synthetic-private-worker/known-hosts", command)
+            self.assertEqual(environment, ssh_environment())
+            return 456
+        facts = {"retention_expires_unix": 15400.}
+        with patch("cineforge.ssh_worker.time.time", return_value=10000):
+            result = worker.retain_live(facts, spawner=spawn)
+        self.assertTrue(worker._remote_suspended.is_set())
+        self.assertEqual(result["retention_heartbeat_pid"], 456)
+        self.assertEqual(result["guard_stop_at_unix"], 15340)
+        worker.budget.extend_retention.assert_not_called()

@@ -150,6 +150,66 @@ class BudgetTests(unittest.TestCase):
     def acquire(self, provider, key="first"):
         return provider.acquire(model(), max_cost_usd=1, idempotency_key=key)
 
+    def test_retention_extension_is_bounded_one_shot_and_reload_consistent(self):
+        with self.session() as session:
+            provider = self.provider(session)
+            provider.spec = replace(spec(), retain_node=True, retain_window_seconds=20000)
+            self.acquire(provider)
+            before = json.loads((self.path / "budget.json").read_bytes())["records"]["first"]
+            self.clock.sleep(1700)  # Late in the original lease; no revival after expiry.
+            facts = session.extend_retention("first")
+            self.assertEqual(facts["retention_expires_unix"], before["reserved_at"] + 14400)
+            self.assertEqual(facts["retention_window_seconds_effective"], 12700)
+            self.assertEqual(facts["retention_window_seconds"], 20000)
+            plan = session.guard_plan("first")
+            self.assertEqual(plan.stop_at_unix, facts["lease_expires_unix"] - 60)
+            session.arm_guard("first", GuardReceipt(plan, worker_guard_source_sha256(),
+                456, self.clock.time(), True, True))
+            after = json.loads((self.path / "budget.json").read_bytes())["records"]["first"]
+            for field in ("deadline", "reserved_at", "reservation_usd", "intent"):
+                self.assertEqual(after[field], before[field])
+            with self.assertRaises(CloudBudgetError):
+                session.extend_retention("first")
+        with self.session() as resumed:
+            self.assertEqual(resumed.guard_plan("first"), plan)
+            self.assertGreater(resumed.remaining_seconds("first"), 12000)
+            self.clock.sleep(12700)
+            with self.assertRaises(CloudBudgetError):
+                resumed.extend_retention("first")
+            self.assertEqual(resumed.remaining_seconds("first"), 0)
+
+    def test_retention_default_and_no_extension_for_false_or_expired(self):
+        with self.session() as session:
+            provider = self.provider(session)
+            self.acquire(provider)
+            with self.assertRaises(CloudBudgetError):
+                session.extend_retention("first")
+            record = json.loads((self.path / "budget.json").read_bytes())["records"]["first"]
+            self.assertNotIn("retention_deadline", record)
+            provider.release("pod_1")
+            provider.spec = replace(spec(), retain_node=True)
+            self.acquire(provider, "second")
+            now = self.clock.time()
+            facts = session.extend_retention("second")
+            self.assertEqual(facts["retention_expires_unix"], now + 3600)
+            self.assertLessEqual(facts["retention_expires_unix"],
+                                 facts["retention_acquired_unix"] + 14400)
+
+    def test_retention_cannot_revive_expired_guard_or_load_unbounded_deadline(self):
+        with self.session() as session:
+            provider = self.provider(session)
+            provider.spec = replace(spec(), retain_node=True)
+            self.acquire(provider)
+            self.clock.sleep(1740)
+            with self.assertRaises(CloudBudgetError):
+                session.extend_retention("first")
+        path = self.path / "budget.json"
+        data = json.loads(path.read_bytes())
+        data["records"]["first"]["retention_deadline"] = 10000 + 14401
+        path.write_bytes(canonical(data))
+        with self.assertRaises(CloudBudgetError), self.session():
+            pass
+
     def test_reserves_before_post_identity_before_probe_and_unknown_invoice_is_retained(self):
         with self.session() as session:
             def probe(snapshot, timeout):

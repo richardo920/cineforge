@@ -236,13 +236,10 @@ def run_a20(b: A20Bindings, frozen: FrozenInputs, output: Path, *,
                     store.checkpoint(canonical(record))
 
                 device = None
-                retained_guard = None
                 try:
                     guard()
                     device = provisioner.acquire(b.service.model, max_cost_usd=.635,
                                                  idempotency_key=b.acquisition_id)
-                    if spec.retain_node:
-                        retained_guard = budget.guard_plan(b.acquisition_id)
                     guard()
                     # stage() includes native_preflight BEFORE installing runtime.
                     native_cap = min(absolute_deadline, time.monotonic() + 1200)
@@ -377,15 +374,24 @@ def run_a20(b: A20Bindings, frozen: FrozenInputs, output: Path, *,
                             retained: dict[str, Any] = {"pod_id": device.device_id,
                                 "region": spec.data_center_id, "gpu_id": spec.gpu_id,
                                 "state": None, "hourly_usd": None, "driver_version": None,
-                                "guard_stop_at_unix": (retained_guard.stop_at_unix
-                                    if retained_guard is not None else None),
-                                "guard_idle_seconds": (retained_guard.idle_seconds
-                                    if retained_guard is not None else None),
                                 "driver_mounts": [row["driver_mount"] for row in
                                     record.get("capabilities", {}).get("files", [])
                                     if "driver_mount" in row],
                                 "ssh": worker.connection_info}
                             record["retained_node"] = retained
+                            try:
+                                facts = budget.extend_retention(b.acquisition_id)
+                                retained.update(facts)
+                                plan = budget.guard_plan(b.acquisition_id)
+                                retained.update(guard_stop_at_unix=plan.stop_at_unix,
+                                    guard_idle_seconds=plan.idle_seconds,
+                                    retention_heartbeat_pid=None, retention_heartbeat="starting")
+                                retained.update(worker.retain_live(facts))
+                            except (Exception, KeyboardInterrupt) as error:
+                                remember_interruption(error)
+                                retained["retention_heartbeat"] = "failed"
+                                record["cleanup_error"] = "A20_LIVE_RETENTION_FAILED"
+                                failed = True
                             try:
                                 snap = provisioner.inspect_lease(device.device_id)
                                 retained.update(state=snap.state, hourly_usd=
@@ -394,6 +400,11 @@ def run_a20(b: A20Bindings, frozen: FrozenInputs, output: Path, *,
                                 remember_interruption(error)
                                 if isinstance(error, KeyboardInterrupt):
                                     failed = True
+                            if "retention_window_seconds_effective" in retained:
+                                rate = retained["hourly_usd"]
+                                retained["max_retention_cost_usd"] = (
+                                    spec.max_hourly_usd if rate is None else rate
+                                ) * retained["retention_window_seconds_effective"] / 3600
                         else:
                             try:
                                 provisioner.release(device.device_id)

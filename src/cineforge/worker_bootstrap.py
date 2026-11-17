@@ -699,11 +699,19 @@ def arm(request: dict[str, Any], deadline: float) -> dict[str, Any]:
     if len(source) > 65536 or hashlib.sha256(source).hexdigest() != request["guard_sha256"]:
         raise BootstrapError("worker guard source differs")
     root = worker_root(plan["session_id"], create=True)
-    private_write(root, "guard.py", source)
-    private_write(root, "plan.json", encode(plan))
+    old_pid = None
+    if (root / "guard-pid.json").exists():
+        old_plan = _json((root / "plan.json").read_bytes())
+        if any(old_plan[name] != plan[name] for name in ("pod_id", "session_id", "lease_token")):
+            raise BootstrapError("cannot replace another lease guardian")
+        old_pid = _json((root / "guard-pid.json").read_bytes())["pid"]
+        guard_alive(root, old_pid)
+    replacing = old_pid is not None
+    private_write(root, "guard.py", source, replace=replacing)
+    private_write(root, "plan.json", encode(plan), replace=replacing)
     if profile is not None:
-        private_write(root, "profile.json", encode(profile))
-    heartbeat(root, plan, first=True)
+        private_write(root, "profile.json", encode(profile), replace=replacing)
+    heartbeat(root, plan, first=not replacing)
     guard = load_guard(root)
     parsed = guard.WorkerGuardPlan.from_dict(plan)
     if abs(time.time() - request["controller_unix"]) > 5:
@@ -718,7 +726,21 @@ def arm(request: dict[str, Any], deadline: float) -> dict[str, Any]:
     if process.poll() is not None:
         raise BootstrapError("worker guard exited")
     guard_alive(root, process.pid)
-    private_write(root, "guard-pid.json", encode({"pid": process.pid}))
+    if old_pid is not None:
+        # SIGTERM invokes the guard's shutdown path; SIGKILL retires only this verified PID.
+        os.kill(old_pid, signal.SIGKILL)
+        for _ in range(100):
+            try:
+                guard_alive(root, old_pid)
+            except BootstrapError:
+                break  # Absent/zombie: the old guardian can no longer stop compute.
+            if time.monotonic() >= deadline:
+                raise BootstrapError("old guardian retirement timed out")
+            time.sleep(.01)
+        else:
+            raise BootstrapError("old guardian still alive")
+        guard_alive(root, process.pid)
+    private_write(root, "guard-pid.json", encode({"pid": process.pid}), replace=replacing)
     runtime = (s2v_hardware_admission(root, deadline, profile_id=profile["id"]) if profile is not None
                and profile["id"] in S2V_PROFILE_IDS else
                runtime_probe(max(.01, deadline - time.monotonic()), profile=profile, resource_root=root)

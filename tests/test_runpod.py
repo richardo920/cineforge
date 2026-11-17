@@ -52,7 +52,7 @@ class RetainNodeSpecTests(unittest.TestCase):
 
         default = spec()
         legacy = {name: getattr(default, name) for name in default.__dataclass_fields__
-                  if name not in {"min_ram_per_gpu_gb", "retain_node"}}
+                  if name not in {"min_ram_per_gpu_gb", "retain_node", "retain_window_seconds"}}
         self.assertIs(default.retain_node, False)
         self.assertEqual(default.to_dict(), legacy)
         self.assertNotIn("retain_node", replace(default, retain_node=False).to_dict())
@@ -60,6 +60,17 @@ class RetainNodeSpecTests(unittest.TestCase):
         retained = replace(default, retain_node=True)
         self.assertIs(retained.to_dict()["retain_node"], True)
         self.assertNotEqual(retained.digest, default.digest)
+
+    def test_retention_window_is_positive_finite_and_default_is_one_hour(self):
+        self.assertEqual(spec().retain_window_seconds, 3600)
+        for value in (0, -1, float("inf"), float("-inf"), float("nan"), None, True):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                replace(spec(), retain_window_seconds=value)
+        configured = replace(spec(), retain_node=True, retain_window_seconds=20000)
+        self.assertEqual(configured.to_dict()["retain_window_seconds"], 20000)
+        intent = AcquisitionIntent("bounded", configured, "a"*32, "fixture-bounded",
+                                   model(), 1, 300, 30, 10)
+        self.assertEqual(AcquisitionIntent.from_dict(intent.to_dict()).spec, configured)
 
     def test_rejects_non_bool(self):
         for value in (None, 0, 1, "true", [], {}):

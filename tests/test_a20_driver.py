@@ -180,8 +180,16 @@ class Harness:
         self.budget.remaining_seconds.return_value = 1700
         self.budget.costs.return_value = {"actual_total_usd": None}
         self.budget.snapshot_for.return_value = NS(state="ready")
-        self.budget.guard_plan.return_value = NS(stop_at_unix=11740., idle_seconds=120.)
+        self.budget.guard_plan.return_value = NS(stop_at_unix=15340., idle_seconds=120.)
+        self.retention = {"retention_acquired_unix": 10000.,
+            "retention_expires_unix": 15400., "lease_expires_unix": 15400.,
+            "retention_window_seconds": 3600., "retention_window_seconds_effective": 3600.,
+            "retention_bound_seconds": 14400.}
+        self.budget.extend_retention.return_value = self.retention
         self.worker = Mock()
+        self.worker.retain_live.return_value = dict(self.retention,
+            guard_stop_at_unix=15340., guard_idle_seconds=120.,
+            retention_heartbeat_pid=456, retention_heartbeat="active")
         self.worker.connection_info = {"host": "8.8.8.8", "port": 2222, "username": "root"}
         self.worker.__enter__ = Mock(return_value=self.worker)
         self.worker.__exit__ = Mock(side_effect=lambda *a: self.events.append("worker-close"))
@@ -315,13 +323,45 @@ class DriverTests(unittest.TestCase):
                 self.assertEqual(record["retained_node"], {
                     "pod_id": "owned", "region": "EUR-IS-2", "gpu_id": L40S_GPU_ID,
                     "state": "ready", "hourly_usd": 1.09, "driver_version": None,
-                    "guard_stop_at_unix": 11740., "guard_idle_seconds": 120.,
+                    **h.retention, "guard_stop_at_unix": 15340., "guard_idle_seconds": 120.,
+                    "retention_heartbeat_pid": 456, "retention_heartbeat": "active",
+                    "max_retention_cost_usd": 1.09,
                     "driver_mounts": [] if failure == "capabilities" else mounts,
                     "ssh": h.worker.connection_info})
                 h.provisioner.release.assert_not_called()
                 h.provisioner.inspect_lease.assert_called_once_with("owned")
                 h.worker.__exit__.assert_called_once()
-                h.budget.guard_plan.assert_called_once_with("acquisition")
+                h.budget.extend_retention.assert_called_once_with("acquisition")
+
+    def test_retention_handoff_precedes_close_and_failure_keeps_finite_deadline(self):
+        for broken in (False, True):
+            with self.subTest(broken=broken), tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
+                h = Harness(Path(tmp).resolve(), stack)
+                h.bindings = replace(h.bindings, spec=replace(h.bindings.spec, retain_node=True))
+                def handoff(facts, h=h, broken=broken):
+                    h.worker.__exit__.assert_not_called()
+                    self.assertEqual(facts, h.retention)
+                    if broken:
+                        raise WorkerError("fake spawn failure")
+                    return h.worker.retain_live.return_value
+                h.worker.retain_live.side_effect = handoff
+                if broken:
+                    with self.assertRaises(A20Error):
+                        h.run()
+                else:
+                    h.run()
+                retained = json.loads((h.output / "run.json").read_bytes())["retained_node"]
+                self.assertEqual(retained["lease_expires_unix"], 15400.)
+                self.assertEqual(retained["retention_heartbeat"], "failed" if broken else "active")
+
+    def test_default_release_never_extends_or_spawns_heartbeat(self):
+        with tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
+            h = Harness(Path(tmp).resolve(), stack)
+            result = h.run()
+            self.assertNotIn("retained_node", result)
+            h.budget.extend_retention.assert_not_called()
+            h.worker.retain_live.assert_not_called()
+            h.provisioner.release.assert_called_once_with("owned")
 
     def test_retention_survives_unavailable_rate_and_connection(self):
         for failure in (None, "stage"):
@@ -371,12 +411,12 @@ class DriverTests(unittest.TestCase):
             h.bindings = replace(h.bindings, spec=replace(h.bindings.spec, retain_node=True))
             # Simulate worker.check invoking the installed budget enforcer during staging.
             def enforce(provisioner):
-                h.budget.guard_plan.assert_called_once_with("acquisition")
+                h.budget.extend_retention.assert_not_called()
                 h.worker.__exit__.assert_not_called()
                 provisioner.release("owned")
                 provisioner.inspect_lease.return_value = NS(state="released", hourly_usd=1.09)
                 # A released journal record can no longer supply a guard plan.
-                h.budget.guard_plan.side_effect = ValueError("released lease")
+                h.budget.extend_retention.side_effect = ValueError("released lease")
                 return ("acquisition",)
             h.budget.enforce_limits.side_effect = enforce
             def stage(*args):
@@ -390,8 +430,8 @@ class DriverTests(unittest.TestCase):
             self.assertEqual(record["outcome"], "incomplete")
             self.assertEqual(record["retained_node"]["state"], "released")
             self.assertIsNone(record["retained_node"]["hourly_usd"])
-            self.assertEqual(record["retained_node"]["guard_stop_at_unix"], 11740.)
-            self.assertEqual(record["retained_node"]["guard_idle_seconds"], 120.)
+            self.assertEqual(record["retained_node"]["retention_heartbeat"], "failed")
+            h.worker.retain_live.assert_not_called()
             h.provisioner.release.assert_called_once_with("owned")
             h.budget.enforce_limits.assert_called_once_with(h.provisioner)
 
