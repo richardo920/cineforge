@@ -175,6 +175,8 @@ class BootstrapTests(unittest.TestCase):
         process.poll.return_value = None
         with patch("cineforge.worker_bootstrap.worker_root", return_value=self.root), \
                 patch("cineforge.worker_bootstrap.load_guard", return_value=guard), \
+                patch("cineforge.worker_bootstrap._guard_module_from_source",
+                      return_value=guard), \
                 patch("cineforge.worker_bootstrap.subprocess.Popen", return_value=process), \
                 patch("cineforge.worker_bootstrap.guard_alive"), \
                 patch("cineforge.worker_bootstrap.runtime_probe", return_value={"fixture": True}):
@@ -209,6 +211,8 @@ class BootstrapTests(unittest.TestCase):
             calls.append(("kill", pid))
         with patch("cineforge.worker_bootstrap.worker_root", return_value=self.root), \
                 patch("cineforge.worker_bootstrap.load_guard", return_value=guard), \
+                patch("cineforge.worker_bootstrap._guard_module_from_source",
+                      return_value=guard), \
                 patch("cineforge.worker_bootstrap.subprocess.Popen", return_value=process), \
                 patch("cineforge.worker_bootstrap.guard_alive", side_effect=alive), \
                 patch("cineforge.worker_bootstrap.os.kill", side_effect=kill), \
@@ -219,6 +223,57 @@ class BootstrapTests(unittest.TestCase):
                                  ("alive", 122), ("alive", 123)])
         self.assertEqual(json.loads((self.root / "guard-pid.json").read_bytes()), {"pid": 123})
         self.assertEqual(json.loads((self.root / "plan.json").read_bytes()), plan.to_dict())
+
+    def test_failed_rearm_leaves_old_guard_plan_and_heartbeat_untouched(self):
+        plan = worker_guard.WorkerGuardPlan("pod_1", "fixture", "a"*32, time.time() + 100, 30)
+        old = dict(plan.to_dict(), stop_at_unix=plan.stop_at_unix - 50)
+        source = b"synthetic guard source"
+        request = {"plan": plan.to_dict(), "guard_source": base64.b64encode(source).decode(),
+                   "guard_sha256": hashlib.sha256(source).hexdigest(),
+                   "controller_unix": time.time()}
+        from cineforge.worker_bootstrap import private_write
+        for name, data in (("plan.json", json.dumps(old).encode()), ("guard.py", source),
+                           ("guard-pid.json", b'{"pid":122}'), ("heartbeat.json", b'{"old":true}')):
+            private_write(self.root, name, data)
+        before = {name: (self.root / name).read_bytes() for name in
+                  ("plan.json", "guard.py", "guard-pid.json", "heartbeat.json")}
+        for verify, skew in ((False, 0), (True, 60)):
+            guard = Mock()
+            guard.WorkerGuardPlan.from_dict.return_value = plan
+            guard.verify_own_pod.return_value = verify
+            with patch("cineforge.worker_bootstrap.worker_root", return_value=self.root), \
+                    patch("cineforge.worker_bootstrap._guard_module_from_source",
+                          return_value=guard), \
+                    patch("cineforge.worker_bootstrap.subprocess.Popen") as popen:
+                with self.assertRaises(BootstrapError):
+                    arm(dict(request, controller_unix=time.time() - skew), time.monotonic() + 5)
+                popen.assert_not_called()
+            self.assertEqual({name: (self.root / name).read_bytes() for name in before}, before)
+            self.assertEqual(sorted(p.name for p in self.root.iterdir()), sorted(before))
+
+    def test_failed_rearm_with_real_guard_source_and_no_credential_leaves_files_untouched(self):
+        # Real candidate loader + real guard source: without a pod-scoped
+        # credential verify_own_pod fails closed before any file is replaced.
+        plan = worker_guard.WorkerGuardPlan("pod_1", "fixture", "a"*32, time.time() + 100, 30)
+        old = dict(plan.to_dict(), stop_at_unix=plan.stop_at_unix - 50)
+        source = Path(worker_guard.__file__).read_bytes()
+        request = {"plan": plan.to_dict(), "guard_source": base64.b64encode(source).decode(),
+                   "guard_sha256": hashlib.sha256(source).hexdigest(),
+                   "controller_unix": time.time()}
+        from cineforge.worker_bootstrap import private_write
+        for name, data in (("plan.json", json.dumps(old).encode()), ("guard.py", source),
+                           ("guard-pid.json", b'{"pid":122}'), ("heartbeat.json", b'{"old":true}')):
+            private_write(self.root, name, data)
+        before = {name: (self.root / name).read_bytes() for name in
+                  ("plan.json", "guard.py", "guard-pid.json", "heartbeat.json")}
+        with patch("cineforge.worker_bootstrap.worker_root", return_value=self.root), \
+                patch.dict(os.environ, {"RUNPOD_API_KEY": "", "RUNPOD_POD_ID": ""}), \
+                patch("cineforge.worker_bootstrap.subprocess.Popen") as popen:
+            with self.assertRaises(BootstrapError):
+                arm(request, time.monotonic() + 5)
+            popen.assert_not_called()
+        self.assertEqual({name: (self.root / name).read_bytes() for name in before}, before)
+        self.assertEqual(sorted(p.name for p in self.root.iterdir()), sorted(before))
 
     def test_real_worker_root_rearms_existing_directory_and_rescues_dead_guard(self):
         for dead in (False, True):
@@ -239,6 +294,8 @@ class BootstrapTests(unittest.TestCase):
                         raise BootstrapError("old guard dead or unverifiable")
                 with patch("cineforge.worker_bootstrap.WORKSPACE_ROOT", workspace), \
                         patch("cineforge.worker_bootstrap.load_guard", return_value=guard), \
+                        patch("cineforge.worker_bootstrap._guard_module_from_source",
+                              return_value=guard), \
                         patch("cineforge.worker_bootstrap.subprocess.Popen", side_effect=processes), \
                         patch("cineforge.worker_bootstrap.guard_alive", side_effect=alive), \
                         patch("cineforge.worker_bootstrap.os.kill",

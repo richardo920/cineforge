@@ -150,6 +150,9 @@ class SSHWorker:
             raise WorkerError("SSH state path cannot contain whitespace or controls")
         self.plan: WorkerGuardPlan | None = None
         self.observation: WorkerObservation | None = None
+        self.retention_guard_alive: bool | None = None
+        self.retention_guard_stop_at_unix: float | None = None
+        self.retention_heartbeat_pid: int | None = None
         self._host, self._port = "", 0
         self._stop, self._failed = Event(), Event()
         self._remote_suspended, self._remote_lock = Event(), Lock()
@@ -374,6 +377,21 @@ class SSHWorker:
         self._thread.start()
         return self.observation
 
+    def probe_retention_guard(self, plan: WorkerGuardPlan) -> bool:
+        """Best-effort old-guard liveness probe; False on any failed heartbeat.
+
+        Supervision is bypassed so a failed ``check()`` cannot mask a live guard;
+        an interrupt propagates so the caller can tell "unknown" from "dead".
+        """
+        if not isinstance(plan, WorkerGuardPlan):
+            return False
+        with self._remote_lock:
+            try:
+                return self._request({"operation": "heartbeat", "plan": plan.to_dict()},
+                                     5, supervise=False) == {"status": "heartbeat"}
+            except Exception:
+                return False
+
     def retain_live(self, facts: dict[str, float], *,
                     spawner: Callable[..., int] = spawn_heartbeat) -> dict[str, Any]:
         """Re-arm and hand off while supervision is alive, serialized with remote heartbeats."""
@@ -389,8 +407,9 @@ class SSHWorker:
                 # Comfy tunnel (check may have closed it). Budget authority still fails closed.
             if self.plan is None:
                 raise WorkerError("retention requires an armed worker")
-            self.retention_guard_alive: bool | None = None
-            self.retention_guard_stop_at_unix: float | None = None
+            self.retention_guard_alive = None
+            self.retention_guard_stop_at_unix = None
+            self.retention_heartbeat_pid = None
             old_alive, new_alive = False, False
             try:
                 old_alive = self._request({"operation": "heartbeat", "plan": self.plan.to_dict()},
@@ -428,9 +447,12 @@ class SSHWorker:
                     flags + shlex.quote(worker_command_source(self._source))]
                 pid = spawner(self.state_dir, command, request, facts["retention_expires_unix"],
                               ssh_environment())
+                # Record the live child before any later step can be interrupted:
+                # the PID is the only handle on the detached feeder.
+                self.retention_guard_alive = True
+                self.retention_heartbeat_pid = pid
                 # Both feeders use the same atomic remote heartbeat namespace: one writer only.
                 self._remote_suspended.set()
-                self.retention_guard_alive = True
                 return dict(facts, guard_stop_at_unix=plan.stop_at_unix,
                     guard_idle_seconds=plan.idle_seconds, retention_heartbeat_pid=pid,
                     retention_heartbeat="active")

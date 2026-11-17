@@ -161,6 +161,9 @@ class BudgetTests(unittest.TestCase):
             self.assertEqual(facts["retention_expires_unix"], 19700)
             self.assertEqual(facts["retention_window_seconds_effective"], 8000)
             self.assertEqual(facts["retention_window_seconds"], 8000)
+            # Fully funded: effective equals requested, nothing clamped.
+            self.assertEqual(facts["retention_window_seconds_effective"],
+                             facts["retention_window_seconds"])
             plan = session.guard_plan("first")
             self.assertEqual(plan.stop_at_unix, facts["lease_expires_unix"] - 60)
             session.arm_guard("first", GuardReceipt(plan, worker_guard_source_sha256(),
@@ -184,8 +187,47 @@ class BudgetTests(unittest.TestCase):
                 resumed.extend_retention("first")
             self.assertEqual(resumed.remaining_seconds("first"), 0)
 
+    def test_retention_clamps_window_to_aggregate_and_records_requested_vs_effective(self):
+        # Closed-M5 arithmetic at fixture scale: a 20000s window past a 1800s lease
+        # reserves past the $3 aggregate, so it clamps instead of refusing.
+        with self.session() as session:
+            provider = self.provider(session)
+            provider.spec = replace(spec(), retain_node=True, retain_window_seconds=20000)
+            self.acquire(provider)
+            self.clock.sleep(1700)  # now 11700; original deadline 11800.
+            facts = session.extend_retention("first")
+            self.assertEqual(facts["retention_window_seconds"], 20000)
+            self.assertEqual(facts["retention_window_seconds_effective"], 8888)
+            self.assertEqual(facts["retention_expires_unix"], 20588)
+            self.assertEqual(facts["lease_expires_unix"], 20588)
+            self.assertEqual(session.guard_plan("first").stop_at_unix, 20528)
+            after = json.loads((self.path / "budget.json").read_bytes())["records"]["first"]
+            self.assertAlmostEqual(after["reservation_usd"], 2.999934)
+            self.assertLessEqual(after["reservation_usd"], 3)
+            self.assertEqual(after["retention_deadline"], 20588)
+            with self.assertRaises(CloudBudgetError):
+                session.extend_retention("first")
+
+    def test_retention_refuses_when_aggregate_admits_no_bounded_window(self):
+        # Aggregate headroom funds only ~17s past the deadline at 1730s in, so the
+        # clamped window cannot admit a bounded handoff and nothing is mutated.
+        session = CloudBudgetSession(self.path, approval(aggregate_limit_usd=0.515),
+            self.cloud, guard_deployment_configured=True, clock=self.clock.time,
+            monotonic=self.clock.monotonic)
+        with session:
+            provider = self.provider(session)
+            provider.spec = replace(spec(), retain_node=True, retain_window_seconds=20000)
+            self.acquire(provider)
+            self.clock.sleep(1730)
+            before = json.loads((self.path / "budget.json").read_bytes())["records"]["first"]
+            with self.assertRaises(CloudBudgetError), patch.object(session, "_save") as save:
+                session.extend_retention("first")
+            save.assert_not_called()
+            self.assertEqual(session._record("first"), before)
+            self.assertNotIn("retention_deadline", before)
+
     def test_retention_rejects_aggregate_overflow_and_small_windows_without_mutation(self):
-        for window in (20000, 30, 60, 90):
+        for window in (30, 60, 90):
             self.path = Path(self.temp.name).resolve() / ("journal-" + str(window))
             self.clock = Clock()
             self.cloud = Cloud(self.clock)

@@ -341,6 +341,22 @@ def worker_root(session: str, *, create: bool = False) -> Path:
     return root
 
 
+def _guard_module_from_source(source: bytes) -> Any:
+    """Load a candidate guard module from bytes without touching on-pod state."""
+    spec = importlib.util.spec_from_loader("cineforge_worker_guard_candidate", loader=None)
+    if spec is None:
+        raise BootstrapError("worker guard unavailable")
+    module = importlib.util.module_from_spec(spec)
+    # dataclasses resolve annotations through sys.modules: register first, as
+    # load_guard does for the on-disk guard.
+    sys.modules[spec.name] = module
+    try:
+        exec(compile(source, "worker_guard.py", "exec"), module.__dict__)
+    except Exception as error:
+        raise BootstrapError("worker guard source differs") from error
+    return module
+
+
 def load_guard(root: Path) -> Any:
     spec = importlib.util.spec_from_file_location("cineforge_worker_guard", root / "guard.py")
     if spec is None or spec.loader is None:
@@ -713,17 +729,21 @@ def arm(request: dict[str, Any], deadline: float) -> dict[str, Any]:
         except BootstrapError:
             # An alive but unverifiable guard remains: two guards, earlier stop wins.
             old_pid = None
+    # Validate the clock and the own-Pod credential against the parsed new plan
+    # BEFORE replacing any on-pod file: a failed arm must leave the old guard,
+    # plan and heartbeat untouched so supervision keeps refreshing the old plan.
+    candidate = _guard_module_from_source(source)
+    parsed = candidate.WorkerGuardPlan.from_dict(plan)
+    if abs(time.time() - request["controller_unix"]) > 5:
+        raise BootstrapError("worker clock differs")
+    if not candidate.verify_own_pod(parsed, allow_live=True):
+        raise BootstrapError("worker own-Pod credential verification failed")
     private_write(root, "guard.py", source, replace=replacing)
     private_write(root, "plan.json", encode(plan), replace=replacing)
     if profile is not None:
         private_write(root, "profile.json", encode(profile), replace=replacing)
     heartbeat(root, plan, first=not replacing)
-    guard = load_guard(root)
-    parsed = guard.WorkerGuardPlan.from_dict(plan)
-    if abs(time.time() - request["controller_unix"]) > 5:
-        raise BootstrapError("worker clock differs")
-    if not guard.verify_own_pod(parsed, allow_live=True):
-        raise BootstrapError("worker own-Pod credential verification failed")
+    load_guard(root)  # The written guard must load before its process spawns.
     process = subprocess.Popen([sys.executable, str(root / "guard.py"), "--plan",
         str(root / "plan.json"), "--heartbeat", str(root / "heartbeat.json"), "--allow-live"],
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,

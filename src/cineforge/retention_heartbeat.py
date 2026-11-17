@@ -86,9 +86,18 @@ def spawn_heartbeat(directory: Path, command: list[str], request: dict[str, Any]
                    "stop_timeout_seconds": stop_timeout_seconds}, stream, allow_nan=False)
     # Execute the frozen standalone source; no import path or budget/session dependency.
     source = Path(__file__).read_text()
-    process = popen([sys.executable, "-I", "-c", source, str(path)],
-        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        start_new_session=True, env=environment)
+    try:
+        process = popen([sys.executable, "-I", "-c", source, str(path)],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True, env=environment)
+    except BaseException:
+        # A failed spawn must not leave a stale config behind: it blocks any
+        # later O_EXCL spawn in the same state dir.
+        try:
+            path.unlink(missing_ok=True)
+        except BaseException:
+            pass
+        raise
     try:
         time.sleep(settle_seconds)
         if process.poll() is not None:
@@ -99,6 +108,12 @@ def spawn_heartbeat(directory: Path, command: list[str], request: dict[str, Any]
             if process.poll() is None:
                 process.terminate()
             process.wait(timeout=2)
+        except BaseException:
+            pass
+        # SIGTERM skips the child's finally unlink, so the parent removes the
+        # config the child can no longer be trusted to remove.
+        try:
+            path.unlink(missing_ok=True)
         except BaseException:
             pass
         raise
@@ -117,11 +132,34 @@ def main(*, run: Callable[..., Any] = subprocess.run,
         except BaseException:
             pass
         finally:
+            # Bounded retries: one transient Runpod/SSH failure must not leave a
+            # guard-less pod running. Retry until dispatch reports "stopped" or
+            # the stop budget is exhausted.
             try:
                 timeout = config.get("stop_timeout_seconds", 30)
-                request = dict(config["request"], operation="stop", timeout_seconds=timeout)
-                run(config["command"], input=json.dumps(request).encode(), stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL, timeout=timeout, check=True)
+                if (type(timeout) not in (int, float) or not math.isfinite(timeout)
+                        or not 0 < timeout <= 60):
+                    timeout = 30
+                deadline = monotonic() + timeout
+                while True:
+                    remaining = deadline - monotonic()
+                    if not math.isfinite(remaining) or remaining <= 0:
+                        break
+                    attempt = min(timeout, remaining)
+                    request = dict(config["request"], operation="stop",
+                                   timeout_seconds=attempt)
+                    try:
+                        reply = run(config["command"], input=json.dumps(request).encode(),
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            timeout=attempt, check=True)
+                        if json.loads(reply.stdout) == {"status": "stopped"}:
+                            break
+                    except BaseException:
+                        pass
+                    remaining = deadline - monotonic()
+                    if not math.isfinite(remaining) or remaining <= 0:
+                        break
+                    sleep(min(1., remaining))
             except BaseException:
                 pass
     finally:

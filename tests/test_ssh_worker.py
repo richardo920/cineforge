@@ -509,31 +509,57 @@ class RetentionHeartbeatTests(unittest.TestCase):
                 self.assertEqual(calls, [10000, 10002, 10004, 10014, 10024])
                 self.assertEqual(clock.time(), 10025)
 
-    def test_child_main_stops_once_after_failure_or_expiry_and_removes_config(self):
+    def test_child_main_retries_stop_until_confirmed_or_budget_exhausted(self):
         from types import SimpleNamespace
 
         from cineforge.retention_heartbeat import main
 
-        for broken in (False, True):
-            with self.subTest(broken=broken), tempfile.TemporaryDirectory() as tmp:
+        plan = {"pod_id": "pod_1"}
+        # Transient stop failure, then dispatch confirms the stop: two attempts.
+        with tempfile.TemporaryDirectory() as tmp:
+            clock, requests = Clock(), []
+            path = Path(tmp) / "retention-heartbeat.json"
+            path.write_text(json.dumps({"command": ["fake"], "request": {
+                "operation": "heartbeat", "plan": plan, "guard_sha256": "a"*64},
+                "expires_unix": 10025, "retry_budget_seconds": 3}))
+            def run(command, *, requests=requests, **kwargs):
+                request = json.loads(kwargs["input"])
+                requests.append(request)
+                if request["operation"] == "stop":
+                    if len([r for r in requests if r["operation"] == "stop"]) == 1:
+                        return SimpleNamespace(stdout=b'{"status":"stop_unconfirmed"}')
+                    return SimpleNamespace(stdout=b'{"status":"stopped"}')
+                return SimpleNamespace(stdout=b'{"status":"heartbeat"}')
+            with patch.object(sys, "argv", ["heartbeat", str(path)]):
+                main(run=run, clock=clock.time, monotonic=clock.monotonic, sleep=clock.sleep)
+            stops = [request for request in requests if request["operation"] == "stop"]
+            self.assertEqual(len(stops), 2)
+            self.assertEqual(stops[0]["plan"], plan)
+            self.assertEqual(stops[0]["guard_sha256"], "a"*64)
+            self.assertEqual(stops[0]["timeout_seconds"], 30)
+            self.assertLess(stops[1]["timeout_seconds"], 30)
+            self.assertFalse(path.exists())
+        # Persistent stop failure: retries until the stop budget is exhausted.
+        for broken_heartbeat in (False, True):
+            with self.subTest(broken_heartbeat=broken_heartbeat), tempfile.TemporaryDirectory() as tmp:
                 clock, requests = Clock(), []
                 path = Path(tmp) / "retention-heartbeat.json"
-                plan = {"pod_id": "pod_1"}
                 path.write_text(json.dumps({"command": ["fake"], "request": {
                     "operation": "heartbeat", "plan": plan, "guard_sha256": "a"*64},
                     "expires_unix": 10025, "retry_budget_seconds": 3}))
-                def run(command, *, requests=requests, broken=broken, **kwargs):
+                def failing_run(command, *, requests=requests,
+                                broken_heartbeat=broken_heartbeat, **kwargs):
                     request = json.loads(kwargs["input"])
                     requests.append(request)
-                    if broken or request["operation"] == "stop":
+                    if broken_heartbeat or request["operation"] == "stop":
                         raise RuntimeError("synthetic failure")
                     return SimpleNamespace(stdout=b'{"status":"heartbeat"}')
                 with patch.object(sys, "argv", ["heartbeat", str(path)]):
-                    main(run=run, clock=clock.time, monotonic=clock.monotonic, sleep=clock.sleep)
+                    main(run=failing_run, clock=clock.time, monotonic=clock.monotonic,
+                         sleep=clock.sleep)
                 stops = [request for request in requests if request["operation"] == "stop"]
-                self.assertEqual(len(stops), 1)
+                self.assertGreater(len(stops), 1)
                 self.assertEqual(stops[0]["plan"], plan)
-                self.assertEqual(stops[0]["guard_sha256"], "a"*64)
                 self.assertEqual(stops[0]["timeout_seconds"], 30)
                 self.assertFalse(path.exists())
 
@@ -551,6 +577,7 @@ class RetentionHeartbeatTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "exited during handoff"):
                 spawn_heartbeat(Path(tmp), [], {}, time.time()+100, {}, popen=short_child)
             self.assertEqual(children[0].wait(timeout=2), 3)
+            self.assertFalse((Path(tmp) / "retention-heartbeat.json").exists())
         with tempfile.TemporaryDirectory() as tmp:
             child = Mock(pid=321)
             child.poll.return_value = None
@@ -559,6 +586,19 @@ class RetentionHeartbeatTests(unittest.TestCase):
                 spawn_heartbeat(Path(tmp), [], {}, time.time()+100, {}, popen=Mock(return_value=child))
             child.terminate.assert_called_once()
             child.wait.assert_called_once_with(timeout=2)
+            self.assertFalse((Path(tmp) / "retention-heartbeat.json").exists())
+
+    def test_spawn_failure_removes_config(self):
+        from unittest.mock import Mock
+
+        from cineforge.retention_heartbeat import spawn_heartbeat
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "retention-heartbeat.json"
+            with self.assertRaises(RuntimeError):
+                spawn_heartbeat(Path(tmp), [], {}, time.time() + 100, {},
+                                popen=Mock(side_effect=RuntimeError("synthetic spawn failure")))
+            self.assertFalse(path.exists())
 
     def test_real_child_feeds_real_guard_then_stops_on_expiry_or_guard_death(self):
         """Real run_guard/heartbeat; /proc PID gate has separate faked-/proc unit coverage.
@@ -606,6 +646,7 @@ class RetentionHeartbeatTests(unittest.TestCase):
                         "r=json.load(sys.stdin);root=Path(sys.argv[1])\n"
                         "if r['operation']=='stop':\n"
                         " (root/'stop-marker.json').write_text(json.dumps(r))\n"
+                        " print(json.dumps({'status':'stopped'}))\n"
                         "else:\n"
                         " os.kill(int(sys.argv[2]),0)\n"
                         " heartbeat(root,r['plan'])\n"
@@ -639,6 +680,153 @@ class RetentionHeartbeatTests(unittest.TestCase):
                             os.killpg(process.pid, signal.SIGKILL)
                         process.wait(timeout=2)
                     guard.stderr.close()
+
+    def test_real_child_stop_reaches_real_dispatch_and_stops_own_pod(self):
+        """The stop seam: real worker_command_source -> real main/dispatch -> real stop_own_pod.
+
+        Only the on-pod HTTP layer is stubbed (urllib opener + pod-scoped credential
+        env). /workspace is not writable on the test host, so the bundle is loaded
+        with a neutral __name__ and WORKSPACE_ROOT is redirected to a temp dir
+        before main() runs; the rendered child command itself is unmodified.
+        """
+        from cineforge import worker_guard
+        from cineforge.worker_bootstrap import encode
+
+        driver = (
+            "import json, sys\n"
+            "from pathlib import Path\n"
+            "sys.path.insert(0, '__SRC__')\n"
+            "import urllib.request\n"
+            "_LOG = Path('__LOG__')\n"
+            "_STATE = {'stopped': False}\n"
+            "class _Response:\n"
+            "    def __init__(self, payload): self._payload = payload\n"
+            "    def __enter__(self): return self\n"
+            "    def __exit__(self, *args): return False\n"
+            "    def read(self, size=-1): return self._payload\n"
+            "class _Opener:\n"
+            "    def open(self, request, timeout=None):\n"
+            "        method = request.get_method()\n"
+            "        with _LOG.open('a') as stream:\n"
+            "            stream.write(json.dumps({'method': method, 'url': request.full_url,"
+            " 'data': request.data.decode() if request.data else None}) + chr(10))\n"
+            "        pod = {'id': 'pod_1', 'env': {'CINEFORGE_SESSION': 'fixture',"
+            " 'CINEFORGE_LEASE': 'a'*32}, 'mounts': {}, 'actions': []}\n"
+            "        if method == 'POST':\n"
+            "            _STATE['stopped'] = True\n"
+            "            pod['status'] = 'STOPPING'\n"
+            "        elif _STATE['stopped']:\n"
+            "            pod['status'] = 'EXITED'\n"
+            "        else:\n"
+            "            pod['status'] = 'RUNNING'\n"
+            "            pod['actions'] = ['stop']\n"
+            "        return _Response(json.dumps(pod).encode())\n"
+            "urllib.request.build_opener = lambda *args, **kwargs: _Opener()\n"
+            "from cineforge.worker_transport_source import worker_command_source as _s\n"
+            "from cineforge.worker_bundle import worker_source as _b\n"
+            "import types as _t\n"
+            "_m = _t.ModuleType('cineforge_worker_bundle')\n"
+            "sys.modules['cineforge_worker_bundle'] = _m\n"
+            "_g = _m.__dict__\n"
+            "_g['__name__'] = 'cineforge_worker_bundle'\n"
+            "exec(_s(_b()), _g)\n"
+            "_g['WORKSPACE_ROOT'] = Path('__WS__')\n"
+            "raise SystemExit(_g['main']())\n"
+        )
+        for tampered in (False, True):
+            with self.subTest(tampered=tampered), tempfile.TemporaryDirectory() as tmp:
+                workspace = Path(tmp).resolve() / "workspace"
+                root = workspace / "cineforge-m3-fixture"
+                root.mkdir(parents=True, mode=0o700)
+                plan = WorkerGuardPlan("pod_1", "fixture", "a"*32, time.time() + 300, 120)
+                (root / "guard.py").write_bytes(Path(worker_guard.__file__).read_bytes())
+                (root / "guard.py").chmod(0o600)
+                (root / "plan.json").write_bytes(encode(plan.to_dict()))
+                (root / "plan.json").chmod(0o600)
+                log = Path(tmp) / "http-log.jsonl"
+                request = {"operation": "stop",
+                           "plan": dict(plan.to_dict(), pod_id="foreign") if tampered
+                           else plan.to_dict(),
+                           "allow_live": True, "timeout_seconds": 30,
+                           "guard_sha256": worker_guard_source_sha256()}
+                environment = {"PATH": os.environ.get("PATH", ""), "LANG": "C",
+                               "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"),
+                               "RUNPOD_API_KEY": "fixture-key-1", "RUNPOD_POD_ID": "pod_1"}
+                child = subprocess.Popen(
+                    [sys.executable, "-c", driver.replace("__SRC__", environment["PYTHONPATH"])
+                     .replace("__WS__", str(workspace)).replace("__LOG__", str(log))],
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    env=environment)
+                try:
+                    stdout, stderr = child.communicate(json.dumps(request).encode(), timeout=30)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    stdout, stderr = child.communicate()
+                    self.fail("real stop dispatch timed out: %r" % stderr)
+                self.assertEqual(child.returncode, 0, stderr)
+                self.assertEqual(json.loads(stdout),
+                                 {"status": "stop_unconfirmed" if tampered else "stopped"})
+                calls = [json.loads(line) for line in log.read_text().splitlines()] \
+                    if log.exists() else []
+                if tampered:
+                    self.assertEqual(calls, [])
+                else:
+                    self.assertEqual([call["method"] for call in calls], ["GET", "POST", "GET"])
+                    self.assertEqual(calls[0]["url"], "https://api.runpod.io/v2/pods/pod_1")
+                    self.assertEqual(calls[1]["url"], "https://api.runpod.io/v2/pods/pod_1/action")
+                    self.assertEqual(calls[1]["data"], '{"action":"stop"}')
+
+    def test_probe_retention_guard_reports_heartbeat_and_failures(self):
+        from threading import Lock
+        from unittest.mock import Mock
+
+        worker = object.__new__(SSHWorker)
+        worker._remote_lock = Lock()
+        plan = WorkerGuardPlan("pod_1", "fixture", "a"*32, time.time() + 300, 120)
+        worker._request = Mock(return_value={"status": "heartbeat"})
+        self.assertTrue(worker.probe_retention_guard(plan))
+        worker._request.assert_called_once_with(
+            {"operation": "heartbeat", "plan": plan.to_dict()}, 5, supervise=False)
+        worker._request = Mock(side_effect=WorkerError("fake SSH failure"))
+        self.assertFalse(worker.probe_retention_guard(plan))
+        worker._request = Mock(side_effect=KeyboardInterrupt)
+        with self.assertRaises(KeyboardInterrupt):
+            worker.probe_retention_guard(plan)
+        self.assertFalse(worker.probe_retention_guard("not-a-plan"))
+
+    def test_retention_records_pid_and_alive_before_suspending_supervision(self):
+        from threading import Event, Lock
+        from unittest.mock import Mock
+
+        worker = object.__new__(SSHWorker)
+        worker._remote_lock = Lock()
+        worker._remote_suspended = Event()
+        worker.check = Mock()
+        worker._failed, worker._stop, worker._tunnel = Event(), Event(), None
+        worker._key = "first"
+        worker.plan = WorkerGuardPlan("pod_1", "fixture", "a"*32, 11740, 120)
+        updated = WorkerGuardPlan("pod_1", "fixture", "a"*32, 15340, 120)
+        worker.budget = Mock()
+        worker.budget.remaining_seconds.return_value = 1000
+        worker.budget.guard_plan.return_value = updated
+        worker._profile = None
+        worker.selection = None
+        worker._source = worker_source()
+        worker._host, worker._port = "8.8.8.8", 2222
+        worker.private_key = Path("/synthetic-key")
+        worker.state_dir = Path("/synthetic-private-worker")
+        receipt = GuardReceipt(updated, worker_guard_source_sha256(), 123,
+                               time.time(), True, True)
+        worker._request = Mock(side_effect=[{"status": "heartbeat"},
+                                            {"receipt": receipt.to_dict()},
+                                            {"status": "heartbeat"}])
+        worker._remote_suspended.set = Mock(side_effect=KeyboardInterrupt)
+        facts = {"retention_expires_unix": 15400.}
+        with patch("cineforge.ssh_worker.time.time", return_value=10000):
+            with self.assertRaises(KeyboardInterrupt):
+                worker.retain_live(facts, spawner=lambda *args: 777)
+        self.assertTrue(worker.retention_guard_alive)
+        self.assertEqual(worker.retention_heartbeat_pid, 777)
 
     def test_worker_rearms_before_immediate_beat_and_detached_handoff(self):
         self._exercise_retention_handoff(False)

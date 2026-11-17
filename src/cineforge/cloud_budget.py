@@ -564,7 +564,14 @@ class CloudBudgetSession:
         return float(record.get("retention_deadline", record["deadline"]))
 
     def extend_retention(self, key: str) -> dict[str, float]:
-        """One-shot retention authority; preserve original acquisition/reservation invariants."""
+        """One-shot retention authority; preserve original acquisition/reservation invariants.
+
+        A requested window the aggregate cannot admit is clamped to the longest
+        window it can fund instead of refused: ``retention_window_seconds`` keeps
+        the requested value and ``retention_window_seconds_effective`` reports the
+        admitted one. Only a window that cannot admit a bounded handoff at all is
+        refused.
+        """
         with self._lock:
             now = self._now()
             record = self._record(key)
@@ -586,7 +593,25 @@ class CloudBudgetSession:
             used = sum(r["actual_usd"] if r["actual_usd"] is not None
                        else r["reservation_usd"] or 0 for r in self._data["records"].values())
             if used + retention_reserve > self.approval.aggregate_usd:
-                raise CloudBudgetError("aggregate estimated budget cannot admit this lease")
+                # Clamp to the longest retention the aggregate still funds; the
+                # 14400s bound above already caps the unclamped expiry.
+                rate = intent.spec.max_hourly_usd + .02
+                remaining = self.approval.aggregate_usd - used
+                if rate <= 0 or remaining <= 0:
+                    raise CloudBudgetError("aggregate estimated budget cannot admit this lease")
+                affordable = math.floor(remaining / rate * 3600)
+                while affordable > 0:
+                    retention_seconds = float(affordable)
+                    retention_reserve = math.ceil(rate * retention_seconds / 3600
+                        * 1_000_000) / 1_000_000
+                    if used + retention_reserve <= self.approval.aggregate_usd:
+                        break
+                    affordable -= 1
+                if affordable <= 0:
+                    raise CloudBudgetError("aggregate estimated budget cannot admit this lease")
+                expiry = float(record["deadline"]) + retention_seconds
+                if expiry - 60 <= now + 30:
+                    raise CloudBudgetError("retention window cannot admit a bounded handoff")
             record["reservation_usd"] += retention_reserve
             record["estimate_usd"] += (record["quote"]["compute_hourly_usd"] + .0109589) \
                 * retention_seconds / 3600

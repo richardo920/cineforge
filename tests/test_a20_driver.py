@@ -190,6 +190,7 @@ class Harness:
         self.worker.retain_live.return_value = dict(self.retention,
             guard_stop_at_unix=15340., guard_idle_seconds=120.,
             retention_heartbeat_pid=456, retention_heartbeat="active")
+        self.worker.probe_retention_guard.return_value = False
         self.worker.connection_info = {"host": "8.8.8.8", "port": 2222, "username": "root"}
         self.worker.__enter__ = Mock(return_value=self.worker)
         self.worker.__exit__ = Mock(side_effect=lambda *a: self.events.append("worker-close"))
@@ -365,23 +366,70 @@ class DriverTests(unittest.TestCase):
                     h.provisioner.release.assert_not_called()
                 self.assertEqual(retained["retention_heartbeat"], "failed" if broken else "active")
 
-    def test_failed_handoff_releases_only_when_both_guards_are_known_dead(self):
-        for alive in (False, True, None):
-            with self.subTest(alive=alive), tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
+    def test_failed_handoff_probes_unknown_guard_and_releases_only_when_dead(self):
+        for alive, probed, expect_release in ((False, False, True), (True, False, False),
+                                              (None, False, True), (None, True, False)):
+            with self.subTest(alive=alive, probed=probed), tempfile.TemporaryDirectory() as tmp, \
+                    ExitStack() as stack:
                 h = Harness(Path(tmp).resolve(), stack)
                 h.bindings = replace(h.bindings, spec=replace(h.bindings.spec, retain_node=True))
-                if alive is not None:
-                    h.worker.retention_guard_alive = alive
+                h.worker.retention_guard_alive = alive
                 h.worker.retention_guard_stop_at_unix = None
+                h.worker.probe_retention_guard.return_value = probed
                 h.worker.retain_live.side_effect = WorkerError("fake handoff failure")
                 with self.assertRaises(A20Error):
                     h.run()
-                if alive is False:
-                    h.provisioner.release.assert_called_once_with("owned")
-                    record = json.loads((h.output / "run.json").read_bytes())
-                    self.assertTrue(record["release_verified"])
-                else:
+                record = json.loads((h.output / "run.json").read_bytes())
+                retained = record["retained_node"]
+                self.assertEqual(retained["retention_heartbeat"], "failed")
+                self.assertEqual(record["cleanup_error"], "A20_LIVE_RETENTION_FAILED")
+                if alive is True:
+                    h.worker.probe_retention_guard.assert_not_called()
                     h.provisioner.release.assert_not_called()
+                    self.assertEqual(retained["guard_stop_at_unix"], 15340.)
+                    self.assertEqual(retained["guard_idle_seconds"], 120.)
+                else:
+                    h.worker.probe_retention_guard.assert_called_once_with(
+                        h.budget.guard_plan.return_value)
+                    if expect_release:
+                        h.provisioner.release.assert_called_once_with("owned")
+                        self.assertTrue(record["release_verified"])
+                        self.assertIsNone(retained["guard_stop_at_unix"])
+                    else:
+                        h.provisioner.release.assert_not_called()
+                        self.assertFalse(record["release_verified"])
+                        self.assertEqual(retained["guard_stop_at_unix"], 15340.)
+                        self.assertEqual(retained["guard_idle_seconds"], 120.)
+
+    def test_extend_retention_failure_probes_old_guard_before_release(self):
+        for probed in (False, True):
+            with self.subTest(probed=probed), tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
+                h = Harness(Path(tmp).resolve(), stack)
+                h.bindings = replace(h.bindings, spec=replace(h.bindings.spec, retain_node=True))
+                h.budget.extend_retention.side_effect = ValueError("aggregate cannot admit")
+                h.worker.retention_guard_alive = None
+                h.worker.retention_guard_stop_at_unix = None
+                h.worker.probe_retention_guard.return_value = probed
+                with self.assertRaises(A20Error):
+                    h.run()
+                h.budget.extend_retention.assert_called_once_with("acquisition")
+                h.worker.retain_live.assert_not_called()
+                h.worker.probe_retention_guard.assert_called_once_with(
+                    h.budget.guard_plan.return_value)
+                record = json.loads((h.output / "run.json").read_bytes())
+                retained = record["retained_node"]
+                self.assertEqual(retained["retention_heartbeat"], "failed")
+                self.assertEqual(record["cleanup_error"], "A20_LIVE_RETENTION_FAILED")
+                self.assertIsNone(retained["retention_expires_unix"])
+                if probed:
+                    h.provisioner.release.assert_not_called()
+                    self.assertFalse(record["release_verified"])
+                    self.assertEqual(retained["guard_stop_at_unix"], 15340.)
+                    self.assertEqual(retained["guard_idle_seconds"], 120.)
+                else:
+                    h.provisioner.release.assert_called_once_with("owned")
+                    self.assertTrue(record["release_verified"])
+                    self.assertIsNone(retained["guard_stop_at_unix"])
 
     def test_default_release_never_extends_or_spawns_heartbeat(self):
         with tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
