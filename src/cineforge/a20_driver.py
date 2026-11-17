@@ -1,7 +1,7 @@
 """A20 orchestration over guarded components; operator proofs remain trusted code.
 
 No default runtime, creative inputs, proof verifiers, or live opt-in. One acquisition,
-one prepare, two language intents; every failure ends at owned provisioner cleanup.
+one prepare, two language intents; operator retention may skip owned release.
 """
 from __future__ import annotations
 
@@ -236,10 +236,13 @@ def run_a20(b: A20Bindings, frozen: FrozenInputs, output: Path, *,
                     store.checkpoint(canonical(record))
 
                 device = None
+                retained_guard = None
                 try:
                     guard()
                     device = provisioner.acquire(b.service.model, max_cost_usd=.635,
                                                  idempotency_key=b.acquisition_id)
+                    if spec.retain_node:
+                        retained_guard = budget.guard_plan(b.acquisition_id)
                     guard()
                     # stage() includes native_preflight BEFORE installing runtime.
                     native_cap = min(absolute_deadline, time.monotonic() + 1200)
@@ -367,23 +370,47 @@ def run_a20(b: A20Bindings, frozen: FrozenInputs, output: Path, *,
                     remember_interruption(error)
                     failed = True
                 finally:
-                    # Worker.close is insufficient. Always attempt exact owned release,
-                    # including when a checkpoint or freeze check has failed.
+                    # Worker.close is insufficient for release. Retention is explicit
+                    # and applies even after a checkpoint or runtime failure.
                     if device is not None:
-                        try:
-                            provisioner.release(device.device_id)
-                            record["release_verified"] = True
-                        except (Exception, KeyboardInterrupt) as error:
-                            remember_interruption(error)
-                            record["cleanup_error"] = "A20_RELEASE_UNCERTAIN"
-                            failed = True
+                        if spec.retain_node:
+                            retained: dict[str, Any] = {"pod_id": device.device_id,
+                                "region": spec.data_center_id, "gpu_id": spec.gpu_id,
+                                "state": None, "hourly_usd": None, "driver_version": None,
+                                "guard_stop_at_unix": (retained_guard.stop_at_unix
+                                    if retained_guard is not None else None),
+                                "guard_idle_seconds": (retained_guard.idle_seconds
+                                    if retained_guard is not None else None),
+                                "driver_mounts": [row["driver_mount"] for row in
+                                    record.get("capabilities", {}).get("files", [])
+                                    if "driver_mount" in row],
+                                "ssh": worker.connection_info}
+                            record["retained_node"] = retained
+                            try:
+                                snap = provisioner.inspect_lease(device.device_id)
+                                retained.update(state=snap.state, hourly_usd=
+                                    None if snap.state == "released" else snap.hourly_usd)
+                            except (Exception, KeyboardInterrupt) as error:
+                                remember_interruption(error)
+                                if isinstance(error, KeyboardInterrupt):
+                                    failed = True
+                        else:
+                            try:
+                                provisioner.release(device.device_id)
+                                record["release_verified"] = True
+                            except (Exception, KeyboardInterrupt) as error:
+                                remember_interruption(error)
+                                record["cleanup_error"] = "A20_RELEASE_UNCERTAIN"
+                                failed = True
                     record["costs"] = budget.costs()
                     store.checkpoint(canonical(record))
         # Worker/budget finalizers must complete before candidate readiness.
         guard()
-        if not failed and record["release_verified"]:
+        lifecycle_complete = ("retained_node" in record if spec.retain_node
+                              else record["release_verified"])
+        if not failed and lifecycle_complete:
             record["outcome"] = "pending_human_review"
         store.checkpoint(canonical(record))
-    if failed or not record["release_verified"]:
+    if failed or not lifecycle_complete:
         raise A20Error("A20_INCOMPLETE_RETAIN_PRIVATE_RUN")
     return record

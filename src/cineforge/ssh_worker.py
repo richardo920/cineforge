@@ -264,6 +264,13 @@ class SSHWorker:
             raise WorkerError("owned worker connection metadata rejected")
         return True
 
+    @property
+    def connection_info(self) -> dict[str, Any] | None:
+        """Cached validated direct SSH address; no credentials or network effects."""
+        if not self._host or not self._port:
+            return None
+        return {"host": self._host, "port": self._port, "username": "root"}
+
     def _command(self) -> list[str]:
         if not self._host or not self._port:
             raise WorkerError("direct SSH endpoint unavailable")

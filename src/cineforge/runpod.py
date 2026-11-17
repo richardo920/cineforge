@@ -53,6 +53,8 @@ class RunpodPodSpec:
     min_cuda_version: str = "12.8"
     registry_id: str | None = None
     min_ram_per_gpu_gb: int | None = None
+    retain_node: bool = False
+    """A20-only: skip final deletion; cloud_smoke/conditioning_run still release."""
 
     def __post_init__(self) -> None:
         if (not _identifier(self.session_id) or len(self.session_id) > 32
@@ -73,13 +75,15 @@ class RunpodPodSpec:
                 or self.registry_id is not None and not _identifier(self.registry_id)
                 or self.min_ram_per_gpu_gb is not None and (
                     type(self.min_ram_per_gpu_gb) is not int
-                    or not 1 <= self.min_ram_per_gpu_gb <= 65536)):
+                    or not 1 <= self.min_ram_per_gpu_gb <= 65536)
+                or type(self.retain_node) is not bool):
             raise ValueError("invalid immutable Runpod operator configuration")
 
     def to_dict(self) -> dict[str, Any]:
-        # Old scopes/journals predate the optional placement filter. Preserve their bytes.
+        # Preserve old scope/journal bytes when optional fields are unset.
         return {name: getattr(self, name) for name in self.__dataclass_fields__
-                if name != "min_ram_per_gpu_gb" or self.min_ram_per_gpu_gb is not None}
+                if (name != "min_ram_per_gpu_gb" or self.min_ram_per_gpu_gb is not None)
+                and (name != "retain_node" or self.retain_node)}
 
     @property
     def digest(self) -> str:
