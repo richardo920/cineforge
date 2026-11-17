@@ -410,10 +410,10 @@ class SSHWorker:
             self.retention_guard_alive = None
             self.retention_guard_stop_at_unix = None
             self.retention_heartbeat_pid = None
-            old_alive, new_alive = False, False
+            new_alive = False
             try:
-                old_alive = self._request({"operation": "heartbeat", "plan": self.plan.to_dict()},
-                                          5, supervise=False) == {"status": "heartbeat"}
+                self._request({"operation": "heartbeat", "plan": self.plan.to_dict()},
+                              5, supervise=False)
             except Exception:
                 pass
             try:
@@ -457,7 +457,7 @@ class SSHWorker:
                     guard_idle_seconds=plan.idle_seconds, retention_heartbeat_pid=pid,
                     retention_heartbeat="active")
             except BaseException:
-                self.retention_guard_alive = old_alive or new_alive
+                self.retention_guard_alive = new_alive or None
                 raise
 
     @preserve_interruption

@@ -412,21 +412,19 @@ def run_a20(b: A20Bindings, frozen: FrozenInputs, output: Path, *,
                                     # Liveness was never established: extend_retention may
                                     # have refused the window, or retain_live may have
                                     # re-raised before probing. Probe the old guard first:
-                                    # a live guard still bounds billing, so only a dead
-                                    # guard is released through the provider API.
+                                    # a live guard still bounds billing. An interrupted
+                                    # probe releases through the provider API, fail-closed.
                                     probed_alive = False
-                                    probe_interrupted = False
                                     try:
                                         probed_alive = worker.probe_retention_guard(old_plan)
                                     except KeyboardInterrupt as probe_error:
                                         remember_interruption(probe_error)
-                                        probe_interrupted = True
                                     except Exception:
                                         probed_alive = False
                                     if probed_alive:
                                         retained.update(guard_stop_at_unix=old_plan.stop_at_unix,
                                             guard_idle_seconds=old_plan.idle_seconds)
-                                    elif not probe_interrupted:
+                                    else:
                                         release_needed = True
                                 record["cleanup_error"] = "A20_LIVE_RETENTION_FAILED"
                                 failed = True
@@ -449,6 +447,8 @@ def run_a20(b: A20Bindings, frozen: FrozenInputs, output: Path, *,
                                 retained["max_retention_cost_usd"] = (
                                     spec.max_hourly_usd if rate is None else rate
                                 ) * retained["retention_window_seconds_effective"] / 3600
+                            if release_needed and record["release_verified"]:
+                                retained.update(state="released", hourly_usd=None)
                         else:
                             try:
                                 provisioner.release(device.device_id)

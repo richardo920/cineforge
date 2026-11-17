@@ -794,6 +794,30 @@ class RetentionHeartbeatTests(unittest.TestCase):
             worker.probe_retention_guard(plan)
         self.assertFalse(worker.probe_retention_guard("not-a-plan"))
 
+    def test_failed_rearm_does_not_trust_prearm_old_guard_heartbeat(self):
+        from threading import Lock
+        from unittest.mock import Mock
+
+        worker = object.__new__(SSHWorker)
+        worker._remote_lock = Lock()
+        worker.check = Mock()
+        worker._key = "first"
+        worker.plan = WorkerGuardPlan("pod_1", "fixture", "a"*32, 11740, 120)
+        updated = WorkerGuardPlan("pod_1", "fixture", "a"*32, 15340, 120)
+        worker.budget = Mock()
+        worker.budget.remaining_seconds.return_value = 1000
+        worker.budget.guard_plan.return_value = updated
+        worker._request = Mock(side_effect=[{"status": "heartbeat"},
+            WorkerError("new guard died after retiring old guard")])
+        with patch("cineforge.ssh_worker.time.time", return_value=10000):
+            with self.assertRaisesRegex(WorkerError, "new guard died"):
+                worker.retain_live({"retention_expires_unix": 15400.})
+        self.assertEqual([call.args[0]["operation"] for call in worker._request.call_args_list],
+                         ["heartbeat", "arm"])
+        self.assertIsNone(worker.retention_guard_alive)
+        self.assertIsNone(worker.retention_guard_stop_at_unix)
+        worker.budget.arm_guard.assert_not_called()
+
     def test_retention_records_pid_and_alive_before_suspending_supervision(self):
         from threading import Event, Lock
         from unittest.mock import Mock

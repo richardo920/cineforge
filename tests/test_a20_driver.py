@@ -394,6 +394,8 @@ class DriverTests(unittest.TestCase):
                     if expect_release:
                         h.provisioner.release.assert_called_once_with("owned")
                         self.assertTrue(record["release_verified"])
+                        self.assertEqual(retained["state"], "released")
+                        self.assertIsNone(retained["hourly_usd"])
                         self.assertIsNone(retained["guard_stop_at_unix"])
                     else:
                         h.provisioner.release.assert_not_called()
@@ -429,7 +431,29 @@ class DriverTests(unittest.TestCase):
                 else:
                     h.provisioner.release.assert_called_once_with("owned")
                     self.assertTrue(record["release_verified"])
+                    self.assertEqual(retained["state"], "released")
+                    self.assertIsNone(retained["hourly_usd"])
                     self.assertIsNone(retained["guard_stop_at_unix"])
+
+    def test_interrupted_retention_probe_releases_before_reraising(self):
+        with tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
+            h = Harness(Path(tmp).resolve(), stack)
+            h.bindings = replace(h.bindings, spec=replace(h.bindings.spec, retain_node=True))
+            h.worker.retention_guard_alive = None
+            h.worker.retention_guard_stop_at_unix = None
+            h.worker.retain_live.side_effect = WorkerError("fake handoff failure")
+            h.worker.probe_retention_guard.side_effect = KeyboardInterrupt
+            with self.assertRaises(KeyboardInterrupt):
+                h.run()
+            h.worker.probe_retention_guard.assert_called_once_with(
+                h.budget.guard_plan.return_value)
+            h.provisioner.release.assert_called_once_with("owned")
+            record = json.loads((h.output / "run.json").read_bytes())
+            self.assertTrue(record["release_verified"])
+            self.assertEqual(record["retained_node"]["state"], "released")
+            self.assertIsNone(record["retained_node"]["hourly_usd"])
+            self.assertEqual(record["outcome"], "incomplete")
+            self.assertEqual(record["cleanup_error"], "A20_LIVE_RETENTION_FAILED")
 
     def test_default_release_never_extends_or_spawns_heartbeat(self):
         with tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
