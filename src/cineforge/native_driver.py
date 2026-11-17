@@ -24,6 +24,9 @@ DRIVER_ALIASES = {
     "/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1": "nvml",
     "/usr/lib64/libnvidia-ml.so.1": "nvml",
     "/usr/local/nvidia/lib64/libnvidia-ml.so.1": "nvml",
+    "/usr/lib/x86_64-linux-gnu/libnvidia-ptxjitcompiler.so.1": "ptx_jit_compiler",
+    "/usr/lib64/libnvidia-ptxjitcompiler.so.1": "ptx_jit_compiler",
+    "/usr/local/nvidia/lib64/libnvidia-ptxjitcompiler.so.1": "ptx_jit_compiler",
 }
 DRIVER_ROOTS = ("/usr/bin/", "/usr/local/nvidia/bin/", "/usr/lib/x86_64-linux-gnu/",
                 "/usr/lib64/", "/usr/local/nvidia/lib64/")
