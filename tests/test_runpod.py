@@ -44,6 +44,42 @@ def model():
                      frozenset({Backend.CUDA}), 24082, "fixture-license", Precision.FP16)
 
 
+class RetainNodeSpecTests(unittest.TestCase):
+    def test_default_false_preserves_serialized_bytes_and_digest(self):
+        import hashlib
+
+        from cineforge.workflows import canonical
+
+        default = spec()
+        legacy = {name: getattr(default, name) for name in default.__dataclass_fields__
+                  if name not in {"min_ram_per_gpu_gb", "retain_node"}}
+        self.assertIs(default.retain_node, False)
+        self.assertEqual(default.to_dict(), legacy)
+        self.assertNotIn("retain_node", replace(default, retain_node=False).to_dict())
+        self.assertEqual(default.digest, hashlib.sha256(canonical(legacy)).hexdigest())
+        retained = replace(default, retain_node=True)
+        self.assertIs(retained.to_dict()["retain_node"], True)
+        self.assertNotEqual(retained.digest, default.digest)
+
+    def test_rejects_non_bool(self):
+        for value in (None, 0, 1, "true", [], {}):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                    ValueError, "^invalid immutable Runpod operator configuration$"):
+                replace(spec(), retain_node=value)
+
+    def test_retained_intent_round_trip_and_digest_binding(self):
+        intent = AcquisitionIntent("retained", replace(spec(), retain_node=True),
+            "a" * 32, "fixture-retained", model(), 1, 300, 30, 10)
+        restored = AcquisitionIntent.from_dict(intent.to_dict())
+        self.assertIs(restored.spec.retain_node, True)
+        self.assertEqual(restored.spec_digest, intent.spec_digest)
+        self.assertEqual(restored.to_dict(), intent.to_dict())
+        changed = intent.to_dict()
+        del changed["spec"]["retain_node"]
+        with self.assertRaises(ValueError):
+            AcquisitionIntent.from_dict(changed)
+
+
 class FakeCloud:
     def __init__(self):
         self.calls = []

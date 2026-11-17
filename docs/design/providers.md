@@ -55,3 +55,13 @@ M3.4 must install the exact standalone `worker_guard.py`, verify its source/PID/
 Mux commands deny direct fallback with `ProxyCommand=/usr/bin/false`. Tunnel teardown kills/reaps owned processes but retains at most eight private control namespaces per driver; `retained_control_namespace_paths` records residual paths for operator cleanup, without claiming current path ownership or deleting possibly replaced entries.
 
 The failure case withdraws remote heartbeats while local supervision continues, requires owned `EXITED` lifecycle readback, then deletes and verifies GET404 even if STOP fails. Runtime presence is recorded separately: [the pinned official CLI classifier](https://github.com/runpod/runpodctl/blob/5b85fc45b7c850c776adc647137dab3dc0fdffe0/internal/podstate/podstate.go) treats `EXITED` as stopped even when telemetry remains reported. Source/PID/own-Pod GET only attests arming; `cloud-recover` releases journal-owned workers without acquiring or resuming generation.
+
+## A20 node retention
+
+Set `RunpodPodSpec(..., retain_node=True)` in the operator controller to skip A20's final release on success **and failure**; the default `False` preserves verified release. Successful retained runs remain `pending_human_review` with `release_verified=False`; failed runs still raise `A20_INCOMPLETE_RETAIN_PRIVATE_RUN` and persist retention details in `run.json`.
+
+**Retained nodes keep billing** (approximately $1.09/hour for L40S Secure; use the recorded rate when available). Find the pod ID, region, GPU, best-effort hourly rate and cached SSH address in `retained_node`; the operator must release that pod when debugging is done.
+
+Retention does not override spending guards: `CloudBudgetSession.enforce_limits` can still release the pod on deadline, idle or poison through `_release_claims`. Worker lease/heartbeat guards also remain active; retention does not extend the lease or guarantee continued availability.
+
+Capabilities contain no GPU driver version, so `retained_node.driver_version` is null; available file-row `driver_mount` receipts are preserved in `driver_mounts`. No private key material is recorded; SSH information is null when no validated connection is cached.

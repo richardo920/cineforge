@@ -42,4 +42,8 @@ def command(args: argparse.Namespace) -> dict[str, Any]:
     frozen.check()
     report = run_a20(bindings, frozen, Path(args.output_dir),
                      absolute_deadline=deadline, allow_live=args.allow_live)
-    return {key: report[key] for key in ("outcome", "release_verified", "human_review", "export_authority")}
+    result = {key: report[key] for key in
+              ("outcome", "release_verified", "human_review", "export_authority")}
+    if "retained_node" in report:
+        result["retained_node"] = report["retained_node"]
+    return result
