@@ -24,6 +24,7 @@ from cineforge.native_speech_pins import BASE_FILES, DESIGN_FILES, RUNTIME_DISTR
 FilePin = tuple[str, int, str, str]
 _HASH = re.compile(r"[0-9a-f]{64}\Z")
 _MAX_TREE_BYTES = 64 * 1024**3
+_GPU_MEMORY_TOLERANCE_MIB = 2048
 _MODEL_CONFIG_PATHS = frozenset({
     "config.json", "generation_config.json", "preprocessor_config.json",
     "speech_tokenizer/config.json", "speech_tokenizer/configuration.json",
@@ -126,12 +127,15 @@ class NativeHardware:
             raise NativeSpeechError("unsupported operator speech hardware expectation")
 
     def require_matches(self, actual: dict[str, Any]) -> None:
+        # Torch excludes driver reservations of at most ~1-2 GiB from NVML totals;
+        # GPU classes differ by far more (e.g. L4 ~24 GB versus L40S ~46 GB).
         if (set(actual) != {"torch_version", "torchaudio_version", "cuda_version", "gpu_name",
                             "memory_bytes", "capability", "operator_worker_id", "bf16_supported",
                             "attention"} or actual["torch_version"] != "2.8.0+cu128"
                 or actual["torchaudio_version"] != "2.8.0+cu128" or actual["cuda_version"] != "12.8"
                 or actual["gpu_name"] != self.gpu_name or type(actual["memory_bytes"]) is not int
-                or actual["memory_bytes"] // 1024**2 != self.memory_mib
+                or not self.memory_mib - _GPU_MEMORY_TOLERANCE_MIB
+                <= actual["memory_bytes"] // 1024**2 <= self.memory_mib
                 or type(actual["capability"]) is not list
                 or any(type(x) is not int for x in actual["capability"])
                 or actual["capability"] != list(self.capability)
