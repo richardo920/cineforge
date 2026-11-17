@@ -21,10 +21,10 @@ from cineforge.audio_analysis import ToolIdentity
 from cineforge.native_speech import OriginalVoiceDesign
 from cineforge.private_store import PrivateRunDirectory
 from cineforge.rights import EvidenceRef
-from cineforge.runpod import RunpodPodSpec
+from cineforge.runpod import LeaseSnapshot, RunpodPodSpec
 from cineforge.s2v_profile import IMAGE, L40S_GPU_ID
 from cineforge.s2v_service import S2VBudgetApproval, S2VServiceContext
-from cineforge.ssh_worker import SSHWorker
+from cineforge.ssh_worker import SSHWorker, WorkerError
 
 
 def creative(root):
@@ -180,6 +180,7 @@ class Harness:
         self.budget.remaining_seconds.return_value = 1700
         self.budget.costs.return_value = {"actual_total_usd": None}
         self.budget.snapshot_for.return_value = NS(state="ready")
+        self.budget.guard_plan.return_value = NS(stop_at_unix=11740., idle_seconds=120.)
         self.worker = Mock()
         self.worker.connection_info = {"host": "8.8.8.8", "port": 2222, "username": "root"}
         self.worker.__enter__ = Mock(return_value=self.worker)
@@ -187,7 +188,7 @@ class Harness:
         self.worker.prepare.side_effect = lambda *a, **kw: self.event("prepare", NS(record={}))
         self.worker.stage_s2v.side_effect = lambda *a, **kw: self.event("pair", NS())
         self.provisioner = Mock()
-        self.provisioner.inspect_lease.return_value = NS(hourly_usd=1.09)
+        self.provisioner.inspect_lease.return_value = NS(state="ready", hourly_usd=1.09)
         self.provisioner.acquire.side_effect = lambda *a, **kw: self.event("acquire", NS(device_id="owned"))
         self.provisioner.release.side_effect = lambda *a: self.event("release")
         self.bridge = Mock()
@@ -313,12 +314,14 @@ class DriverTests(unittest.TestCase):
                 self.assertFalse(record["release_verified"])
                 self.assertEqual(record["retained_node"], {
                     "pod_id": "owned", "region": "EUR-IS-2", "gpu_id": L40S_GPU_ID,
-                    "hourly_usd": 1.09, "driver_version": None,
+                    "state": "ready", "hourly_usd": 1.09, "driver_version": None,
+                    "guard_stop_at_unix": 11740., "guard_idle_seconds": 120.,
                     "driver_mounts": [] if failure == "capabilities" else mounts,
                     "ssh": h.worker.connection_info})
                 h.provisioner.release.assert_not_called()
                 h.provisioner.inspect_lease.assert_called_once_with("owned")
                 h.worker.__exit__.assert_called_once()
+                h.budget.guard_plan.assert_called_once_with("acquisition")
 
     def test_retention_survives_unavailable_rate_and_connection(self):
         for failure in (None, "stage"):
@@ -337,6 +340,60 @@ class DriverTests(unittest.TestCase):
                 self.assertIsNone(record["retained_node"]["ssh"])
                 self.assertNotIn("private provider error", json.dumps(record))
                 h.provisioner.release.assert_not_called()
+
+    def test_released_snapshot_does_not_report_a_billing_rate(self):
+        with tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
+            h = Harness(Path(tmp).resolve(), stack)
+            h.bindings = replace(h.bindings, spec=replace(h.bindings.spec, retain_node=True))
+            h.provisioner.inspect_lease.return_value = NS(state="released", hourly_usd=1.09)
+            result = h.run()
+            self.assertEqual(result["retained_node"]["state"], "released")
+            self.assertIsNone(result["retained_node"]["hourly_usd"])
+            h.provisioner.release.assert_not_called()
+
+    def test_interrupt_during_retained_snapshot_lookup_persists_incomplete(self):
+        with tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
+            h = Harness(Path(tmp).resolve(), stack)
+            h.bindings = replace(h.bindings, spec=replace(h.bindings.spec, retain_node=True))
+            h.provisioner.inspect_lease.side_effect = KeyboardInterrupt
+            with self.assertRaises(KeyboardInterrupt):
+                h.run()
+            record = json.loads((h.output / "run.json").read_bytes())
+            self.assertEqual(record["outcome"], "incomplete")
+            self.assertIsNone(record["retained_node"]["hourly_usd"])
+            h.worker.__exit__.assert_called_once()
+            h.budget.__exit__.assert_called_once()
+            h.provisioner.release.assert_not_called()
+
+    def test_retention_does_not_prevent_midrun_enforced_release(self):
+        with tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
+            h = Harness(Path(tmp).resolve(), stack)
+            h.bindings = replace(h.bindings, spec=replace(h.bindings.spec, retain_node=True))
+            # Simulate worker.check invoking the installed budget enforcer during staging.
+            def enforce(provisioner):
+                h.budget.guard_plan.assert_called_once_with("acquisition")
+                h.worker.__exit__.assert_not_called()
+                provisioner.release("owned")
+                provisioner.inspect_lease.return_value = NS(state="released", hourly_usd=1.09)
+                # A released journal record can no longer supply a guard plan.
+                h.budget.guard_plan.side_effect = ValueError("released lease")
+                return ("acquisition",)
+            h.budget.enforce_limits.side_effect = enforce
+            def stage(*args):
+                enforcer = h.worker.set_enforcer.call_args.args[0]
+                self.assertEqual(enforcer(), ("acquisition",))
+                raise WorkerError("worker supervision or lease deadline failed")
+            h.bridge.stage.side_effect = stage
+            with self.assertRaisesRegex(A20Error, "A20_INCOMPLETE_RETAIN_PRIVATE_RUN"):
+                h.run()
+            record = json.loads((h.output / "run.json").read_bytes())
+            self.assertEqual(record["outcome"], "incomplete")
+            self.assertEqual(record["retained_node"]["state"], "released")
+            self.assertIsNone(record["retained_node"]["hourly_usd"])
+            self.assertEqual(record["retained_node"]["guard_stop_at_unix"], 11740.)
+            self.assertEqual(record["retained_node"]["guard_idle_seconds"], 120.)
+            h.provisioner.release.assert_called_once_with("owned")
+            h.budget.enforce_limits.assert_called_once_with(h.provisioner)
 
     def test_no_acquired_device_produces_no_retention_record(self):
         with tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
@@ -494,6 +551,31 @@ class ConnectionInfoTests(unittest.TestCase):
         self.assertEqual(worker.connection_info, expected)
         worker.connection_info["host"] = "modified-copy"
         self.assertEqual(worker.connection_info, expected)
+
+    def test_projection_tracks_last_successful_connection_and_clears_on_failure(self):
+        from test_runpod import spec
+        from test_ssh_worker import Budget, Transport
+
+        worker = object.__new__(SSHWorker)
+        worker.spec, worker.budget, worker.transport = spec(), Budget(), Transport()
+        worker._host, worker._port = "", 0
+        snapshot = LeaseSnapshot("first", "created", "pod_1")
+        self.assertTrue(worker._connection(snapshot, 5))
+        self.assertEqual(worker.connection_info,
+            {"host": "8.8.8.8", "port": 22000, "username": "root"})
+        worker.transport.pod["ssh"]["direct"].update(host="1.1.1.1", port=2222)
+        self.assertTrue(worker._connection(snapshot, 5))
+        self.assertEqual(worker.connection_info,
+            {"host": "1.1.1.1", "port": 2222, "username": "root"})
+        worker.transport.pod["ssh"]["direct"]["host"] = "127.0.0.1"
+        with self.assertRaises(WorkerError):
+            worker._connection(snapshot, 5)
+        self.assertIsNone(worker.connection_info)
+        worker.transport.pod["ssh"]["direct"]["host"] = "8.8.8.8"
+        self.assertTrue(worker._connection(snapshot, 5))
+        worker.transport.pod["ssh"] = None
+        self.assertFalse(worker._connection(snapshot, 5))
+        self.assertIsNone(worker.connection_info)
 
 
 class CLITests(unittest.TestCase):

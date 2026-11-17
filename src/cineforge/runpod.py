@@ -54,6 +54,7 @@ class RunpodPodSpec:
     registry_id: str | None = None
     min_ram_per_gpu_gb: int | None = None
     retain_node: bool = False
+    """A20-only: skip final deletion; cloud_smoke/conditioning_run still release."""
 
     def __post_init__(self) -> None:
         if (not _identifier(self.session_id) or len(self.session_id) > 32
