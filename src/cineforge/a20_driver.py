@@ -40,6 +40,7 @@ from cineforge.speech import (
 )
 from cineforge.ssh_worker import SSHWorker
 from cineforge.stem_import import import_original_stem
+from cineforge.worker_guard import WorkerGuardPlan
 from cineforge.workflows import canonical, strict_object
 
 CHECKPOINTS = ("postinstall", "select", "design", "EN", "ZH")
@@ -379,17 +380,39 @@ def run_a20(b: A20Bindings, frozen: FrozenInputs, output: Path, *,
                                     if "driver_mount" in row],
                                 "ssh": worker.connection_info}
                             record["retained_node"] = retained
+                            old_plan: WorkerGuardPlan | None
+                            try:
+                                old_plan = budget.guard_plan(b.acquisition_id)
+                            except Exception:
+                                old_plan = None
+                            facts: dict[str, float] = {}
                             try:
                                 facts = budget.extend_retention(b.acquisition_id)
+                                result = worker.retain_live(facts)
                                 retained.update(facts)
-                                plan = budget.guard_plan(b.acquisition_id)
-                                retained.update(guard_stop_at_unix=plan.stop_at_unix,
-                                    guard_idle_seconds=plan.idle_seconds,
-                                    retention_heartbeat_pid=None, retention_heartbeat="starting")
-                                retained.update(worker.retain_live(facts))
+                                retained.update(result)
                             except (Exception, KeyboardInterrupt) as error:
                                 remember_interruption(error)
-                                retained["retention_heartbeat"] = "failed"
+                                retained.update(retention_heartbeat="failed",
+                                    retention_expires_unix=None, lease_expires_unix=None,
+                                    guard_stop_at_unix=None, guard_idle_seconds=None)
+                                for name in ("retention_acquired_unix", "retention_bound_seconds"):
+                                    if name in facts:
+                                        retained[name] = facts[name]
+                                stop_at = getattr(worker, "retention_guard_stop_at_unix", None)
+                                if type(stop_at) in (int, float):
+                                    retained.update(guard_stop_at_unix=stop_at,
+                                        guard_idle_seconds=budget.idle_seconds)
+                                elif (old_plan is not None
+                                        and getattr(worker, "retention_guard_alive", None) is True):
+                                    retained.update(guard_stop_at_unix=old_plan.stop_at_unix,
+                                        guard_idle_seconds=old_plan.idle_seconds)
+                                if getattr(worker, "retention_guard_alive", None) is False:
+                                    try:
+                                        provisioner.release(device.device_id)
+                                        record["release_verified"] = True
+                                    except (Exception, KeyboardInterrupt) as release_error:
+                                        remember_interruption(release_error)
                                 record["cleanup_error"] = "A20_LIVE_RETENTION_FAILED"
                                 failed = True
                             try:
@@ -400,7 +423,7 @@ def run_a20(b: A20Bindings, frozen: FrozenInputs, output: Path, *,
                                 remember_interruption(error)
                                 if isinstance(error, KeyboardInterrupt):
                                     failed = True
-                            if "retention_window_seconds_effective" in retained:
+                            if type(retained.get("retention_window_seconds_effective")) in (int, float):
                                 rate = retained["hourly_usd"]
                                 retained["max_retention_cost_usd"] = (
                                     spec.max_hourly_usd if rate is None else rate

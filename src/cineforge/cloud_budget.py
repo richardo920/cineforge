@@ -391,6 +391,10 @@ class CloudBudgetSession:
             if record["authorized"]:
                 expected_reserve = math.ceil((intent.spec.max_hourly_usd + .02)
                     * intent.lease_seconds / 3600 * 1_000_000) / 1_000_000
+                if "retention_deadline" in record:
+                    expected_reserve += math.ceil((intent.spec.max_hourly_usd + .02)
+                        * max(0., record["retention_deadline"] - record["deadline"])
+                        / 3600 * 1_000_000) / 1_000_000
                 if (record["reservation_usd"] != expected_reserve
                         or record["deadline"] != record["reserved_at"] + intent.lease_seconds
                         or record["last_activity"] < record["reserved_at"]
@@ -574,6 +578,18 @@ class CloudBudgetSession:
             expiry = min(acquired + 14400, now + intent.spec.retain_window_seconds)
             if not _number(expiry) or expiry > acquired + 14400:
                 raise CloudBudgetError("invalid retention deadline")
+            if expiry - 60 <= now + 30:
+                raise CloudBudgetError("retention window cannot admit a bounded handoff")
+            retention_seconds = max(0., expiry - record["deadline"])
+            retention_reserve = math.ceil((intent.spec.max_hourly_usd + .02)
+                * retention_seconds / 3600 * 1_000_000) / 1_000_000
+            used = sum(r["actual_usd"] if r["actual_usd"] is not None
+                       else r["reservation_usd"] or 0 for r in self._data["records"].values())
+            if used + retention_reserve > self.approval.aggregate_usd:
+                raise CloudBudgetError("aggregate estimated budget cannot admit this lease")
+            record["reservation_usd"] += retention_reserve
+            record["estimate_usd"] += (record["quote"]["compute_hourly_usd"] + .0109589) \
+                * retention_seconds / 3600
             record.update(retention_deadline=expiry, guard=None, last_activity=now)
             self._save()  # A crash before re-arm leaves the earlier guard fail-safe.
             return {"retention_acquired_unix": acquired, "retention_expires_unix": expiry,

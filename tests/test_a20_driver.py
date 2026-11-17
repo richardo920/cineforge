@@ -333,7 +333,7 @@ class DriverTests(unittest.TestCase):
                 h.worker.__exit__.assert_called_once()
                 h.budget.extend_retention.assert_called_once_with("acquisition")
 
-    def test_retention_handoff_precedes_close_and_failure_keeps_finite_deadline(self):
+    def test_retention_handoff_precedes_close_and_failure_reports_only_known_guard(self):
         for broken in (False, True):
             with self.subTest(broken=broken), tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
                 h = Harness(Path(tmp).resolve(), stack)
@@ -344,6 +344,8 @@ class DriverTests(unittest.TestCase):
                     if broken:
                         raise WorkerError("fake spawn failure")
                     return h.worker.retain_live.return_value
+                h.worker.retention_guard_alive = True
+                h.worker.retention_guard_stop_at_unix = None
                 h.worker.retain_live.side_effect = handoff
                 if broken:
                     with self.assertRaises(A20Error):
@@ -351,8 +353,35 @@ class DriverTests(unittest.TestCase):
                 else:
                     h.run()
                 retained = json.loads((h.output / "run.json").read_bytes())["retained_node"]
-                self.assertEqual(retained["lease_expires_unix"], 15400.)
+                self.assertEqual(retained["lease_expires_unix"], None if broken else 15400.)
+                if broken:
+                    self.assertIsNone(retained["retention_expires_unix"])
+                    self.assertNotIn("max_retention_cost_usd", retained)
+                    self.assertNotIn("retention_window_seconds_effective", retained)
+                    self.assertNotIn("retention_window_seconds", retained)
+                    self.assertEqual(retained["guard_stop_at_unix"], 15340.)
+                    self.assertEqual(retained["retention_acquired_unix"], 10000.)
+                    self.assertEqual(retained["retention_bound_seconds"], 14400.)
+                    h.provisioner.release.assert_not_called()
                 self.assertEqual(retained["retention_heartbeat"], "failed" if broken else "active")
+
+    def test_failed_handoff_releases_only_when_both_guards_are_known_dead(self):
+        for alive in (False, True, None):
+            with self.subTest(alive=alive), tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
+                h = Harness(Path(tmp).resolve(), stack)
+                h.bindings = replace(h.bindings, spec=replace(h.bindings.spec, retain_node=True))
+                if alive is not None:
+                    h.worker.retention_guard_alive = alive
+                h.worker.retention_guard_stop_at_unix = None
+                h.worker.retain_live.side_effect = WorkerError("fake handoff failure")
+                with self.assertRaises(A20Error):
+                    h.run()
+                if alive is False:
+                    h.provisioner.release.assert_called_once_with("owned")
+                    record = json.loads((h.output / "run.json").read_bytes())
+                    self.assertTrue(record["release_verified"])
+                else:
+                    h.provisioner.release.assert_not_called()
 
     def test_default_release_never_extends_or_spawns_heartbeat(self):
         with tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:

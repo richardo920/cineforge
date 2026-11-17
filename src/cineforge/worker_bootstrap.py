@@ -36,6 +36,8 @@ from cineforge.worker_profiles import (
     s2v_worker,
 )
 
+WORKSPACE_ROOT = Path("/workspace")
+
 # Existing inspection names remain available; operational data is immutable and shared.
 REVISION = T2V_WORKER.runner_revision
 GPU = T2V_WORKER.gpu
@@ -329,9 +331,9 @@ def _json(raw: bytes) -> dict[str, Any]:
 def worker_root(session: str, *, create: bool = False) -> Path:
     if not isinstance(session, str) or re.fullmatch(r"[A-Za-z0-9_-]{1,32}", session) is None:
         raise BootstrapError("invalid worker session")
-    root = Path("/workspace") / ("cineforge-m3-" + session)
+    root = WORKSPACE_ROOT / ("cineforge-m3-" + session)
     if create:
-        root.mkdir(mode=0o700)
+        root.mkdir(mode=0o700, exist_ok=True)
     info = root.lstat()
     if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
             or stat.S_IMODE(info.st_mode) & 0o077 or root.parent.is_symlink()):
@@ -700,13 +702,17 @@ def arm(request: dict[str, Any], deadline: float) -> dict[str, Any]:
         raise BootstrapError("worker guard source differs")
     root = worker_root(plan["session_id"], create=True)
     old_pid = None
-    if (root / "guard-pid.json").exists():
+    replacing = (root / "guard-pid.json").exists()
+    if replacing:
         old_plan = _json((root / "plan.json").read_bytes())
         if any(old_plan[name] != plan[name] for name in ("pod_id", "session_id", "lease_token")):
             raise BootstrapError("cannot replace another lease guardian")
         old_pid = _json((root / "guard-pid.json").read_bytes())["pid"]
-        guard_alive(root, old_pid)
-    replacing = old_pid is not None
+        try:
+            guard_alive(root, old_pid)
+        except BootstrapError:
+            # An alive but unverifiable guard remains: two guards, earlier stop wins.
+            old_pid = None
     private_write(root, "guard.py", source, replace=replacing)
     private_write(root, "plan.json", encode(plan), replace=replacing)
     if profile is not None:
@@ -741,7 +747,8 @@ def arm(request: dict[str, Any], deadline: float) -> dict[str, Any]:
             raise BootstrapError("old guardian still alive")
         guard_alive(root, process.pid)
     private_write(root, "guard-pid.json", encode({"pid": process.pid}), replace=replacing)
-    runtime = (s2v_hardware_admission(root, deadline, profile_id=profile["id"]) if profile is not None
+    # Post-run Comfy memory/disk usage must not repeat initial hardware admission.
+    runtime = {} if replacing else (s2v_hardware_admission(root, deadline, profile_id=profile["id"]) if profile is not None
                and profile["id"] in S2V_PROFILE_IDS else
                runtime_probe(max(.01, deadline - time.monotonic()), profile=profile, resource_root=root)
                if profile is not None else runtime_probe(max(.01, deadline - time.monotonic())))
@@ -974,6 +981,26 @@ def stage_reference(request: dict[str, Any], root: Path) -> dict[str, Any]:
     return {"reference": expected}
 
 def dispatch(request: dict[str, Any]) -> dict[str, Any]:
+    if request.get("operation") == "stop":
+        # Independent of guard PID/liveness; authority stays scoped to the armed own Pod.
+        try:
+            timeout = request["timeout_seconds"]
+            if (request.get("allow_live") is not True or type(timeout) not in (int, float)
+                    or not math.isfinite(timeout) or not 0 < timeout <= 60):
+                raise BootstrapError("invalid stop bound")
+            deadline = time.monotonic() + timeout
+            root = worker_root(request["plan"]["session_id"])
+            if (encode(_json((root / "plan.json").read_bytes())) != encode(request["plan"])
+                    or hashlib.sha256((root / "guard.py").read_bytes()).hexdigest()
+                    != request["guard_sha256"]):
+                raise BootstrapError("stop authority differs")
+            guard = load_guard(root)
+            plan = guard.WorkerGuardPlan.from_dict(request["plan"])
+            stopped = guard.stop_own_pod(plan, allow_live=True,
+                timeout_seconds=min(10, deadline - time.monotonic()), absolute_deadline=deadline)
+            return {"status": "stopped" if stopped else "stop_unconfirmed"}
+        except (Exception, KeyboardInterrupt):
+            return {"status": "stop_unconfirmed"}
     timeout = request["timeout_seconds"]
     if (request.get("allow_live") is not True or type(timeout) not in (int, float)
             or not math.isfinite(timeout) or not 0 < timeout <= 1740):

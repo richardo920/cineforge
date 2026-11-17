@@ -153,30 +153,54 @@ class BudgetTests(unittest.TestCase):
     def test_retention_extension_is_bounded_one_shot_and_reload_consistent(self):
         with self.session() as session:
             provider = self.provider(session)
-            provider.spec = replace(spec(), retain_node=True, retain_window_seconds=20000)
+            provider.spec = replace(spec(), retain_node=True, retain_window_seconds=8000)
             self.acquire(provider)
             before = json.loads((self.path / "budget.json").read_bytes())["records"]["first"]
             self.clock.sleep(1700)  # Late in the original lease; no revival after expiry.
             facts = session.extend_retention("first")
-            self.assertEqual(facts["retention_expires_unix"], before["reserved_at"] + 14400)
-            self.assertEqual(facts["retention_window_seconds_effective"], 12700)
-            self.assertEqual(facts["retention_window_seconds"], 20000)
+            self.assertEqual(facts["retention_expires_unix"], 19700)
+            self.assertEqual(facts["retention_window_seconds_effective"], 8000)
+            self.assertEqual(facts["retention_window_seconds"], 8000)
             plan = session.guard_plan("first")
             self.assertEqual(plan.stop_at_unix, facts["lease_expires_unix"] - 60)
             session.arm_guard("first", GuardReceipt(plan, worker_guard_source_sha256(),
                 456, self.clock.time(), True, True))
             after = json.loads((self.path / "budget.json").read_bytes())["records"]["first"]
-            for field in ("deadline", "reserved_at", "reservation_usd", "intent"):
+            for field in ("deadline", "reserved_at", "intent"):
                 self.assertEqual(after[field], before[field])
+            self.assertAlmostEqual(after["reservation_usd"], 2.748334)
+            self.assertAlmostEqual(after["estimate_usd"], before["estimate_usd"] +
+                (before["quote"]["compute_hourly_usd"] + .0109589) * 7900 / 3600)
+            self.assertAlmostEqual(session.costs()["reserved_worst_case_usd"], 2.748334)
             with self.assertRaises(CloudBudgetError):
                 session.extend_retention("first")
         with self.session() as resumed:
             self.assertEqual(resumed.guard_plan("first"), plan)
-            self.assertGreater(resumed.remaining_seconds("first"), 12000)
-            self.clock.sleep(12700)
+            self.assertEqual(resumed._record("first")["reservation_usd"], after["reservation_usd"])
+            self.assertEqual(resumed._record("first")["estimate_usd"], after["estimate_usd"])
+            self.assertGreater(resumed.remaining_seconds("first"), 7900)
+            self.clock.sleep(8000)
             with self.assertRaises(CloudBudgetError):
                 resumed.extend_retention("first")
             self.assertEqual(resumed.remaining_seconds("first"), 0)
+
+    def test_retention_rejects_aggregate_overflow_and_small_windows_without_mutation(self):
+        for window in (20000, 30, 60, 90):
+            self.path = Path(self.temp.name).resolve() / ("journal-" + str(window))
+            self.clock = Clock()
+            self.cloud = Cloud(self.clock)
+            with self.subTest(window=window), self.session() as session:
+                provider = self.provider(session)
+                provider.spec = replace(spec(), retain_node=True, retain_window_seconds=window)
+                self.acquire(provider)
+                self.clock.sleep(1700)
+                before = json.loads((self.path / "budget.json").read_bytes())["records"]["first"]
+                with self.assertRaises(CloudBudgetError), patch.object(session, "_save") as save:
+                    session.extend_retention("first")
+                save.assert_not_called()
+                self.assertEqual(session._record("first"), before)
+                self.assertNotIn("retention_deadline", before)
+                provider.release("pod_1")
 
     def test_retention_default_and_no_extension_for_false_or_expired(self):
         with self.session() as session:

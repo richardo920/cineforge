@@ -220,6 +220,70 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(json.loads((self.root / "guard-pid.json").read_bytes()), {"pid": 123})
         self.assertEqual(json.loads((self.root / "plan.json").read_bytes()), plan.to_dict())
 
+    def test_real_worker_root_rearms_existing_directory_and_rescues_dead_guard(self):
+        for dead in (False, True):
+            with self.subTest(dead=dead), tempfile.TemporaryDirectory() as tmp:
+                workspace = Path(tmp).resolve()
+                plan = worker_guard.WorkerGuardPlan("pod_1", "fixture", "a"*32, time.time()+300, 30)
+                source = b"synthetic guard source"
+                request = {"plan": plan.to_dict(), "guard_source": base64.b64encode(source).decode(),
+                    "guard_sha256": hashlib.sha256(source).hexdigest(), "controller_unix": time.time()}
+                guard = Mock()
+                guard.verify_own_pod.return_value = True
+                processes = [Mock(pid=122), Mock(pid=123)]
+                for process in processes:
+                    process.poll.return_value = None
+                retired = []
+                def alive(root, pid, dead=dead, retired=retired):
+                    if pid == 122 and (dead and (root / "guard-pid.json").exists() or retired):
+                        raise BootstrapError("old guard dead or unverifiable")
+                with patch("cineforge.worker_bootstrap.WORKSPACE_ROOT", workspace), \
+                        patch("cineforge.worker_bootstrap.load_guard", return_value=guard), \
+                        patch("cineforge.worker_bootstrap.subprocess.Popen", side_effect=processes), \
+                        patch("cineforge.worker_bootstrap.guard_alive", side_effect=alive), \
+                        patch("cineforge.worker_bootstrap.os.kill",
+                              side_effect=lambda pid, sig, retired=retired: retired.append(pid)) as kill, \
+                        patch("cineforge.worker_bootstrap.runtime_probe", return_value={}) as probe:
+                    self.assertEqual(arm(request, time.monotonic()+5)["receipt"]["pid"], 122)
+                    probe.assert_called_once()
+                    probe.reset_mock()
+                    result = arm(request, time.monotonic()+5)
+                    probe.assert_not_called()
+                self.assertEqual(result["runtime"], {})
+                self.assertEqual(result["receipt"]["pid"], 123)
+                self.assertEqual(json.loads((workspace / "cineforge-m3-fixture" /
+                    "guard-pid.json").read_bytes()), {"pid": 123})
+                if dead:
+                    kill.assert_not_called()
+                else:
+                    kill.assert_called_once_with(122, signal.SIGKILL)
+
+    def test_stop_uses_verified_own_pod_authority_without_a_guard_pid(self):
+        plan = worker_guard.WorkerGuardPlan("pod_1", "fixture", "a"*32, time.time()+100, 30)
+        source = b"synthetic guard source"
+        private_write(self.root, "plan.json", json.dumps(plan.to_dict()).encode())
+        private_write(self.root, "guard.py", source)
+        request = {"operation": "stop", "plan": plan.to_dict(), "allow_live": True,
+            "timeout_seconds": 30, "guard_sha256": hashlib.sha256(source).hexdigest()}
+        guard = Mock()
+        guard.WorkerGuardPlan.from_dict.return_value = plan
+        with patch("cineforge.worker_bootstrap.worker_root", return_value=self.root), \
+                patch("cineforge.worker_bootstrap.load_guard", return_value=guard), \
+                patch("cineforge.worker_bootstrap.guard_alive") as alive:
+            for stopped in (True, False):
+                guard.stop_own_pod.return_value = stopped
+                self.assertEqual(dispatch(request),
+                    {"status": "stopped" if stopped else "stop_unconfirmed"})
+            guard.stop_own_pod.assert_called_with(plan, allow_live=True, timeout_seconds=10,
+                absolute_deadline=unittest.mock.ANY)
+            guard.stop_own_pod.reset_mock()
+            for changed in ({"plan": dict(plan.to_dict(), pod_id="foreign")},
+                            {"guard_sha256": "0"*64}, {"allow_live": False},
+                            {"timeout_seconds": 61}):
+                self.assertEqual(dispatch(dict(request, **changed)), {"status": "stop_unconfirmed"})
+            guard.stop_own_pod.assert_not_called()
+            alive.assert_not_called()
+
     def test_arm_rejects_source_tampering_before_worker_write(self):
         request = {"plan": {}, "guard_source": base64.b64encode(b"fixture").decode(),
                    "guard_sha256": "0"*64}
