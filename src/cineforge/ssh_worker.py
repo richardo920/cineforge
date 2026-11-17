@@ -33,6 +33,7 @@ from cineforge.comfy_transport import (
 from cineforge.devices import Backend, GPUDevice
 from cineforge.interruptions import preserve_interruption, remember_interruption
 from cineforge.private_store import PrivateRunDirectory, read_private_input
+from cineforge.retention_heartbeat import spawn_heartbeat
 from cineforge.runpod import LeaseSnapshot, RunpodPodSpec, WorkerObservation
 from cineforge.runpod_transport import CloudTransport
 from cineforge.s2v import S2VSelection, StagedS2VPair
@@ -149,6 +150,9 @@ class SSHWorker:
             raise WorkerError("SSH state path cannot contain whitespace or controls")
         self.plan: WorkerGuardPlan | None = None
         self.observation: WorkerObservation | None = None
+        self.retention_guard_alive: bool | None = None
+        self.retention_guard_stop_at_unix: float | None = None
+        self.retention_heartbeat_pid: int | None = None
         self._host, self._port = "", 0
         self._stop, self._failed = Event(), Event()
         self._remote_suspended, self._remote_lock = Event(), Lock()
@@ -372,6 +376,89 @@ class SSHWorker:
         self._thread = Thread(target=self._supervise, daemon=True)
         self._thread.start()
         return self.observation
+
+    def probe_retention_guard(self, plan: WorkerGuardPlan) -> bool:
+        """Best-effort old-guard liveness probe; False on any failed heartbeat.
+
+        Supervision is bypassed so a failed ``check()`` cannot mask a live guard;
+        an interrupt propagates so the caller can tell "unknown" from "dead".
+        """
+        if not isinstance(plan, WorkerGuardPlan):
+            return False
+        with self._remote_lock:
+            try:
+                return self._request({"operation": "heartbeat", "plan": plan.to_dict()},
+                                     5, supervise=False) == {"status": "heartbeat"}
+            except Exception:
+                return False
+
+    def retain_live(self, facts: dict[str, float], *,
+                    spawner: Callable[..., int] = spawn_heartbeat) -> dict[str, Any]:
+        """Re-arm and hand off while supervision is alive, serialized with remote heartbeats."""
+        with self._remote_lock:
+            try:
+                self.check()
+            except WorkerError:
+                if not (self._failed.is_set() and not self._stop.is_set()
+                        and self.budget.remaining_seconds(self._key) > 0
+                        and (self._tunnel is None or self._tunnel.poll() is None)):
+                    raise
+                # _request(supervise=False) opens fresh direct SSH, independent of the
+                # Comfy tunnel (check may have closed it). Budget authority still fails closed.
+            if self.plan is None:
+                raise WorkerError("retention requires an armed worker")
+            self.retention_guard_alive = None
+            self.retention_guard_stop_at_unix = None
+            self.retention_heartbeat_pid = None
+            new_alive = False
+            try:
+                self._request({"operation": "heartbeat", "plan": self.plan.to_dict()},
+                              5, supervise=False)
+            except Exception:
+                pass
+            try:
+                remaining = min(self.budget.remaining_seconds(self._key),
+                                self.plan.stop_at_unix - time.time())
+                if remaining <= 0:
+                    raise WorkerError("old guard expired before retention handoff")
+                plan = self.budget.guard_plan(self._key)
+                if plan.stop_at_unix != facts["retention_expires_unix"] - 60:
+                    raise WorkerError("retention plan differs from journal expiry")
+                source = read_private_input(Path(worker_guard.__file__), max_bytes=65536)
+                reply = self._request({"operation": "arm", "plan": plan.to_dict(),
+                    "guard_source": base64.b64encode(source).decode(),
+                    "guard_sha256": worker_guard_source_sha256(), "controller_unix": time.time()},
+                    min(30, remaining), supervise=False)
+                self.budget.arm_guard(self._key, GuardReceipt.from_dict(reply["receipt"]))
+                new_alive = True
+                self.retention_guard_stop_at_unix = plan.stop_at_unix
+                self.plan = plan
+                self.budget.heartbeat(self._key)
+                request: dict[str, Any] = {"operation": "heartbeat", "plan": plan.to_dict(),
+                    "allow_live": True, "guard_sha256": worker_guard_source_sha256()}
+                if self._profile is not None:
+                    request["profile"] = self._profile
+                # Confirm a fresh beat before close; the detached child also beats immediately.
+                if self._request(request, 5, supervise=False) != {"status": "heartbeat"}:
+                    raise WorkerError("retention heartbeat rejected")
+                flags = "/usr/bin/python3.11 -I -B -S -c " if type(
+                    self.selection) is S2VServiceContext else "python3 -I -c "
+                command = self._command() + [self._host,
+                    flags + shlex.quote(worker_command_source(self._source))]
+                pid = spawner(self.state_dir, command, request, facts["retention_expires_unix"],
+                              ssh_environment())
+                # Record the live child before any later step can be interrupted:
+                # the PID is the only handle on the detached feeder.
+                self.retention_guard_alive = True
+                self.retention_heartbeat_pid = pid
+                # Both feeders use the same atomic remote heartbeat namespace: one writer only.
+                self._remote_suspended.set()
+                return dict(facts, guard_stop_at_unix=plan.stop_at_unix,
+                    guard_idle_seconds=plan.idle_seconds, retention_heartbeat_pid=pid,
+                    retention_heartbeat="active")
+            except BaseException:
+                self.retention_guard_alive = new_alive or None
+                raise
 
     @preserve_interruption
     def _supervise(self) -> None:

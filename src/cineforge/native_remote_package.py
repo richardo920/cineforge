@@ -66,6 +66,7 @@ _PACKAGE_FILES = (
     "providers.py",
     "provisioning.py",
     "rights.py",
+    "retention_heartbeat.py",
     "runpod.py",
     "runpod_transport.py",
     "s2v.py",

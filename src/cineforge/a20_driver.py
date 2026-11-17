@@ -40,6 +40,7 @@ from cineforge.speech import (
 )
 from cineforge.ssh_worker import SSHWorker
 from cineforge.stem_import import import_original_stem
+from cineforge.worker_guard import WorkerGuardPlan
 from cineforge.workflows import canonical, strict_object
 
 CHECKPOINTS = ("postinstall", "select", "design", "EN", "ZH")
@@ -236,13 +237,10 @@ def run_a20(b: A20Bindings, frozen: FrozenInputs, output: Path, *,
                     store.checkpoint(canonical(record))
 
                 device = None
-                retained_guard = None
                 try:
                     guard()
                     device = provisioner.acquire(b.service.model, max_cost_usd=.635,
                                                  idempotency_key=b.acquisition_id)
-                    if spec.retain_node:
-                        retained_guard = budget.guard_plan(b.acquisition_id)
                     guard()
                     # stage() includes native_preflight BEFORE installing runtime.
                     native_cap = min(absolute_deadline, time.monotonic() + 1200)
@@ -377,15 +375,59 @@ def run_a20(b: A20Bindings, frozen: FrozenInputs, output: Path, *,
                             retained: dict[str, Any] = {"pod_id": device.device_id,
                                 "region": spec.data_center_id, "gpu_id": spec.gpu_id,
                                 "state": None, "hourly_usd": None, "driver_version": None,
-                                "guard_stop_at_unix": (retained_guard.stop_at_unix
-                                    if retained_guard is not None else None),
-                                "guard_idle_seconds": (retained_guard.idle_seconds
-                                    if retained_guard is not None else None),
                                 "driver_mounts": [row["driver_mount"] for row in
                                     record.get("capabilities", {}).get("files", [])
                                     if "driver_mount" in row],
                                 "ssh": worker.connection_info}
                             record["retained_node"] = retained
+                            old_plan: WorkerGuardPlan | None
+                            try:
+                                old_plan = budget.guard_plan(b.acquisition_id)
+                            except Exception:
+                                old_plan = None
+                            facts: dict[str, float] = {}
+                            release_needed = False
+                            try:
+                                facts = budget.extend_retention(b.acquisition_id)
+                                result = worker.retain_live(facts)
+                                retained.update(facts)
+                                retained.update(result)
+                            except (Exception, KeyboardInterrupt) as error:
+                                remember_interruption(error)
+                                retained.update(retention_heartbeat="failed",
+                                    retention_expires_unix=None, lease_expires_unix=None,
+                                    guard_stop_at_unix=None, guard_idle_seconds=None)
+                                for name in ("retention_acquired_unix", "retention_bound_seconds"):
+                                    if name in facts:
+                                        retained[name] = facts[name]
+                                stop_at = getattr(worker, "retention_guard_stop_at_unix", None)
+                                if type(stop_at) in (int, float):
+                                    retained.update(guard_stop_at_unix=stop_at,
+                                        guard_idle_seconds=budget.idle_seconds)
+                                elif (old_plan is not None
+                                        and getattr(worker, "retention_guard_alive", None) is True):
+                                    retained.update(guard_stop_at_unix=old_plan.stop_at_unix,
+                                        guard_idle_seconds=old_plan.idle_seconds)
+                                elif old_plan is not None:
+                                    # Liveness was never established: extend_retention may
+                                    # have refused the window, or retain_live may have
+                                    # re-raised before probing. Probe the old guard first:
+                                    # a live guard still bounds billing. An interrupted
+                                    # probe releases through the provider API, fail-closed.
+                                    probed_alive = False
+                                    try:
+                                        probed_alive = worker.probe_retention_guard(old_plan)
+                                    except KeyboardInterrupt as probe_error:
+                                        remember_interruption(probe_error)
+                                    except Exception:
+                                        probed_alive = False
+                                    if probed_alive:
+                                        retained.update(guard_stop_at_unix=old_plan.stop_at_unix,
+                                            guard_idle_seconds=old_plan.idle_seconds)
+                                    else:
+                                        release_needed = True
+                                record["cleanup_error"] = "A20_LIVE_RETENTION_FAILED"
+                                failed = True
                             try:
                                 snap = provisioner.inspect_lease(device.device_id)
                                 retained.update(state=snap.state, hourly_usd=
@@ -394,6 +436,19 @@ def run_a20(b: A20Bindings, frozen: FrozenInputs, output: Path, *,
                                 remember_interruption(error)
                                 if isinstance(error, KeyboardInterrupt):
                                     failed = True
+                            if release_needed and retained.get("state") != "released":
+                                try:
+                                    provisioner.release(device.device_id)
+                                    record["release_verified"] = True
+                                except (Exception, KeyboardInterrupt) as release_error:
+                                    remember_interruption(release_error)
+                            if type(retained.get("retention_window_seconds_effective")) in (int, float):
+                                rate = retained["hourly_usd"]
+                                retained["max_retention_cost_usd"] = (
+                                    spec.max_hourly_usd if rate is None else rate
+                                ) * retained["retention_window_seconds_effective"] / 3600
+                            if release_needed and record["release_verified"]:
+                                retained.update(state="released", hourly_usd=None)
                         else:
                             try:
                                 provisioner.release(device.device_id)

@@ -367,7 +367,8 @@ class CloudBudgetSession:
                 or not isinstance(data["records"], dict) or len(data["records"]) > 100):
             raise ValueError
         for key, record in data["records"].items():
-            if not isinstance(record, dict) or set(record) != _RECORD_FIELDS:
+            if not isinstance(record, dict) or set(record) not in (
+                    _RECORD_FIELDS, _RECORD_FIELDS | {"retention_deadline"}):
                 raise ValueError
             intent = AcquisitionIntent.from_dict(record["intent"])
             snapshot = LeaseSnapshot.from_dict(record["snapshot"])
@@ -390,6 +391,10 @@ class CloudBudgetSession:
             if record["authorized"]:
                 expected_reserve = math.ceil((intent.spec.max_hourly_usd + .02)
                     * intent.lease_seconds / 3600 * 1_000_000) / 1_000_000
+                if "retention_deadline" in record:
+                    expected_reserve += math.ceil((intent.spec.max_hourly_usd + .02)
+                        * max(0., record["retention_deadline"] - record["deadline"])
+                        / 3600 * 1_000_000) / 1_000_000
                 if (record["reservation_usd"] != expected_reserve
                         or record["deadline"] != record["reserved_at"] + intent.lease_seconds
                         or record["last_activity"] < record["reserved_at"]
@@ -400,11 +405,18 @@ class CloudBudgetSession:
                     raise ValueError
             elif snapshot.resource_id is not None:
                 raise ValueError
+            retention = record.get("retention_deadline")
+            if "retention_deadline" in record and (
+                    not record["authorized"] or not intent.spec.retain_node
+                    or not _number(retention) or not record["reserved_at"] < retention
+                    <= record["reserved_at"] + 14400):
+                raise ValueError
             if record["guard"] is not None:
                 receipt = GuardReceipt.from_dict(record["guard"])
                 if (receipt.plan.pod_id != snapshot.resource_id
                         or receipt.plan.session_id != intent.spec.session_id
-                        or receipt.plan.lease_token != intent.owner_token):
+                        or receipt.plan.lease_token != intent.owner_token
+                        or retention is not None and receipt.plan.stop_at_unix != retention - 60):
                     raise ValueError
             if record["actual_usd"] is not None and (snapshot.state != "released"
                     or not self._billing_reference(record["actual_reference"])):
@@ -547,6 +559,70 @@ class CloudBudgetSession:
                     or now >= record["deadline"] - 60):
                 raise CloudBudgetError("durable admission expired before cloud creation")
 
+    @staticmethod
+    def _lease_deadline(record: dict[str, Any]) -> float:
+        return float(record.get("retention_deadline", record["deadline"]))
+
+    def extend_retention(self, key: str) -> dict[str, float]:
+        """One-shot retention authority; preserve original acquisition/reservation invariants.
+
+        A requested window the aggregate cannot admit is clamped to the longest
+        window it can fund instead of refused: ``retention_window_seconds`` keeps
+        the requested value and ``retention_window_seconds_effective`` reports the
+        admitted one. Only a window that cannot admit a bounded handoff at all is
+        refused.
+        """
+        with self._lock:
+            now = self._now()
+            record = self._record(key)
+            intent = AcquisitionIntent.from_dict(record["intent"])
+            # Never revive an expired guard, repeat an extension, or extend ordinary leases.
+            self.guard_plan(key)
+            if (self._poisoned or not intent.spec.retain_node
+                    or "retention_deadline" in record or now >= record["deadline"] - 60):
+                raise CloudBudgetError("retention requires a fresh owned bounded lease")
+            acquired = float(record["reserved_at"])
+            expiry = min(acquired + 14400, now + intent.spec.retain_window_seconds)
+            if not _number(expiry) or expiry > acquired + 14400:
+                raise CloudBudgetError("invalid retention deadline")
+            if expiry - 60 <= now + 30:
+                raise CloudBudgetError("retention window cannot admit a bounded handoff")
+            retention_seconds = max(0., expiry - record["deadline"])
+            retention_reserve = math.ceil((intent.spec.max_hourly_usd + .02)
+                * retention_seconds / 3600 * 1_000_000) / 1_000_000
+            used = sum(r["actual_usd"] if r["actual_usd"] is not None
+                       else r["reservation_usd"] or 0 for r in self._data["records"].values())
+            if used + retention_reserve > self.approval.aggregate_usd:
+                # Clamp to the longest retention the aggregate still funds; the
+                # 14400s bound above already caps the unclamped expiry.
+                rate = intent.spec.max_hourly_usd + .02
+                remaining = self.approval.aggregate_usd - used
+                if rate <= 0 or remaining <= 0:
+                    raise CloudBudgetError("aggregate estimated budget cannot admit this lease")
+                affordable = math.floor(remaining / rate * 3600)
+                while affordable > 0:
+                    retention_seconds = float(affordable)
+                    retention_reserve = math.ceil(rate * retention_seconds / 3600
+                        * 1_000_000) / 1_000_000
+                    if used + retention_reserve <= self.approval.aggregate_usd:
+                        break
+                    affordable -= 1
+                if affordable <= 0:
+                    raise CloudBudgetError("aggregate estimated budget cannot admit this lease")
+                expiry = float(record["deadline"]) + retention_seconds
+                if expiry - 60 <= now + 30:
+                    raise CloudBudgetError("retention window cannot admit a bounded handoff")
+            record["reservation_usd"] += retention_reserve
+            record["estimate_usd"] += (record["quote"]["compute_hourly_usd"] + .0109589) \
+                * retention_seconds / 3600
+            record.update(retention_deadline=expiry, guard=None, last_activity=now)
+            self._save()  # A crash before re-arm leaves the earlier guard fail-safe.
+            return {"retention_acquired_unix": acquired, "retention_expires_unix": expiry,
+                    "lease_expires_unix": expiry,
+                    "retention_window_seconds": intent.spec.retain_window_seconds,
+                    "retention_window_seconds_effective": expiry - now,
+                    "retention_bound_seconds": 14400.}
+
     def guard_plan(self, key: str) -> WorkerGuardPlan:
         with self._lock:
             record = self._record(key)
@@ -556,7 +632,7 @@ class CloudBudgetSession:
                     or snapshot.state not in {"created", "ready"}):
                 raise CloudBudgetError("worker guard requires journal-owned identity")
             return WorkerGuardPlan(snapshot.resource_id, intent.spec.session_id, intent.owner_token,
-                record["deadline"] - 60, self.idle_seconds)
+                self._lease_deadline(record) - 60, self.idle_seconds)
 
     def arm_guard(self, key: str, receipt: GuardReceipt) -> None:
         with self._lock:
@@ -578,7 +654,7 @@ class CloudBudgetSession:
             if self._poisoned or LeaseSnapshot.from_dict(record["snapshot"]).state not in {
                     "created", "ready"}:
                 return 0.
-            return max(0., float(record["deadline"]) - 60 - now)
+            return max(0., self._lease_deadline(record) - 60 - now)
 
     def heartbeat(self, key: str) -> None:
         """Local supervision only; M3.4 separately updates heartbeat on worker's clock."""
@@ -668,7 +744,8 @@ class CloudBudgetSession:
             for record in self._data["records"].values():
                 snapshot = LeaseSnapshot.from_dict(record["snapshot"])
                 if (snapshot.resource_id and snapshot.state not in _TERMINAL
-                        and record["authorized"] and (self._poisoned or now >= record["deadline"] - 60
+                        and record["authorized"] and (self._poisoned
+                        or now >= self._lease_deadline(record) - 60
                         or now - record["last_activity"] >= self.idle_seconds)):
                     claim = self._claim_cleanup(record)
                     if claim is not None:

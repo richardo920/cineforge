@@ -36,6 +36,8 @@ from cineforge.worker_profiles import (
     s2v_worker,
 )
 
+WORKSPACE_ROOT = Path("/workspace")
+
 # Existing inspection names remain available; operational data is immutable and shared.
 REVISION = T2V_WORKER.runner_revision
 GPU = T2V_WORKER.gpu
@@ -329,14 +331,30 @@ def _json(raw: bytes) -> dict[str, Any]:
 def worker_root(session: str, *, create: bool = False) -> Path:
     if not isinstance(session, str) or re.fullmatch(r"[A-Za-z0-9_-]{1,32}", session) is None:
         raise BootstrapError("invalid worker session")
-    root = Path("/workspace") / ("cineforge-m3-" + session)
+    root = WORKSPACE_ROOT / ("cineforge-m3-" + session)
     if create:
-        root.mkdir(mode=0o700)
+        root.mkdir(mode=0o700, exist_ok=True)
     info = root.lstat()
     if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
             or stat.S_IMODE(info.st_mode) & 0o077 or root.parent.is_symlink()):
         raise BootstrapError("unsafe worker directory")
     return root
+
+
+def _guard_module_from_source(source: bytes) -> Any:
+    """Load a candidate guard module from bytes without touching on-pod state."""
+    spec = importlib.util.spec_from_loader("cineforge_worker_guard_candidate", loader=None)
+    if spec is None:
+        raise BootstrapError("worker guard unavailable")
+    module = importlib.util.module_from_spec(spec)
+    # dataclasses resolve annotations through sys.modules: register first, as
+    # load_guard does for the on-disk guard.
+    sys.modules[spec.name] = module
+    try:
+        exec(compile(source, "worker_guard.py", "exec"), module.__dict__)
+    except Exception as error:
+        raise BootstrapError("worker guard source differs") from error
+    return module
 
 
 def load_guard(root: Path) -> Any:
@@ -699,17 +717,33 @@ def arm(request: dict[str, Any], deadline: float) -> dict[str, Any]:
     if len(source) > 65536 or hashlib.sha256(source).hexdigest() != request["guard_sha256"]:
         raise BootstrapError("worker guard source differs")
     root = worker_root(plan["session_id"], create=True)
-    private_write(root, "guard.py", source)
-    private_write(root, "plan.json", encode(plan))
-    if profile is not None:
-        private_write(root, "profile.json", encode(profile))
-    heartbeat(root, plan, first=True)
-    guard = load_guard(root)
-    parsed = guard.WorkerGuardPlan.from_dict(plan)
+    old_pid = None
+    replacing = (root / "guard-pid.json").exists()
+    if replacing:
+        old_plan = _json((root / "plan.json").read_bytes())
+        if any(old_plan[name] != plan[name] for name in ("pod_id", "session_id", "lease_token")):
+            raise BootstrapError("cannot replace another lease guardian")
+        old_pid = _json((root / "guard-pid.json").read_bytes())["pid"]
+        try:
+            guard_alive(root, old_pid)
+        except BootstrapError:
+            # An alive but unverifiable guard remains: two guards, earlier stop wins.
+            old_pid = None
+    # Validate the clock and the own-Pod credential against the parsed new plan
+    # BEFORE replacing any on-pod file: a failed arm must leave the old guard,
+    # plan and heartbeat untouched so supervision keeps refreshing the old plan.
+    candidate = _guard_module_from_source(source)
+    parsed = candidate.WorkerGuardPlan.from_dict(plan)
     if abs(time.time() - request["controller_unix"]) > 5:
         raise BootstrapError("worker clock differs")
-    if not guard.verify_own_pod(parsed, allow_live=True):
+    if not candidate.verify_own_pod(parsed, allow_live=True):
         raise BootstrapError("worker own-Pod credential verification failed")
+    private_write(root, "guard.py", source, replace=replacing)
+    private_write(root, "plan.json", encode(plan), replace=replacing)
+    if profile is not None:
+        private_write(root, "profile.json", encode(profile), replace=replacing)
+    heartbeat(root, plan, first=not replacing)
+    load_guard(root)  # The written guard must load before its process spawns.
     process = subprocess.Popen([sys.executable, str(root / "guard.py"), "--plan",
         str(root / "plan.json"), "--heartbeat", str(root / "heartbeat.json"), "--allow-live"],
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -718,8 +752,23 @@ def arm(request: dict[str, Any], deadline: float) -> dict[str, Any]:
     if process.poll() is not None:
         raise BootstrapError("worker guard exited")
     guard_alive(root, process.pid)
-    private_write(root, "guard-pid.json", encode({"pid": process.pid}))
-    runtime = (s2v_hardware_admission(root, deadline, profile_id=profile["id"]) if profile is not None
+    if old_pid is not None:
+        # SIGTERM invokes the guard's shutdown path; SIGKILL retires only this verified PID.
+        os.kill(old_pid, signal.SIGKILL)
+        for _ in range(100):
+            try:
+                guard_alive(root, old_pid)
+            except BootstrapError:
+                break  # Absent/zombie: the old guardian can no longer stop compute.
+            if time.monotonic() >= deadline:
+                raise BootstrapError("old guardian retirement timed out")
+            time.sleep(.01)
+        else:
+            raise BootstrapError("old guardian still alive")
+        guard_alive(root, process.pid)
+    private_write(root, "guard-pid.json", encode({"pid": process.pid}), replace=replacing)
+    # Post-run Comfy memory/disk usage must not repeat initial hardware admission.
+    runtime = {} if replacing else (s2v_hardware_admission(root, deadline, profile_id=profile["id"]) if profile is not None
                and profile["id"] in S2V_PROFILE_IDS else
                runtime_probe(max(.01, deadline - time.monotonic()), profile=profile, resource_root=root)
                if profile is not None else runtime_probe(max(.01, deadline - time.monotonic())))
@@ -952,6 +1001,26 @@ def stage_reference(request: dict[str, Any], root: Path) -> dict[str, Any]:
     return {"reference": expected}
 
 def dispatch(request: dict[str, Any]) -> dict[str, Any]:
+    if request.get("operation") == "stop":
+        # Independent of guard PID/liveness; authority stays scoped to the armed own Pod.
+        try:
+            timeout = request["timeout_seconds"]
+            if (request.get("allow_live") is not True or type(timeout) not in (int, float)
+                    or not math.isfinite(timeout) or not 0 < timeout <= 60):
+                raise BootstrapError("invalid stop bound")
+            deadline = time.monotonic() + timeout
+            root = worker_root(request["plan"]["session_id"])
+            if (encode(_json((root / "plan.json").read_bytes())) != encode(request["plan"])
+                    or hashlib.sha256((root / "guard.py").read_bytes()).hexdigest()
+                    != request["guard_sha256"]):
+                raise BootstrapError("stop authority differs")
+            guard = load_guard(root)
+            plan = guard.WorkerGuardPlan.from_dict(request["plan"])
+            stopped = guard.stop_own_pod(plan, allow_live=True,
+                timeout_seconds=min(10, deadline - time.monotonic()), absolute_deadline=deadline)
+            return {"status": "stopped" if stopped else "stop_unconfirmed"}
+        except (Exception, KeyboardInterrupt):
+            return {"status": "stop_unconfirmed"}
     timeout = request["timeout_seconds"]
     if (request.get("allow_live") is not True or type(timeout) not in (int, float)
             or not math.isfinite(timeout) or not 0 < timeout <= 1740):

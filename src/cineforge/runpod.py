@@ -31,6 +31,14 @@ def _money(value: object) -> TypeGuard[int | float]:
             and math.isfinite(value) and 0 < value <= 100000)
 
 
+def _retention_window(value: object) -> bool:
+    try:
+        return (isinstance(value, (int, float)) and not isinstance(value, bool)
+                and math.isfinite(value) and value > 0)
+    except OverflowError:
+        return False
+
+
 def _model_dict(model: ModelSpec) -> dict[str, Any]:
     return {"model_id": model.model_id, "revision": model.revision, "task": model.task,
             "allowed_backends": sorted(b.value for b in model.allowed_backends),
@@ -54,7 +62,9 @@ class RunpodPodSpec:
     registry_id: str | None = None
     min_ram_per_gpu_gb: int | None = None
     retain_node: bool = False
-    """A20-only: skip final deletion; cloud_smoke/conditioning_run still release."""
+    """A20-only: bounded live retention; other drivers still release."""
+    retain_window_seconds: float = 3600
+    """Positive finite post-run window; clamped to acquisition + 14400s at retention."""
 
     def __post_init__(self) -> None:
         if (not _identifier(self.session_id) or len(self.session_id) > 32
@@ -76,14 +86,16 @@ class RunpodPodSpec:
                 or self.min_ram_per_gpu_gb is not None and (
                     type(self.min_ram_per_gpu_gb) is not int
                     or not 1 <= self.min_ram_per_gpu_gb <= 65536)
-                or type(self.retain_node) is not bool):
+                or type(self.retain_node) is not bool
+                or not _retention_window(self.retain_window_seconds)):
             raise ValueError("invalid immutable Runpod operator configuration")
 
     def to_dict(self) -> dict[str, Any]:
         # Preserve old scope/journal bytes when optional fields are unset.
         return {name: getattr(self, name) for name in self.__dataclass_fields__
                 if (name != "min_ram_per_gpu_gb" or self.min_ram_per_gpu_gb is not None)
-                and (name != "retain_node" or self.retain_node)}
+                and (name != "retain_node" or self.retain_node)
+                and (name != "retain_window_seconds" or self.retain_window_seconds != 3600)}
 
     @property
     def digest(self) -> str:
