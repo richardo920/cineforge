@@ -751,7 +751,7 @@ class RetentionHeartbeatTests(unittest.TestCase):
                            "guard_sha256": worker_guard_source_sha256()}
                 environment = {"PATH": os.environ.get("PATH", ""), "LANG": "C",
                                "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"),
-                               "RUNPOD_API_KEY": "fixture-key-1", "RUNPOD_POD_ID": "pod_1"}
+                               "RUNPOD_API_KEY": "fixture-key-1", "RUNPOD_POD_ID": "pod_1"}  # pragma: allowlist secret - synthetic environment fixture
                 child = subprocess.Popen(
                     [sys.executable, "-c", driver.replace("__SRC__", environment["PYTHONPATH"])
                      .replace("__WS__", str(workspace)).replace("__LOG__", str(log))],
