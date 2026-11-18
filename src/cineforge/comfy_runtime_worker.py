@@ -32,6 +32,23 @@ from cineforge.native_speech_integrity import NativeBinary, NativeTree, verify_b
 # The probe re-hashes full runtime/source trees, including on cache-cold pods.
 COMFY_PROBE_TIMEOUT_SECONDS = 120
 
+# Files the long-lived ComfyUI server loads but the probe child does not: stdlib
+# sqlite3/zoneinfo/resource, libsqlite3, and system CUDA toolkit cublasLt. The worker
+# image is digest-pinned (plan image checked at admission), so these pins are
+# deterministic; measured on the live image 2026-11-18 (diag-21).
+SERVER_IMAGE_FILES = {
+    "/usr/lib/python3.11/lib-dynload/_sqlite3.cpython-311-x86_64-linux-gnu.so": (
+        127752, "ef4a5bac5f08a194fe4dbb860363018962c2249f1bcf84190c3934ebc32c973a"),  # pragma: allowlist secret - public image file hash
+    "/usr/lib/python3.11/lib-dynload/_zoneinfo.cpython-311-x86_64-linux-gnu.so": (
+        36400, "dd15c02efc5b7bc5183550731cc21fed89b647757edb1a503861b9bf844ceec4"),  # pragma: allowlist secret - public image file hash
+    "/usr/lib/python3.11/lib-dynload/resource.cpython-311-x86_64-linux-gnu.so": (
+        19392, "d849af91b617c9f0e967c2cdbc1bc99f066f6afdb357a0826df01be695530a1e"),  # pragma: allowlist secret - public image file hash
+    "/usr/lib/x86_64-linux-gnu/libsqlite3.so.0.8.6": (
+        1468440, "eac351cf84d688d1f9235e6165bd57555b31a491cd2f65e0dca67daa69036370"),  # pragma: allowlist secret - public image file hash
+    "/usr/local/cuda-12.8/targets/x86_64-linux/lib/libcublasLt.so.12.8.4.1": (
+        751771728, "10b5e6631cf8115c661eb895ed1533826308b58f7956466f53d236a40c9b622c"),  # pragma: allowlist secret - public image file hash
+}
+
 
 def install_wheel(path: Path, target: Path, wheel: dict[str, Any],
                   manifest: dict[str, tuple[int, str]], deadline: float, *,
@@ -413,10 +430,38 @@ def _server_start(pid: int) -> str:
     return suffix[19].decode("ascii")
 
 
+def _server_allowed(plan: dict[str, Any], root: Path) -> dict[str, tuple[int, str]]:
+    from cineforge.worker_profiles import S2V_WORKER
+    allowed = {p["path"]: (p["size_bytes"], p["sha256"]) for p in [plan["interpreter"], *plan["native"]]}
+    allowed.update({str(root / "comfy-runtime" / p): (size, sha) for p, size, sha in plan["installed"]})
+    allowed.update({str(root / "ComfyUI" / p.replace("split_files/", "models/", 1)): (size, sha)
+                    for p, size, sha in S2V_WORKER.files})
+    allowed.update(SERVER_IMAGE_FILES)
+    return allowed
+
+
+def _verify_server_maps(allowed: dict[str, tuple[int, str]], raw_maps: bytes,
+                        deadline: float) -> dict[str, str]:
+    from cineforge.native_speech_integrity import _directory, _read_file
+    observed = {}
+    for line in raw_maps.decode("utf-8").splitlines():
+        path = line.split(maxsplit=5)[-1]
+        if not path.startswith("/") or path.startswith("/dev/") or path in observed:
+            continue
+        if path not in allowed:
+            raise ValueError("owned Comfy loaded an unreviewed native file")
+        size, sha = allowed[path]
+        parent = _directory(str(Path(path).parent), private=False)
+        try:
+            _read_file(parent, Path(path).name, (Path(path).name, size, "sha256", sha), deadline)
+        finally:
+            os.close(parent)
+        observed[path] = sha
+    return observed
+
+
 def server_facts(plan: dict[str, Any], root: Path, native: Path, deadline: float) -> dict[str, Any]:
     from cineforge.comfy_runtime_launcher import launch_command
-    from cineforge.native_speech_integrity import _directory, _read_file
-    from cineforge.worker_profiles import S2V_WORKER
     record = nr_json(nr_read(root / "server-pid.json"))
     pid = record["pid"]
     if _server_start(pid) != record["start_ticks"]:
@@ -451,28 +496,11 @@ def server_facts(plan: dict[str, Any], root: Path, native: Path, deadline: float
             sockets.add(target[8:-1])
     if not listeners & sockets:
         raise ValueError("loopback Comfy listener is not owned by the fixed process")
-    allowed = {p["path"]: (p["size_bytes"], p["sha256"]) for p in [plan["interpreter"], *plan["native"]]}
-    allowed.update({str(root / "comfy-runtime" / p): (size, sha) for p, size, sha in plan["installed"]})
-    allowed.update({str(root / "ComfyUI" / p.replace("split_files/", "models/", 1)): (size, sha)
-                    for p, size, sha in S2V_WORKER.files})
     with (proc / "maps").open("rb") as stream:
         raw_maps = stream.read(1024**2 + 1)
     if len(raw_maps) > 1024**2:
         raise ValueError("owned Comfy native map exceeds bound")
-    observed = {}
-    for line in raw_maps.decode("utf-8").splitlines():
-        path = line.split(maxsplit=5)[-1]
-        if not path.startswith("/") or path.startswith("/dev/") or path in observed:
-            continue
-        if path not in allowed:
-            raise ValueError("owned Comfy loaded an unreviewed native file")
-        size, sha = allowed[path]
-        parent = _directory(str(Path(path).parent), private=False)
-        try:
-            _read_file(parent, Path(path).name, (Path(path).name, size, "sha256", sha), deadline)
-        finally:
-            os.close(parent)
-        observed[path] = sha
+    observed = _verify_server_maps(_server_allowed(plan, root), raw_maps, deadline)
     if _server_start(pid) != record["start_ticks"]:
         raise ValueError("owned Comfy process changed during verification")
     nr_check(deadline)
