@@ -1124,6 +1124,71 @@ class ComfyExecutableTests(unittest.TestCase):
             CheckedComfyRuntime.reviewed(changed, Reviewer())
 
 
+class ComfyServerImageFilesTests(unittest.TestCase):
+    def test_server_image_files_are_pinned_and_allowed(self):
+        expected = {
+            "/usr/lib/python3.11/lib-dynload/_sqlite3.cpython-311-x86_64-linux-gnu.so": (
+                127752, "ef4a5bac5f08a194fe4dbb860363018962c2249f1bcf84190c3934ebc32c973a"),
+            "/usr/lib/python3.11/lib-dynload/_zoneinfo.cpython-311-x86_64-linux-gnu.so": (
+                36400, "dd15c02efc5b7bc5183550731cc21fed89b647757edb1a503861b9bf844ceec4"),
+            "/usr/lib/python3.11/lib-dynload/resource.cpython-311-x86_64-linux-gnu.so": (
+                19392, "d849af91b617c9f0e967c2cdbc1bc99f066f6afdb357a0826df01be695530a1e"),
+            "/usr/lib/x86_64-linux-gnu/libsqlite3.so.0.8.6": (
+                1468440, "eac351cf84d688d1f9235e6165bd57555b31a491cd2f65e0dca67daa69036370"),
+            "/usr/local/cuda-12.8/targets/x86_64-linux/lib/libcublasLt.so.12.8.4.1": (
+                751771728, "10b5e6631cf8115c661eb895ed1533826308b58f7956466f53d236a40c9b622c"),
+        }
+        self.assertEqual(worker.SERVER_IMAGE_FILES, expected)
+        declaration = {
+            "interpreter": {"path": "/synthetic/python3.11", "size_bytes": 1, "sha256": HASH},
+            "native": [], "installed": [],
+        }
+        with tempfile.TemporaryDirectory(prefix="cf-comfy-server-image-") as temporary:
+            allowed = worker._server_allowed(declaration, Path(temporary).resolve())
+            for path, pin in expected.items():
+                self.assertEqual(allowed[path], pin)
+            self.assertEqual(allowed["/synthetic/python3.11"], (1, HASH))
+            raw_maps = "\n".join(
+                f"00400000-00452000 r-xp 00000000 08:02 1234567 {path}" for path in expected
+            ).encode()
+            try:
+                worker._verify_server_maps(allowed, raw_maps, time.monotonic() + 30)
+            except ValueError as exc:
+                self.assertNotIn("unreviewed native file", str(exc))
+            except OSError:
+                pass  # The digest-pinned Linux image files may be absent on a dev machine.
+
+    def test_mapped_file_with_wrong_sha_still_fails_verification(self):
+        with tempfile.TemporaryDirectory(prefix="cf-comfy-server-maps-") as temporary:
+            path = Path(temporary).resolve() / "mapped.so"
+            body = b"synthetic mapped file"
+            path.write_bytes(body)
+            raw_maps = f"00400000-00452000 r-xp 00000000 08:02 1234567 {path}".encode()
+            allowed = {str(path): (len(body), sha(body))}
+            self.assertEqual(
+                worker._verify_server_maps(allowed, raw_maps, time.monotonic() + 30),
+                {str(path): sha(body)},
+            )
+            allowed = {str(path): (
+                127752, "ef4a5bac5f08a194fe4dbb860363018962c2249f1bcf84190c3934ebc32c973a")}
+            with self.assertRaises(ValueError):
+                worker._verify_server_maps(allowed, raw_maps, time.monotonic() + 30)
+
+    def test_unknown_mapped_path_still_raises_unreviewed(self):
+        declaration = {
+            "interpreter": {"path": "/synthetic/python3.11", "size_bytes": 1, "sha256": HASH},
+            "native": [], "installed": [],
+        }
+        with tempfile.TemporaryDirectory(prefix="cf-comfy-server-unknown-") as temporary:
+            allowed = worker._server_allowed(declaration, Path(temporary).resolve())
+            raw_maps = (
+                b"00400000-00452000 r-xp 00000000 08:02 1234567 "
+                b"/usr/lib/x86_64-linux-gnu/libneverreviewed.so.0"
+            )
+            with self.assertRaisesRegex(ValueError, "unreviewed native file"):
+                worker._verify_server_maps(allowed, raw_maps, time.monotonic() + 30)
+
+
 class ComfyLaunchDeadlineTests(unittest.TestCase):
     def exercise(self, delay, deadline=103.0):
         from cineforge import worker_bootstrap
