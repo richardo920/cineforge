@@ -209,11 +209,14 @@ class ComfyExecutionProvider:
                     failure = SubmissionUncertainError("submission not confirmed; key cannot replay")
             if failure is not None:
                 raise failure from None
+            if not isinstance(identity, str):
+                raise SubmissionUncertainError("submission not confirmed; key cannot replay")
+            job_id = identity
             run = ShotRun(shot_id=request.shot.shot_id, shot_revision=request.shot.revision,
-                          attempt=request.attempt, provider_id=self.provider_id, job_id=identity,
+                          attempt=request.attempt, provider_id=self.provider_id, job_id=job_id,
                           idempotency_key=idempotency_key, status=RunStatus.QUEUED)
-            self._jobs[identity] = _Job(request, graph, run, deadline)
-            self._keys[idempotency_key] = (snapshot, identity)
+            self._jobs[job_id] = _Job(request, graph, run, deadline)
+            self._keys[idempotency_key] = (snapshot, job_id)
             return run
 
     def _job(self, identity: str) -> _Job:
