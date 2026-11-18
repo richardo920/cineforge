@@ -297,6 +297,16 @@ class PairTransferTests(unittest.TestCase):
         self.assertNotEqual(self.requests[-1]["operation"], "s2v_pair_finish")
         self.assertEqual(list((self.remote / "ComfyUI/input").iterdir()), [])
 
+    def test_native_callback_uses_approved_lifetime_with_retrieval_reserve(self):
+        self.remaining = 1800
+        calls = []
+        def callback(timeout, *, absolute_deadline):
+            calls.append((timeout, absolute_deadline))
+            return "synthetic-result"
+        with patch("cineforge.ssh_worker.time.monotonic", return_value=100):
+            self.assertEqual(self.driver.run_guarded_native(callback, allow_live=True), "synthetic-result")
+        self.assertEqual(calls, [(1680, 1780)])
+
     def test_native_callback_requires_arm_hardware_optin_and_remaining_reserve_without_graph(self):
         self.driver._prepared_s2v = None
         calls = []

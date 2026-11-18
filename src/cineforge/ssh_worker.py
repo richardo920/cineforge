@@ -53,6 +53,9 @@ class WorkerError(ValueError):
 
 
 MAX_CONTROL_NAMESPACES = 8
+# Approved lifetime ceiling; mirrors cineforge.native_remote.MAX_NATIVE_TIMEOUT_SECONDS.
+# Kept local to avoid an import cycle: native_remote imports SSHWorker.
+MAX_NATIVE_TIMEOUT_SECONDS = 1800
 
 
 @preserve_interruption
@@ -526,12 +529,12 @@ class SSHWorker:
         if type(self.selection) is not S2VServiceContext and (runtime is not None or absolute_deadline is not None):
             raise WorkerError("closed runtime parameters apply only to the M5 service")
         # Capture M5's cap before source hashing, rights or external review callbacks.
-        deadline = (request_deadline(1200, absolute_deadline, time.monotonic)
+        deadline = (request_deadline(MAX_NATIVE_TIMEOUT_SECONDS, absolute_deadline, time.monotonic)
                     if type(self.selection) is S2VServiceContext else None)
         self.check()
         if self.plan is None:
             raise WorkerError("worker guard not armed")
-        timeout = min(1200, self.budget.remaining_seconds(self._key) - 120)
+        timeout = min(MAX_NATIVE_TIMEOUT_SECONDS, self.budget.remaining_seconds(self._key) - 120)
         if timeout <= 0:
             raise WorkerError("insufficient lease time for setup and shot retrieval")
         if type(self.selection) is S2VServiceContext:
@@ -658,7 +661,7 @@ class SSHWorker:
                     "native_comfy_install", "native_comfy_model", "native_comfy_setup", "native_comfy_verify",
                     "native_comfy_precision_begin", "native_comfy_precision_finish"}):
             raise WorkerError("invalid fixed native dispatch")
-        timeout = min(1200, absolute_deadline-time.monotonic(),
+        timeout = min(MAX_NATIVE_TIMEOUT_SECONDS, absolute_deadline-time.monotonic(),
                       self.budget.remaining_seconds(self._key)-120)
         if timeout <= 0:
             raise WorkerError("native speech absolute deadline exhausted")
@@ -687,7 +690,7 @@ class SSHWorker:
         worker_bootstrap.validate_s2v_admission(self.runtime_evidence, profile_id=self.selection.worker_profile["id"])
         self.selection.preflight()
         self.check()
-        timeout = min(1200, self.budget.remaining_seconds(self._key) - 120)
+        timeout = min(MAX_NATIVE_TIMEOUT_SECONDS, self.budget.remaining_seconds(self._key) - 120)
         if timeout <= 0:
             raise WorkerError("insufficient owned lease for native speech")
         deadline = time.monotonic() + timeout

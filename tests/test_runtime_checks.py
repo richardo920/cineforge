@@ -19,10 +19,16 @@ from cineforge.cloud_budget import ConditioningBudgetApproval
 from cineforge.comfy_model_precision import ModelGuard
 from cineforge.comfy_runtime import ClosedComfyRuntime
 from cineforge.conditioning import ConditioningSelection, VerifiedConditioning
+from cineforge.native_remote import MAX_NATIVE_TIMEOUT_SECONDS as REMOTE_MAX_NATIVE_TIMEOUT_SECONDS
 from cineforge.native_remote import RemoteNativeSpeechRuntime
 from cineforge.native_speech_integrity import NativeSpeechError
 from cineforge.s2v import S2VServiceContext
-from cineforge.ssh_worker import SSHWorker, SupervisedComfyTransport, WorkerError
+from cineforge.ssh_worker import (
+    MAX_NATIVE_TIMEOUT_SECONDS,
+    SSHWorker,
+    SupervisedComfyTransport,
+    WorkerError,
+)
 
 
 class RuntimeInvariantTests(unittest.TestCase):
@@ -189,6 +195,36 @@ class RuntimeInvariantTests(unittest.TestCase):
                 SSHWorker._prepare_closed_comfy(worker, object(), runtime, time.monotonic() + 10)
         runtime._poison.assert_called_once()
         self.assertFalse(hasattr(worker, '_prepared_s2v'))
+
+    def test_native_timeout_ceiling_matches_approved_remote_lifetime(self):
+        self.assertEqual(MAX_NATIVE_TIMEOUT_SECONDS, 1800)
+        self.assertEqual(MAX_NATIVE_TIMEOUT_SECONDS, REMOTE_MAX_NATIVE_TIMEOUT_SECONDS)
+
+    def test_native_request_uses_approved_lifetime_and_preserves_deadline_and_reserve(self):
+        worker = SimpleNamespace(native_admission=Mock(), plan=Mock(), _request=Mock(return_value={}),
+            budget=SimpleNamespace(remaining_seconds=lambda _: 1800), _key='key')
+        with patch('cineforge.ssh_worker.time.monotonic', return_value=100):
+            for deadline, expected in ((1900, 1680), (1000, 900)):
+                with self.subTest(deadline=deadline):
+                    self.assertEqual(SSHWorker.native_request(
+                        worker, {'operation': 'native_capabilities'}, absolute_deadline=deadline), {})
+                    self.assertEqual(worker._request.call_args.args[1], expected)
+                    self.assertEqual(worker._request.call_args.kwargs['absolute_deadline'], deadline)
+
+    def test_prepare_uses_approved_lifetime_and_preserves_reserve(self):
+        runtime = object.__new__(ClosedComfyRuntime)
+        runtime._admit = Mock()
+        worker = SimpleNamespace(selection=object.__new__(S2VServiceContext), plan=object(),
+            check=Mock(), budget=Mock(), _key='key', _s2v_setup_attempted=False,
+            _require_s2v=Mock(), _prepare_closed_comfy=Mock())
+        with patch('cineforge.ssh_worker.time.monotonic', return_value=100):
+            for remaining, expected in ((2100, 1900), (1800, 1780)):
+                with self.subTest(remaining=remaining):
+                    worker._s2v_setup_attempted = False
+                    worker.budget.remaining_seconds.return_value = remaining
+                    SSHWorker.prepare(worker, object(), runtime=runtime, absolute_deadline=2200)
+                    self.assertEqual(worker._prepare_closed_comfy.call_args.args[2], expected)
+                    self.assertEqual(runtime._admit.call_args.args[1], expected)
 
     def test_native_request_requires_plan_before_dispatch(self):
         worker = SimpleNamespace(native_admission=Mock(), plan=None, _request=Mock(),
