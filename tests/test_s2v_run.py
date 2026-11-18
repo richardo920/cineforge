@@ -31,6 +31,8 @@ class S2VWire(WireFixture):
     def __init__(self, selection):
         super().__init__(selection)
         self.reject_audio = False
+        self.combo_audio_specs = False
+        self.malformed_combo_audio_options = None
         self.fail_view = False
         self.payload = PAYLOAD
 
@@ -49,6 +51,16 @@ class S2VWire(WireFixture):
                             fields[field] = ["SYNTHETIC"]
             if self.reject_audio and kind == "LoadAudio":
                 fields["audio"] = [["unapproved.wav"]]
+            if self.combo_audio_specs and kind in ("AudioEncoderLoader", "LoadAudio"):
+                field = "audio" if kind == "LoadAudio" else "audio_encoder_name"
+                options = {"multiselect": False, "options": fields[field][0]}
+                if kind == "LoadAudio":
+                    options["audio_upload"] = True
+                    if self.malformed_combo_audio_options == "not_list":
+                        options["options"] = "unapproved.wav"
+                    elif self.malformed_combo_audio_options == "missing":
+                        del options["options"]
+                fields[field] = ["COMBO", options]
             count = 3 if kind == "WanSoundImageToVideo" else 1
             return json.dumps({kind: {"input": {"required": fields},
                 "output": ["SYNTHETIC"] * count, "output_node": kind == "SaveWEBM"}}).encode()
@@ -141,6 +153,42 @@ class S2VRunTests(unittest.TestCase):
                     allow_live=True, inspect_media=media)
         self.assertFalse(new.exists())
         self.assertEqual(sum(call[1] == "/prompt" for call in self.wire.calls), 1)
+
+    def test_combo_audio_specs_accept_approved_files_and_submit_once(self):
+        self.wire.combo_audio_specs = True
+        result = self.run_scene()
+        self.assertEqual(result["outcome"], "pending_human_review")
+        self.assertEqual(sum(call[1] == "/prompt" for call in self.wire.calls), 1)
+
+    def test_combo_audio_spec_without_approved_file_refuses_before_submit(self):
+        self.wire.combo_audio_specs = True
+        self.wire.reject_audio = True
+        with self.assertRaises(S2VError):
+            self.run_scene()
+        self.assertFalse(any(call[1] == "/prompt" for call in self.wire.calls))
+        inner = json.loads((self.output / "shot/run.json").read_text())
+        self.assertEqual(inner["outcome"], "incomplete")
+        self.assertEqual(inner["failure_class"], "verify_nodes_file")
+
+    def test_malformed_combo_audio_spec_fails_closed_before_submit(self):
+        self.wire.combo_audio_specs = True
+        self.wire.malformed_combo_audio_options = "not_list"
+        with self.assertRaises(S2VError):
+            self.run_scene()
+        self.assertFalse(any(call[1] == "/prompt" for call in self.wire.calls))
+        inner = json.loads((self.output / "shot/run.json").read_text())
+        self.assertEqual(inner["outcome"], "incomplete")
+        self.assertEqual(inner["failure_class"], "verify_nodes_file")
+
+    def test_combo_audio_spec_with_missing_options_fails_closed_before_submit(self):
+        self.wire.combo_audio_specs = True
+        self.wire.malformed_combo_audio_options = "missing"
+        with self.assertRaises(S2VError):
+            self.run_scene()
+        self.assertFalse(any(call[1] == "/prompt" for call in self.wire.calls))
+        inner = json.loads((self.output / "shot/run.json").read_text())
+        self.assertEqual(inner["outcome"], "incomplete")
+        self.assertEqual(inner["failure_class"], "verify_nodes_file")
 
     def test_missing_optin_stale_rights_foreign_worker_or_missing_stage_make_no_calls(self):
         with self.assertRaises(S2VError):
