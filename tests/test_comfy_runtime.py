@@ -20,6 +20,7 @@ from unittest.mock import patch
 
 from cineforge import comfy_runtime_launcher as launcher
 from cineforge import comfy_runtime_worker as worker
+from cineforge import native_driver as driver
 from cineforge.comfy_runtime import CheckedComfyRuntime, ClosedComfyRuntime, ComfyClosureReview
 from cineforge.comfy_runtime_plan import (
     COMFY_ABI,
@@ -1187,6 +1188,118 @@ class ComfyServerImageFilesTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "unreviewed native file"):
                 worker._verify_server_maps(allowed, raw_maps, time.monotonic() + 30)
+
+
+class ComfyServerDriverMapsTests(unittest.TestCase):
+    def driver_session(self, root, *, tampered_receipt=False):
+        path = "/usr/lib/x86_64-linux-gnu/libcuda.so.595.112.07"
+        alias = "/usr/lib/x86_64-linux-gnu/libcuda.so.1"
+        binding = {"worker": "synthetic-worker", "session": "synthetic-session"}
+        identity = [2049, 2, 65534, stat.S_IFREG | 0o644, 1, 37, 0, 0]
+        ancestors = sorted({str(parent) for candidate in (path, alias)
+                            for parent in Path(candidate).parents})
+        receipt = dict(
+            policy=driver.DRIVER_POLICY, role="cuda_driver", alias=alias,
+            binding_sha256=nr_digest(binding), identity=identity,
+            user_namespace="user:[12]", mount_namespace="mnt:[13]",
+            uid_map=[[0, 100000, 65536]],
+            mount=[17, 1, ":".join(map(str, driver.linux_device_parts(identity[0]))),
+                   path, "ext4", "ro,relatime"],
+            ancestors=[[parent, [2049, index + 3, 0, stat.S_IFDIR | 0o755,
+                                 2, 4096, 0, 0]]
+                       for index, parent in enumerate(ancestors)],
+            links=[[alias, [2049, 1, 0, stat.S_IFLNK | 0o777, 1, len(path), 0, 0], path]],
+        )
+        binary = dict(path=path, size_bytes=identity[5], sha256=HASH, driver_mount=receipt)
+        if tampered_receipt:
+            receipt["identity"][5] += 1
+        native = root / "native"
+        native.mkdir(mode=0o700)
+        for name, value in (
+            ("binding.json", binding),
+            ("capabilities.json", {"binding_sha256": nr_digest(binding),
+                                   "files": [dict(binary, status="measured")]}),
+        ):
+            (native / name).write_bytes(nr_encode(value))
+            (native / name).chmod(0o600)
+        declaration = {
+            "interpreter": {"path": "/synthetic/python3.11", "size_bytes": 1, "sha256": HASH},
+            "native": [binary], "installed": [],
+        }
+        return binary, native, worker._server_allowed(declaration, root), worker._server_drivers(declaration)
+
+    def maps(self, *paths):
+        return "\n".join(
+            f"00400000-00452000 r-xp 00000000 08:02 1234567 {path}" for path in paths
+        ).encode()
+
+    def ordinary_file(self):
+        with tempfile.NamedTemporaryFile(prefix="cf-comfy-driver-map-", dir="/tmp", delete=False) as stream:
+            path = Path(stream.name).resolve()
+            body = b"synthetic ordinary mapped file"
+            stream.write(body)
+        self.addCleanup(path.unlink)
+        path.chmod(0o644)
+        return str(path), (len(body), sha(body))
+
+    def test_driver_mount_mapped_file_passes_via_receipt(self):
+        with tempfile.TemporaryDirectory(prefix="cf-comfy-driver-") as temporary:
+            binary, native, allowed, drivers = self.driver_session(Path(temporary).resolve())
+            self.assertEqual(drivers, {binary["path"]: binary})
+            raw_maps = self.maps(binary["path"])
+            deadline = time.monotonic() + 30
+            with patch("cineforge.native_driver.read_native_file", return_value=copy.deepcopy(binary)):
+                self.assertEqual(
+                    worker._verify_server_maps(allowed, raw_maps, deadline, drivers, native),
+                    {binary["path"]: binary["sha256"]},
+                )
+                with self.assertRaisesRegex(ValueError, "needs the actual native session"):
+                    worker._verify_server_maps(allowed, raw_maps, deadline, drivers, None)
+
+    def test_driver_mount_mismatch_fails(self):
+        with tempfile.TemporaryDirectory(prefix="cf-comfy-driver-") as temporary:
+            binary, native, allowed, drivers = self.driver_session(Path(temporary).resolve())
+            for field in ("sha256", "identity"):
+                actual = copy.deepcopy(binary)
+                if field == "sha256":
+                    actual["sha256"] = "b" * 64
+                else:
+                    actual["driver_mount"]["identity"][5] += 1
+                with self.subTest(live=field), patch(
+                    "cineforge.native_driver.read_native_file", return_value=actual
+                ), self.assertRaisesRegex(ValueError, "mounted NVIDIA binary identity changed"):
+                    worker._verify_server_maps(
+                        allowed, self.maps(binary["path"]), time.monotonic() + 30, drivers, native)
+        with self.subTest(plan="receipt size"), tempfile.TemporaryDirectory(prefix="cf-comfy-driver-") as temporary:
+            binary, native, allowed, drivers = self.driver_session(
+                Path(temporary).resolve(), tampered_receipt=True)
+            with patch("cineforge.native_driver.read_native_file") as read:
+                with self.assertRaises(ValueError):
+                    worker._verify_server_maps(
+                        allowed, self.maps(binary["path"]), time.monotonic() + 30, drivers, native)
+                read.assert_not_called()
+
+    def test_foreign_uid_file_without_driver_entry_still_rejected(self):
+        path, pin = self.ordinary_file()
+        allowed, raw_maps, deadline = {path: pin}, self.maps(path), time.monotonic() + 30
+        self.assertEqual(worker._verify_server_maps(allowed, raw_maps, deadline, {}, None),
+                         {path: pin[1]})
+        # Shift the accepted uid so this real file simulates a foreign-owned pod file.
+        with patch.object(os, "getuid", return_value=9999):
+            with self.assertRaisesRegex(ValueError, "speech staging file identity rejected"):
+                worker._verify_server_maps(allowed, raw_maps, deadline, {}, None)
+
+    def test_driver_and_ordinary_files_pass_together(self):
+        with tempfile.TemporaryDirectory(prefix="cf-comfy-driver-") as temporary:
+            binary, native, allowed, drivers = self.driver_session(Path(temporary).resolve())
+            path, pin = self.ordinary_file()
+            allowed[path] = pin
+            with patch("cineforge.native_driver.read_native_file", return_value=copy.deepcopy(binary)):
+                self.assertEqual(
+                    worker._verify_server_maps(allowed, self.maps(binary["path"], path),
+                                               time.monotonic() + 30, drivers, native),
+                    {binary["path"]: binary["sha256"], path: pin[1]},
+                )
 
 
 class ComfyLaunchDeadlineTests(unittest.TestCase):

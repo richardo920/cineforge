@@ -440,8 +440,15 @@ def _server_allowed(plan: dict[str, Any], root: Path) -> dict[str, tuple[int, st
     return allowed
 
 
+def _server_drivers(plan: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    # Host driver bind-mounts owned by uid 65534 map versioned paths; verify
+    # them through their receipts instead of the plain staging gate.
+    return {binary["path"]: binary for binary in plan["native"] if "driver_mount" in binary}
+
+
 def _verify_server_maps(allowed: dict[str, tuple[int, str]], raw_maps: bytes,
-                        deadline: float) -> dict[str, str]:
+                        deadline: float, drivers: dict[str, dict[str, Any]] | None = None,
+                        native: Path | None = None) -> dict[str, str]:
     from cineforge.native_speech_integrity import _directory, _read_file
     observed = {}
     for line in raw_maps.decode("utf-8").splitlines():
@@ -451,6 +458,13 @@ def _verify_server_maps(allowed: dict[str, tuple[int, str]], raw_maps: bytes,
         if path not in allowed:
             raise ValueError("owned Comfy loaded an unreviewed native file")
         size, sha = allowed[path]
+        if drivers is not None and path in drivers:
+            binary = drivers[path]
+            if (binary["size_bytes"], binary["sha256"]) != (size, sha):
+                raise ValueError("closed Comfy driver map identity differs")
+            verify_runtime_binary(binary, native, deadline)
+            observed[path] = sha
+            continue
         parent = _directory(str(Path(path).parent), private=False)
         try:
             _read_file(parent, Path(path).name, (Path(path).name, size, "sha256", sha), deadline)
@@ -500,7 +514,8 @@ def server_facts(plan: dict[str, Any], root: Path, native: Path, deadline: float
         raw_maps = stream.read(1024**2 + 1)
     if len(raw_maps) > 1024**2:
         raise ValueError("owned Comfy native map exceeds bound")
-    observed = _verify_server_maps(_server_allowed(plan, root), raw_maps, deadline)
+    observed = _verify_server_maps(_server_allowed(plan, root), raw_maps, deadline,
+                                   _server_drivers(plan), native)
     if _server_start(pid) != record["start_ticks"]:
         raise ValueError("owned Comfy process changed during verification")
     nr_check(deadline)
