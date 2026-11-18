@@ -42,6 +42,9 @@ from cineforge.ssh_worker import SSHWorker
 from cineforge.worker_guard import worker_guard_source_sha256
 from cineforge.worker_profiles import require_s2v_hardware
 
+# Match the budget approval lifetime ceiling for an approved run.
+MAX_NATIVE_TIMEOUT_SECONDS = 1800
+
 
 @dataclass(frozen=True, slots=True)
 class RemoteNativeProof:
@@ -88,7 +91,7 @@ class RemoteNativeSpeechRuntime:
             or allow_native is not True
             or type(timeout_seconds) not in (int, float)
             or not math.isfinite(timeout_seconds)
-            or not 3 <= timeout_seconds <= 1200
+            or not 3 <= timeout_seconds <= MAX_NATIVE_TIMEOUT_SECONDS
             or type(seed) is not int
             or not 0 <= seed < 2**32
         ):

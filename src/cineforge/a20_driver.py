@@ -243,10 +243,10 @@ def run_a20(b: A20Bindings, frozen: FrozenInputs, output: Path, *,
                                                  idempotency_key=b.acquisition_id)
                     guard()
                     # stage() includes native_preflight BEFORE installing runtime.
-                    native_cap = min(absolute_deadline, time.monotonic() + 1200)
+                    native_cap = min(absolute_deadline, time.monotonic() + approval.lifetime_seconds)
                     record["original_native_comfy_deadline"] = native_cap
                     bridge = RemoteNativeSpeechRuntime(worker, allow_native=allow_live,
-                        timeout_seconds=1200, seed=int(data["seed"].strip()),
+                        timeout_seconds=approval.lifetime_seconds, seed=int(data["seed"].strip()),
                         absolute_deadline=native_cap)
                     # Normal GPU/native-file probe, once BEFORE staging. This is
                     # runtime work and is never the failure-only Core diagnostic.

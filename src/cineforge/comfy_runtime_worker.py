@@ -29,6 +29,9 @@ from cineforge.native_remote_plan import nr_digest, nr_encode, nr_json
 from cineforge.native_remote_worker import _destination, _download, _install_wheel, _parent, _parts
 from cineforge.native_speech_integrity import NativeBinary, NativeTree, verify_binary, verify_tree
 
+# The probe re-hashes full runtime/source trees, including on cache-cold pods.
+COMFY_PROBE_TIMEOUT_SECONDS = 120
+
 
 def install_wheel(path: Path, target: Path, wheel: dict[str, Any],
                   manifest: dict[str, tuple[int, str]], deadline: float, *,
@@ -312,7 +315,7 @@ def install_comfy(request: dict[str, Any], native: Path, deadline: float) -> dic
     verify_runtime(plan, root, deadline, native=native)
     verify_source(plan, root, deadline)
     command, environment = launch_command(plan, root, native, "probe", deadline)
-    raw = bootstrap.bounded_process(command, timeout=min(30, deadline-time.monotonic()),
+    raw = bootstrap.bounded_process(command, timeout=min(COMFY_PROBE_TIMEOUT_SECONDS, deadline-time.monotonic()),
         environment=environment, cwd=root, absolute_deadline=deadline, max_output=65536)
     runtime, facts = probe_result(nr_json(raw), root, plan, deadline)
     nr_write(root / "comfy-probe.json", nr_encode(facts))
@@ -354,7 +357,7 @@ def setup_comfy(request: dict[str, Any], native: Path, deadline: float) -> dict[
         raise ValueError("closed Comfy model transfer proof incomplete")
     verify_source(plan, root, deadline, required_models=tuple(p for p, _, _ in S2V_WORKER.files))
     command, environment = launch_command(plan, root, native, "probe", deadline)
-    raw = bootstrap.bounded_process(command, timeout=min(30, deadline-time.monotonic()),
+    raw = bootstrap.bounded_process(command, timeout=min(COMFY_PROBE_TIMEOUT_SECONDS, deadline-time.monotonic()),
         environment=environment, cwd=root, absolute_deadline=deadline, max_output=65536)
     runtime, facts = probe_result(nr_json(raw), root, plan, deadline)
     nr_write(root / "comfy-launch-probe.json", nr_encode(facts))

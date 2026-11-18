@@ -231,6 +231,12 @@ class RemoteFixture(unittest.TestCase):
 
 
 class RemoteTests(RemoteFixture):
+    def test_timeout_accepts_approved_lifetime_and_rejects_above_ceiling(self):
+        bridge = RemoteNativeSpeechRuntime(self.worker, allow_native=True, timeout_seconds=1800)
+        self.assertEqual(bridge._timeout, 1800)
+        with self.assertRaises(NativeSpeechError):
+            RemoteNativeSpeechRuntime(self.worker, allow_native=True, timeout_seconds=1801)
+
     def test_bootstrap_checks_owned_guard_and_profile_before_native_dispatch(self):
         guardian = self.root / "guardian"
         guardian.mkdir(mode=0o700)
