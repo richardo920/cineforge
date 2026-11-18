@@ -26,6 +26,8 @@ from cineforge.comfy_policy import ApprovedComfySelection, WorkerVerification
 from cineforge.comfy_runtime import ClosedComfyRuntime
 from cineforge.comfy_transport import (
     ComfyHTTPTransport,
+    PrecisionPostError,
+    VerifyCurrentError,
     request_capped,
     request_deadline,
     require_time,
@@ -1167,10 +1169,22 @@ class SupervisedComfyTransport:
         self.worker.check()
         if (type(self.worker.selection) is S2VServiceContext
                 and method == "POST" and path == "/prompt"):
-            self.worker.verify_comfy_current(absolute_deadline=deadline)
+            failed = False
+            try:
+                self.worker.verify_comfy_current(absolute_deadline=deadline)
+            except Exception:
+                failed = True
+            if failed:
+                raise VerifyCurrentError() from None
             if self.worker._closed_comfy is None:
                 raise AssertionError
-            self.worker._closed_comfy.require_precision_post(self.worker, body, deadline=deadline)
+            failed = False
+            try:
+                self.worker._closed_comfy.require_precision_post(self.worker, body, deadline=deadline)
+            except Exception:
+                failed = True
+            if failed:
+                raise PrecisionPostError() from None
         reserve = 120 if type(self.worker.selection) is S2VServiceContext else 0
         remaining = min(require_time(deadline, clock),
                         self.worker.budget.remaining_seconds(self.worker._key) - reserve)

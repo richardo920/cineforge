@@ -11,6 +11,7 @@ import traceback
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from cineforge.comfy import SUPPORTED_SERVER_REVISION, ComfyExecutionProvider, JobDeadlineError
@@ -21,6 +22,7 @@ from cineforge.comfy_policy import (
     load_comfy_selection,
 )
 from cineforge.comfy_run import ComfyRunError, _BoundedTransport, execute_comfy
+from cineforge.comfy_transport import PrecisionPostError, TransportError, VerifyCurrentError
 from cineforge.contracts import Project, ProjectPlan, RunManifest, RunStatus, Scene, Shot
 from cineforge.private_store import ArtifactStoreError, PrivateRunDirectory, read_private_input
 from cineforge.providers import FakeExecutionProvider
@@ -237,6 +239,90 @@ class ComfyRunTests(unittest.TestCase):
         values = dict(allow_live=True, transport=self.wire, poll_interval_seconds=0)
         values.update(changes)
         return execute_comfy(self.plan, self.selection, self.worker, self.output, **values)
+
+    def test_pre_submit_failure_classes_persist_without_known_run(self):
+        for failure, expected in (
+            ("schema", "verify_nodes_schema"), ("file", "verify_nodes_file"),
+            (TransportError("private foreign text"), "transport"),
+            ("rejected", "submit_uncertain"),
+            (VerifyCurrentError(), "verify_current"), (PrecisionPostError(), "precision_post"),
+        ):
+            with self.subTest(expected=expected):
+                self.output = self.root / expected
+
+                class FailureWire(WireFixture):
+                    def request(wire, method, path, body=None, *, failure=failure, **bounds):
+                        if method == "POST" and path == "/prompt":
+                            if isinstance(failure, Exception):
+                                raise failure
+                            if failure == "rejected":
+                                return b'{"error":"private foreign text"}'
+                        raw = super().request(method, path, body, **bounds)
+                        if failure == "file" and path.startswith("/object_info/"):
+                            value = json.loads(raw)
+                            for schema in value.values():
+                                required = schema["input"]["required"]
+                                if "unet_name" in required:
+                                    required["unet_name"] = [["different.safetensors"]]
+                            return json.dumps(value).encode()
+                        return raw
+
+                self.wire = FailureWire(self.selection)
+                self.wire.schema_failure = failure == "schema"
+                with self.assertRaises(ComfyRunError) as caught:
+                    self.execute()
+                self.assertIsNone(caught.exception.__context__)
+                record = json.loads((self.output / "run.json").read_bytes())
+                self.assertEqual(record["failure_class"], expected)
+                self.assertEqual(record["outcome"], "incomplete")
+                self.assertIsNone(record["known_run"])
+                self.assertFalse(record["cancellation"]["attempted"])
+                self.assertNotIn("private foreign text", json.dumps(record))
+
+    def test_failure_classifier_priority_and_phase_deadlines(self):
+        from cineforge.comfy import SubmissionUncertainError, TransportUncertainError
+        from cineforge.comfy_run import _failure_class
+
+        for error, phase, now, expected in (
+            (VerifyCurrentError(), "submit", 100, "verify_current"),
+            (PrecisionPostError(), "submit", 100, "precision_post"),
+            (JobDeadlineError("fixed"), "submit", 0, "deadline"),
+            (TransportUncertainError(), "submit", 100, "transport"),
+            (SubmissionUncertainError("fixed"), "submit", 100, "submit_uncertain"),
+            (TransportError("fixed"), "poll", 10, "deadline"),
+            (TransportError("fixed"), "result", 10, "transport"),
+            (TransportError("fixed"), "result", 20, "deadline"),
+            (ValueError("fixed"), "submit", 100, "unknown"),
+        ):
+            with self.subTest(error=type(error), phase=phase, now=now):
+                self.assertEqual(_failure_class(error, phase, lambda now=now: now, 10, 20), expected)
+
+    def test_supervised_pre_submit_markers_drop_foreign_context_and_prevent_post(self):
+        from cineforge.s2v_service import S2VServiceContext
+        from cineforge.ssh_worker import SupervisedComfyTransport
+
+        for stage, marker in (("verify", VerifyCurrentError), ("precision", PrecisionPostError)):
+            def reject(**kwargs):
+                raise ValueError("private foreign text")
+
+            service = SimpleNamespace(
+                selection=object.__new__(S2VServiceContext), check=lambda: None,
+                verify_comfy_current=reject if stage == "verify" else lambda **kw: None,
+                _closed_comfy=SimpleNamespace(require_precision_post=
+                    lambda *args, **kwargs: reject()),
+            )
+            transport = SupervisedComfyTransport(service, self.wire)
+            with self.subTest(stage=stage), self.assertRaises(marker) as caught:
+                transport.request("POST", "/prompt", {}, timeout_seconds=10, max_bytes=1024)
+            self.assertIsNone(caught.exception.__context__)
+            self.assertIsNone(caught.exception.__cause__)
+            self.assertNotIn("private foreign text", str(caught.exception))
+            self.assertEqual(self.wire.calls, [])
+
+    def test_success_has_no_failure_class(self):
+        self.execute()
+        record = json.loads((self.output / "run.json").read_bytes())
+        self.assertNotIn("failure_class", record)
 
     def test_expired_trusted_absolute_cap_refuses_before_callbacks_storage_or_wire(self):
         with patch.object(WorkerVerification, "require_matches") as match:

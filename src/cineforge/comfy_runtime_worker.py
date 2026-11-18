@@ -31,6 +31,8 @@ from cineforge.native_speech_integrity import NativeBinary, NativeTree, verify_b
 
 # The probe re-hashes full runtime/source trees, including on cache-cold pods.
 COMFY_PROBE_TIMEOUT_SECONDS = 120
+COMFY_SERVER_LOG_FILENAME = "comfy-server.log"
+
 
 # Files the long-lived ComfyUI server loads but the probe child does not: stdlib
 # sqlite3/zoneinfo/resource, libsqlite3, and system CUDA toolkit cublasLt. The worker
@@ -394,9 +396,10 @@ def setup_comfy(request: dict[str, Any], native: Path, deadline: float) -> dict[
     import subprocess
     spawn = subprocess.Popen
     options: dict[str, Any] = dict(cwd=root, env=environment, stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True, start_new_session=True)
+        close_fds=True, start_new_session=True)
     nr_check(deadline)
-    process = spawn(command, **options)
+    with (root / COMFY_SERVER_LOG_FILENAME).open("ab") as log:
+        process = spawn(command, stdout=log, stderr=log, **options)
     nr_write(root / "server-pid.json", nr_encode({"pid": process.pid, "start_ticks": _server_start(process.pid)}))
     nr_write(root / "worker-verification.json", nr_encode(verification))
     # Polling is fixed loopback health only; final14-node contracts are verified by
@@ -557,6 +560,7 @@ def current_comfy(request: dict[str, Any], native: Path, deadline: float) -> dic
                 raise ValueError("owned Comfy native evidence capacity exhausted")
             nr_write(root / name, nr_encode(observed))
     nr_check(deadline)
-    return {"subject_sha256": comfy_subject(plan),
+    result = {"subject_sha256": comfy_subject(plan),
             "installed_sha256": nr_digest(plan["installed"]), "probe_sha256": nr_digest({"probe": facts, "server": observed}),
             "execution_sha256": nr_digest(plan["execution"]), "jit_enabled": False, "phase": phase}
+    return result

@@ -1303,7 +1303,7 @@ class ComfyServerDriverMapsTests(unittest.TestCase):
 
 
 class ComfyLaunchDeadlineTests(unittest.TestCase):
-    def exercise(self, delay, deadline=103.0):
+    def exercise(self, delay, deadline=103.0, check_log=False):
         from cineforge import worker_bootstrap
         from cineforge.worker_profiles import S2V_WORKER
 
@@ -1348,6 +1348,14 @@ class ComfyLaunchDeadlineTests(unittest.TestCase):
                 )
 
             def spawn(argv, **options):
+                if check_log:
+                    import subprocess
+
+                    self.assertNotEqual(options["stdout"], subprocess.DEVNULL)
+                    self.assertIs(options["stdout"], options["stderr"])
+                    self.assertEqual(options["stdout"].name, str(root / "comfy-server.log"))
+                    self.assertFalse(options["stdout"].closed)
+                    self.server_log_handle = options["stdout"]
                 spawned.append(
                     {
                         "at": now[0],
@@ -1389,6 +1397,10 @@ class ComfyLaunchDeadlineTests(unittest.TestCase):
             self.assertFalse((root / "server-pid.json").exists())
             return spawned
 
+    def test_spawn_captures_server_log_and_closes_parent_on_failure(self):
+        self.assertEqual(len(self.exercise(None, check_log=True)), 1)
+        self.assertTrue(self.server_log_handle.closed)
+
     def test_probe_allows_120_seconds_when_deadline_is_far_away(self):
         self.assertEqual(self.exercise(None, deadline=300.0)[0]["cap"], 300.0)
 
@@ -1415,3 +1427,43 @@ class ComfyLaunchDeadlineTests(unittest.TestCase):
         for delay in ("probe-return", "launch-command-return"):
             with self.subTest(delay=delay):
                 self.assertEqual(self.exercise(delay), [])
+
+
+class ComfyCurrentReplyTests(unittest.TestCase):
+    def test_current_comfy_reply_omits_server_log_tail_when_log_present(self):
+        declaration = plan()
+        hardware = dict(
+            gpu_raw_name="NVIDIA GeForce RTX 5090", capability=[12, 0], device_count=1,
+            nvml_total_mib=32768, nvml_reserved_mib=0, driver_version="fixture",
+        )
+        facts = dict(
+            execution_sha256=nr_digest(declaration["execution"]),
+            jit_enabled_before=False, jit_enabled_after=False, runtime=hardware,
+        )
+        request = dict(
+            plan=dict(session_id="fixture"),
+            comfy_subject_sha256=comfy_subject(declaration),
+            selection=dict(profile_id="m5-wan22-s2v14b-5090-v1", hardware=dict(gpu="NVIDIA GeForce RTX 5090")),
+            profile=dict(id="m5-wan22-s2v14b-5090-v1", scope_sha256=HASH),
+        )
+        with tempfile.TemporaryDirectory(prefix="cf-comfy-current-") as temporary:
+            root = Path(temporary)
+            native = root / "native"
+            native.mkdir()
+            for name, value in (("comfy-selection.json", declaration), ("comfy-probe.json", facts)):
+                path = root / name
+                path.write_bytes(nr_encode(value))
+                path.chmod(0o600)
+            (root / worker.COMFY_SERVER_LOG_FILENAME).write_bytes(b"synthetic server output\n")
+            with (
+                patch("cineforge.worker_bootstrap.worker_root", return_value=root),
+                patch.object(worker, "verify_runtime"),
+                patch.object(worker, "verify_source"),
+                patch("cineforge.worker_bootstrap.s2v_hardware_admission", return_value=hardware),
+            ):
+                result = worker.current_comfy(request, native, time.monotonic() + 30)
+            self.assertNotIn("server_log_tail", result)
+            self.assertEqual(set(result), {
+                "subject_sha256", "installed_sha256", "probe_sha256",
+                "execution_sha256", "jit_enabled", "phase",
+            })

@@ -20,6 +20,20 @@ class TransportError(ProviderError):
     """A sanitized connection, HTTP, timeout, or response-size failure."""
 
 
+class VerifyCurrentError(TransportError):
+    """Current worker verification failed before POST."""
+
+    def __init__(self) -> None:
+        super().__init__("ComfyUI current verification failed before submission")
+
+
+class PrecisionPostError(TransportError):
+    """Precision admission failed before POST."""
+
+    def __init__(self) -> None:
+        super().__init__("ComfyUI precision admission failed before submission")
+
+
 def positive_seconds(value: object) -> float:
     if (not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value)
             or value <= 0 or value > 86400):
