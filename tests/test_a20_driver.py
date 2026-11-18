@@ -748,10 +748,14 @@ class CLITests(unittest.TestCase):
                           "human_review": "pending_human_review", "export_authority": "none"}
                 if retain:
                     report["retained_node"] = {"pod_id": "owned"}
-                stack.enter_context(patch.object(a20_cli.runpy, "run_path",
-                    return_value={"build_bindings": lambda creative, h=h: h.bindings}))
-                stack.enter_context(patch.object(a20_cli, "run_a20", return_value=report))
+                clock = stack.enter_context(patch.object(a20_cli.time, "monotonic", return_value=100))
+                def load_controller(*args, clock=clock, h=h, **kwargs):
+                    clock.return_value = 400  # Local review/import consumes the original cap.
+                    return {"build_bindings": lambda creative, h=h: h.bindings}
+                stack.enter_context(patch.object(a20_cli.runpy, "run_path", side_effect=load_controller))
+                run = stack.enter_context(patch.object(a20_cli, "run_a20", return_value=report))
                 self.assertEqual(a20_cli.command(args), report)
+                self.assertEqual(run.call_args.kwargs["absolute_deadline"], 7300)
 
     def test_help_missing_input_codes_and_no_private_diagnostics(self):
         help_result = subprocess.run([sys.executable, "-m", "cineforge", "a20-run", "--help"],

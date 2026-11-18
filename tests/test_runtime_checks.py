@@ -197,7 +197,7 @@ class RuntimeInvariantTests(unittest.TestCase):
         self.assertFalse(hasattr(worker, '_prepared_s2v'))
 
     def test_native_timeout_ceiling_matches_approved_remote_lifetime(self):
-        self.assertEqual(MAX_NATIVE_TIMEOUT_SECONDS, 1800)
+        self.assertEqual(MAX_NATIVE_TIMEOUT_SECONDS, 7200)
         self.assertEqual(MAX_NATIVE_TIMEOUT_SECONDS, REMOTE_MAX_NATIVE_TIMEOUT_SECONDS)
 
     def test_native_request_uses_approved_lifetime_and_preserves_deadline_and_reserve(self):
@@ -218,7 +218,7 @@ class RuntimeInvariantTests(unittest.TestCase):
             check=Mock(), budget=Mock(), _key='key', _s2v_setup_attempted=False,
             _require_s2v=Mock(), _prepare_closed_comfy=Mock())
         with patch('cineforge.ssh_worker.time.monotonic', return_value=100):
-            for remaining, expected in ((2100, 1900), (1800, 1780)):
+            for remaining, expected in ((2100, 2080), (1800, 1780)):
                 with self.subTest(remaining=remaining):
                     worker._s2v_setup_attempted = False
                     worker.budget.remaining_seconds.return_value = remaining

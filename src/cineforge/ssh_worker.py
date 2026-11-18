@@ -55,7 +55,7 @@ class WorkerError(ValueError):
 MAX_CONTROL_NAMESPACES = 8
 # Approved lifetime ceiling; mirrors cineforge.native_remote.MAX_NATIVE_TIMEOUT_SECONDS.
 # Kept local to avoid an import cycle: native_remote imports SSHWorker.
-MAX_NATIVE_TIMEOUT_SECONDS = 1800
+MAX_NATIVE_TIMEOUT_SECONDS = 7200
 
 
 @preserve_interruption

@@ -54,7 +54,7 @@ class S2VBudgetApproval(BudgetApproval):
                 or type(self.region) is not str or re.fullmatch(r"[A-Z0-9-]{3,32}", self.region) is None
                 or type(self.aggregate_usd) not in (int, float) or not 0 < self.aggregate_usd <= 5
                 or type(self.lifetime_seconds) not in (int, float)
-                or not 120 < self.lifetime_seconds <= 1800
+                or not 120 < self.lifetime_seconds <= 7200
                 or type(self.hourly_ceiling_usd) not in (int, float)
                 or not 0 < self.hourly_ceiling_usd <= 1.25
                 or self.image != profile.IMAGE or self.gpu_id not in (profile.GPU_ID, profile.L40S_GPU_ID, profile.A40_GPU_ID)

@@ -28,6 +28,7 @@ from cineforge.worker_bootstrap import (
     dispatch,
     download,
     guard_alive,
+    main,
     private_write,
     setup,
 )
@@ -126,9 +127,35 @@ class BootstrapTests(unittest.TestCase):
             dispatch({"operation": "ping", "allow_live": False, "timeout_seconds": 1})
         self.assertEqual(dispatch({"operation": "ping", "allow_live": True,
                                   "timeout_seconds": 1}), {"status": "ssh_ready"})
-        for value in [True, 0, -1, float("nan"), float("inf"), 1800]:
+        for value in [True, 0, -1, float("nan"), float("inf"), 7141]:
             with self.assertRaises(BootstrapError):
                 dispatch({"operation": "ping", "allow_live": True, "timeout_seconds": value})
+
+    def test_dispatch_accepts_approved_request_timeout_ceiling(self):
+        for timeout in (1800, 7140):
+            with self.subTest(timeout=timeout):
+                self.assertEqual(dispatch({"operation": "ping", "allow_live": True,
+                                           "timeout_seconds": timeout}), {"status": "ssh_ready"})
+
+    def test_main_request_timeout_ceiling(self):
+        for timeout, expected in ((7140, 0), (7141, 2)):
+            request = {"operation": "ping", "allow_live": True, "timeout_seconds": timeout}
+            with (self.subTest(timeout=timeout),
+                  patch("cineforge.worker_bootstrap.sys.stdin", Mock(
+                      buffer=io.BytesIO(json.dumps(request).encode()))),
+                  patch("cineforge.worker_bootstrap.sys.stdout", new_callable=io.StringIO),
+                  patch("cineforge.worker_bootstrap.os.umask"),
+                  patch("cineforge.worker_bootstrap.signal.signal"),
+                  patch("cineforge.worker_bootstrap.signal.setitimer") as timer,
+                  patch("cineforge.worker_bootstrap.dispatch",
+                        return_value={"status": "ssh_ready"}) as operation):
+                self.assertEqual(main(), expected)
+                if expected == 0:
+                    operation.assert_called_once_with(request)
+                    timer.assert_any_call(signal.ITIMER_REAL, timeout)
+                else:
+                    operation.assert_not_called()
+                    timer.assert_called_once_with(signal.ITIMER_REAL, 0)
 
     def test_verified_download_is_worker_local_and_checks_size_hash(self):
         opener = Mock()
