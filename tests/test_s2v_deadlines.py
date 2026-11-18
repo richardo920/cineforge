@@ -203,7 +203,7 @@ class PairedDeadlineTests(unittest.TestCase):
         self.assertEqual((sent[0][0], sent[-1][0]), ('s2v_pair_begin', 's2v_pair_finish'))
         self.assertTrue(all('absolute_deadline' not in body for body in self.f.requests))
 
-    def test_longer_parent_does_not_extend_phase_cap(self):
+    def test_longer_parent_is_bounded_by_lease_reserve_not_a_phase_cap(self):
         sent = []
         rpc = self.driver._request
         def request(body, timeout, **kw):
@@ -211,7 +211,36 @@ class PairedDeadlineTests(unittest.TestCase):
             return rpc(body, timeout, **kw)
         self.driver._request = request
         self.driver.stage_s2v(self.selection, absolute_deadline=1000)
-        self.assertEqual(set(sent), {189})
+        self.assertEqual(set(sent), {579})
+
+    def test_stage_deadline_extends_beyond_legacy_90s_when_parent_allows(self):
+        self.f.remaining = 3600
+        sent = []
+        rpc = self.driver._request
+        def request(body, timeout, **kw):
+            sent.append(kw['absolute_deadline'])
+            return rpc(body, timeout, **kw)
+        self.driver._request = request
+        self.driver.stage_s2v(self.selection, absolute_deadline=1000)
+        self.assertEqual(set(sent), {1000})
+        self.assertGreater(1000, 99 + 90)
+
+    def test_stage_deadline_capped_by_sooner_parent_deadline(self):
+        sent = []
+        rpc = self.driver._request
+        def request(body, timeout, **kw):
+            sent.append(kw['absolute_deadline'])
+            return rpc(body, timeout, **kw)
+        self.driver._request = request
+        self.driver.stage_s2v(self.selection, absolute_deadline=150)
+        self.assertEqual(set(sent), {150})
+
+    def test_insufficient_lease_remaining_fails_closed_without_transfer(self):
+        self.f.remaining = 120
+        with self.assertRaises(WorkerError):
+            self.driver.stage_s2v(self.selection)
+        self.assertEqual(self.f.requests, [])
+        self.assertFalse(self.driver._s2v_consumed)
 
     def test_lease_sample_before_delayed_budget_callback_never_renews_reserve(self):
         def remaining(_):

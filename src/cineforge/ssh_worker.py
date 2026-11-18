@@ -723,7 +723,7 @@ class SSHWorker:
         """
         deadline = None
         try:
-            candidate = request_deadline(90, absolute_deadline, time.monotonic)
+            candidate = request_deadline(MAX_NATIVE_TIMEOUT_SECONDS, absolute_deadline, time.monotonic)
             sampled = time.monotonic()
             remaining = self.budget.remaining_seconds(self._key)
             if (type(remaining) not in (int, float) or not math.isfinite(remaining)
