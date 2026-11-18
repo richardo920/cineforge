@@ -874,6 +874,41 @@ class ComfyNoticeAndExecutionTests(unittest.TestCase):
 
 
 class ComfyPreimportTests(unittest.TestCase):
+    def test_probe_main_verifies_runtime_with_actual_native_session(self):
+        import sys
+
+        with tempfile.TemporaryDirectory(prefix="cf-comfy-probe-") as temporary:
+            root = Path(temporary) / "comfy"
+            firstparty = Path(temporary) / "native/firstparty"
+            deadline = time.monotonic() + 5
+            declaration = {"native": [{"driver_mount": {}}]}
+            output = io.BytesIO()
+            with (
+                patch.object(sys, "argv", ["fixture", str(firstparty), str(root), "probe", str(deadline)]),
+                patch.object(sys, "path", sys.path.copy()),
+                patch.object(sys, "stdout", SimpleNamespace(buffer=output)),
+                patch.object(launcher, "_require_abi"),
+                patch.object(launcher, "nr_read", return_value=b"{}"),
+                patch.object(launcher, "comfy_plan", return_value=declaration),
+                patch.object(worker, "verify_runtime") as verify_runtime,
+                patch.object(worker, "verify_source"),
+                patch.object(launcher, "comfy_worker", return_value=SimpleNamespace(profile_id="fixture")),
+                patch.object(launcher, "_observe", return_value={}),
+            ):
+                self.assertEqual(launcher.main(), 0)
+            verify_runtime.assert_called_once_with(
+                declaration, root, deadline, native=firstparty.parent
+            )
+            self.assertEqual(output.getvalue(), nr_encode({}))
+
+    def test_driver_mount_requires_native_session_with_exact_message(self):
+        binary = dict(path="/fixture/libcuda.so.1", size_bytes=1, sha256=HASH, driver_mount={})
+        with self.assertRaises(ValueError) as raised:
+            worker.verify_runtime_binary(binary, None, time.monotonic() + 5)
+        self.assertEqual(
+            str(raised.exception), "qualified NVIDIA verification needs the actual native session"
+        )
+
     def test_import_location_requires_an_actual_nonempty_file_path(self):
         from types import SimpleNamespace
 
@@ -973,7 +1008,7 @@ class ComfyPreimportTests(unittest.TestCase):
             probe = (
                 "import os,sys;sys.path.insert(0,sys.argv[1]);"
                 "from cineforge import comfy_runtime_launcher as l,comfy_runtime_worker as w;"
-                "l._require_abi=lambda:None;w.verify_runtime=lambda *a:None;w.verify_source=lambda *a:None;"
+                "l._require_abi=lambda:None;w.verify_runtime=lambda *a,**k:None;w.verify_source=lambda *a:None;"
                 "l._observe=lambda *a,**k:dict(synthetic_first_party=True);"
                 "sys.argv=['fixture',sys.argv[1],sys.argv[2],'probe',sys.argv[3]];os._exit(l.main())"
             )

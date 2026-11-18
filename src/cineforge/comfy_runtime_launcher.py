@@ -236,7 +236,7 @@ def main() -> int:
         _require_abi()
         plan = comfy_plan(nr_json(nr_read(root / "comfy-selection.json")))
         from cineforge.comfy_runtime_worker import verify_runtime, verify_source
-        verify_runtime(plan, root, deadline)
+        verify_runtime(plan, root, deadline, native=Path(sys.argv[1]).parent)
         verify_source(plan, root, deadline)
         sys.path.insert(0, str(root / "comfy-runtime/site"))
         value = _observe(root, deadline, profile_id=comfy_worker(plan).profile_id)
