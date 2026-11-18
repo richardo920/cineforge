@@ -236,8 +236,8 @@ def set_executables(plan: dict[str, Any], root: Path, deadline: float) -> None:
 
 def verify_source(plan: dict[str, Any], root: Path, deadline: float, *,
                   required_models: tuple[str, ...] = ()) -> None:
-    # Code is exact. Only hash-named paired input and the four fixed model bodies
-    # may be added inside the source tree; generated output/user/temp live elsewhere.
+    # Code is exact. Only hash-named paired input, the server-created empty input/3d
+    # directory, and the four fixed model bodies may be added; output/user/temp live elsewhere.
     from cineforge.worker_profiles import S2V_WORKER
     source = root / "ComfyUI"
     pins = list(_files(plan["source"]["files"], str(source)))
@@ -248,6 +248,8 @@ def verify_source(plan: dict[str, Any], root: Path, deadline: float, *,
         for path in input_root.iterdir():
             relative = "input/" + path.name
             if relative in expected:
+                continue
+            if path.name == "3d" and stat.S_ISDIR(path.lstat().st_mode):
                 continue
             match = re.fullmatch(r"(?:actor|speech)-([0-9a-f]{64})\.(png|wav)", path.name)
             if match is None:
@@ -260,7 +262,7 @@ def verify_source(plan: dict[str, Any], root: Path, deadline: float, *,
         if (required or (source / relative).exists()) and relative not in expected:
             pins.append((relative, size, "sha256", sha))
     verify_tree(NativeTree(str(source), tuple(pins)), deadline,
-                empty_directories=frozenset({"input", "output", "temp", "user", "models"}))
+                empty_directories=frozenset({"input", "input/3d", "output", "temp", "user", "models"}))
     nr_check(deadline)
 
 

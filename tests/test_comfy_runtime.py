@@ -256,6 +256,56 @@ class ComfyPlanTests(unittest.TestCase):
         self.assertNotIn("av", sys.modules)
 
 
+class ComfyVerifySourceTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="cf-comfy-source-")
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name).resolve()
+        self.source = self.root / "ComfyUI"
+        self.source.mkdir(mode=0o700)
+        (self.source / "input").mkdir(mode=0o700)
+        bodies = {"main.py": b"# synthetic source\n", "input/example.png": b"example"}
+        for name, body in bodies.items():
+            path = self.source / name
+            path.write_bytes(body)
+            path.chmod(0o600)
+        self.plan = {
+            "source": {"files": sorted(
+                [[name, len(body), sha(body)] for name, body in bodies.items()]
+            )}
+        }
+        self.deadline = time.monotonic() + 30
+
+    def test_server_created_input_3d_directory_passes(self):
+        (self.source / "input/3d").mkdir()
+        worker.verify_source(self.plan, self.root, self.deadline)
+
+    def test_unknown_input_file_still_raises(self):
+        for name in ("stray.txt", "3d"):
+            with self.subTest(name=name):
+                path = self.source / "input" / name
+                path.write_bytes(b"stray")
+                path.chmod(0o600)
+                with self.assertRaisesRegex(ValueError, "unknown closed Comfy input file"):
+                    worker.verify_source(self.plan, self.root, self.deadline)
+                path.unlink()
+
+    def test_file_inside_input_3d_still_raises(self):
+        (self.source / "input/3d").mkdir()
+        path = self.source / "input/3d/stray.txt"
+        path.write_bytes(b"stray")
+        path.chmod(0o600)
+        with self.assertRaises(ValueError):
+            worker.verify_source(self.plan, self.root, self.deadline)
+
+    def test_hash_named_pair_file_still_passes(self):
+        body = b"synthetic actor"
+        path = self.source / "input" / ("actor-" + sha(body) + ".png")
+        path.write_bytes(body)
+        path.chmod(0o600)
+        worker.verify_source(self.plan, self.root, self.deadline)
+
+
 class ComfyExtractionTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="cf-comfy-fixture-")
