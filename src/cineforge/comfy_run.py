@@ -27,6 +27,7 @@ from cineforge.comfy_transport import (
     request_capped,
     request_deadline,
     require_time,
+    reraised_marker,
 )
 from cineforge.contracts import ProjectPlan, RunManifest, RunStatus, ShotRun
 from cineforge.interruptions import preserve_interruption, remember_interruption
@@ -88,13 +89,13 @@ class _BoundedTransport:
         except Exception as error:
             failed = True
             if isinstance(error, (VerifyCurrentError, PrecisionPostError)):
-                marker = type(error)
+                marker = reraised_marker(error)
         # Raise outside the exception handler so neither traceback context nor cause
         # retains arbitrary transport/HTTP exception text containing credentials.
         if self.clock() >= self.deadline:
             raise JobDeadlineError("single-shot deadline exceeded")
         if marker is not None:
-            raise marker() from None
+            raise marker from None
         if failed:
             raise TransportError("ComfyUI transport request failed")
         return raw
@@ -296,6 +297,9 @@ def execute_comfy(
                 original_failure = interruption_error
                 record["failure_class"] = _failure_class(
                     original_failure, phase, clock, inference_deadline, deadline)
+                if record["failure_class"] == "verify_current":
+                    stage = getattr(original_failure, "verify_stage", None)
+                    record["verify_stage"] = stage if stage in ("deadline", "worker") else None
                 # One bounded attempt, for this instance's confirmed job only. A missing
                 # acknowledgement/history never becomes a fabricated cancelled state.
                 if run is not None and run.status not in TERMINAL:

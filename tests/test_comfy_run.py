@@ -319,6 +319,88 @@ class ComfyRunTests(unittest.TestCase):
             self.assertNotIn("private foreign text", str(caught.exception))
             self.assertEqual(self.wire.calls, [])
 
+    def supervised_verify_fixture(self, advance, *, mismatch=False):
+        from cineforge.s2v_service import S2VServiceContext
+        from cineforge.ssh_worker import SupervisedComfyTransport
+
+        now, received = [100.0], []
+
+        def verify(*, absolute_deadline=None):
+            received.append(absolute_deadline)
+            now[0] += advance
+            if mismatch or now[0] >= absolute_deadline:
+                raise ValueError("private foreign text")
+
+        service = SimpleNamespace(
+            selection=object.__new__(S2VServiceContext), check=lambda: None,
+            verify_comfy_current=verify,
+            _closed_comfy=SimpleNamespace(require_precision_post=lambda *a, **k: None),
+            budget=SimpleNamespace(remaining_seconds=lambda key: 100000.0), _key="test-key",
+        )
+        return SupervisedComfyTransport(service, self.wire), lambda: now[0], received
+
+    def test_supervised_post_verify_slow_success_still_submits(self):
+        transport, clock, received = self.supervised_verify_fixture(30)
+        raw = transport.request("POST", "/prompt", {"prompt": {}}, timeout_seconds=10,
+                                max_bytes=1024, absolute_deadline=1100.0, clock=clock)
+        self.assertEqual(received, [220.0])
+        self.assertIsInstance(raw, bytes)
+        self.assertEqual(len(self.wire.calls), 1)
+        self.assertEqual(self.wire.calls[0][:2], ("POST", "/prompt"))
+        self.assertEqual(self.wire.calls[0][3], 10)
+
+    def test_supervised_post_verify_beyond_window_never_submits(self):
+        transport, clock, received = self.supervised_verify_fixture(130)
+        with self.assertRaises(VerifyCurrentError) as caught:
+            transport.request("POST", "/prompt", {}, timeout_seconds=10, max_bytes=1024,
+                              absolute_deadline=1100.0, clock=clock)
+        self.assertEqual(received, [220.0])
+        self.assertIsNone(caught.exception.__context__)
+        self.assertIsNone(caught.exception.__cause__)
+        self.assertNotIn("private foreign text", str(caught.exception))
+        self.assertEqual(self.wire.calls, [])
+
+    def test_verify_stage_deadline_and_worker_are_recorded(self):
+        for stage, advance, mismatch in (("deadline", 130, False), ("worker", 0, True)):
+            with self.subTest(stage=stage, level="transport"):
+                transport, clock, _ = self.supervised_verify_fixture(advance, mismatch=mismatch)
+                with self.assertRaises(VerifyCurrentError) as caught:
+                    transport.request("POST", "/prompt", {}, timeout_seconds=10, max_bytes=1024,
+                                      absolute_deadline=1100.0, clock=clock)
+                self.assertEqual(caught.exception.verify_stage, stage)
+                self.assertIsNone(caught.exception.__context__)
+                self.assertIsNone(caught.exception.__cause__)
+                self.assertNotIn("private foreign text", str(caught.exception))
+                self.assertEqual(self.wire.calls, [])
+
+        for stage in ("deadline", "worker", None, "private foreign text", "precision"):
+            with self.subTest(stage=stage, level="record"):
+                failure = (PrecisionPostError() if stage == "precision" else
+                           VerifyCurrentError(verify_stage=stage))
+
+                class FailureWire(WireFixture):
+                    def request(wire, method, path, body=None, *, failure=failure, **bounds):
+                        if method == "POST" and path == "/prompt":
+                            raise failure
+                        return super().request(method, path, body, **bounds)
+
+                self.wire = FailureWire(self.selection)
+                self.output = self.root / str(stage)
+                with self.assertRaises(ComfyRunError) as caught:
+                    self.execute()
+                self.assertIsNone(caught.exception.__context__)
+                self.assertIsNone(caught.exception.__cause__)
+                record = json.loads((self.output / "run.json").read_bytes())
+                self.assertEqual(record["outcome"], "incomplete")
+                if stage == "precision":
+                    self.assertEqual(record["failure_class"], "precision_post")
+                    self.assertNotIn("verify_stage", record)
+                else:
+                    self.assertEqual(record["failure_class"], "verify_current")
+                    self.assertEqual(record["verify_stage"],
+                                     stage if stage in ("deadline", "worker") else None)
+                self.assertNotIn("private foreign text", json.dumps(record))
+
     def test_success_has_no_failure_class(self):
         self.execute()
         record = json.loads((self.output / "run.json").read_bytes())
