@@ -273,8 +273,9 @@ class Harness:
         return {"manifest": {"artifacts": [{"uri": "artifact-" + "a" * 64 + ".webm", "sha256": "a" * 64}]}}
 
     def run(self):
+        self.run_deadline = driver.time.monotonic() + 1800
         return driver.run_a20(self.bindings, self.frozen, self.output,
-                              absolute_deadline=driver.time.monotonic() + 1800, allow_live=True)
+                              absolute_deadline=self.run_deadline, allow_live=True)
 
 
 class DriverTests(unittest.TestCase):
@@ -295,6 +296,13 @@ class DriverTests(unittest.TestCase):
             self.assertIsNone(result["core_probe"])
             self.assertEqual([c["name"] for c in result["checkpoints"]], list(driver.CHECKPOINTS))
             h.worker.prepare.assert_called_once()
+            native = h.patches["RemoteNativeSpeechRuntime"]
+            native.assert_called_once()
+            self.assertEqual(native.call_args.kwargs["timeout_seconds"],
+                             h.bindings.service.approval.lifetime_seconds)
+            self.assertIsNotNone(native.call_args.kwargs["absolute_deadline"])
+            self.assertLessEqual(native.call_args.kwargs["absolute_deadline"], h.run_deadline)
+            self.assertGreater(native.call_args.kwargs["absolute_deadline"], h.run_deadline - 600)
             h.provisioner.release.assert_called_once_with("owned")
             self.assertEqual(json.loads((h.output / "run.json").read_bytes()), result)
             h.budget.snapshot_for.assert_not_called()

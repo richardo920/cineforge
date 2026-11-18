@@ -1075,7 +1075,7 @@ class ComfyExecutableTests(unittest.TestCase):
 
 
 class ComfyLaunchDeadlineTests(unittest.TestCase):
-    def exercise(self, delay):
+    def exercise(self, delay, deadline=103.0):
         from cineforge import worker_bootstrap
         from cineforge.worker_profiles import S2V_WORKER
 
@@ -1141,7 +1141,7 @@ class ComfyLaunchDeadlineTests(unittest.TestCase):
                 patch.object(worker_bootstrap, "worker_root", return_value=root),
                 patch.object(worker, "current_comfy", return_value={}),
                 patch.object(worker, "verify_source"),
-                patch.object(worker_bootstrap, "bounded_process", return_value=b"{}"),
+                patch.object(worker_bootstrap, "bounded_process", return_value=b"{}") as child,
                 patch.object(launcher, "probe_result", probe),
                 patch.object(launcher, "launch_command", command),
                 patch.object(worker.time, "monotonic", lambda: now[0]),
@@ -1149,14 +1149,20 @@ class ComfyLaunchDeadlineTests(unittest.TestCase):
                 patch("subprocess.Popen", spawn),
             ):
                 with self.assertRaises(ValueError if delay else RuntimeError):
-                    worker.setup_comfy(request, native, 103.0)
+                    worker.setup_comfy(request, native, deadline)
+                child.assert_called_once()
+                self.assertEqual(child.call_args.kwargs["timeout"], min(120, deadline - 100.0))
+                self.assertEqual(child.call_args.kwargs["absolute_deadline"], deadline)
                 before = len(spawned)
                 with self.assertRaises(FileExistsError):
-                    worker.setup_comfy(request, native, 103.0)
+                    worker.setup_comfy(request, native, deadline)
                 self.assertEqual(len(spawned), before)
             self.assertTrue((native / "comfy-launch-consumed").exists())
             self.assertFalse((root / "server-pid.json").exists())
             return spawned
+
+    def test_probe_allows_120_seconds_when_deadline_is_far_away(self):
+        self.assertEqual(self.exercise(None, deadline=300.0)[0]["cap"], 300.0)
 
     def test_healthy_fixed_launch_is_consumed_and_keeps_original_child_cap(self):
         self.assertEqual(
