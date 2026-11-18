@@ -514,16 +514,6 @@ class ComfyControllerTests(unittest.TestCase):
         runtime = ClosedComfyRuntime(bridge, checked)
         return runtime, worker, selected, reviewer, state, bridge
 
-    def test_check_fact_accepts_bounded_optional_server_log(self):
-        runtime, service, selected, _, _, bridge = self.fixture()
-        runtime.prepare(service, selected, deadline=time.monotonic() + 30)
-        fact = bridge._call("native_comfy_setup")["comfy"]
-        runtime._check_fact(fact)
-        runtime._check_fact(dict(fact, server_log_tail="synthetic server output"))
-        for tail in (None, 123, b"bytes", "x" * (64 * 1024 + 257)):
-            with self.subTest(tail_type=type(tail)), self.assertRaises(ValueError):
-                runtime._check_fact(dict(fact, server_log_tail=tail))
-
     def test_closed_once_phases_preserve_current_rights_and_original_cap(self):
         runtime, worker, selected, reviewer, state, bridge = self.fixture()
         cap = time.monotonic() + 30
@@ -1439,23 +1429,41 @@ class ComfyLaunchDeadlineTests(unittest.TestCase):
                 self.assertEqual(self.exercise(delay), [])
 
 
-class ComfyServerLogTailTests(unittest.TestCase):
-    def test_small_and_missing_server_log(self):
-        with tempfile.TemporaryDirectory(prefix="cf-comfy-log-") as temporary:
+class ComfyCurrentReplyTests(unittest.TestCase):
+    def test_current_comfy_reply_omits_server_log_tail_when_log_present(self):
+        declaration = plan()
+        hardware = dict(
+            gpu_raw_name="NVIDIA GeForce RTX 5090", capability=[12, 0], device_count=1,
+            nvml_total_mib=32768, nvml_reserved_mib=0, driver_version="fixture",
+        )
+        facts = dict(
+            execution_sha256=nr_digest(declaration["execution"]),
+            jit_enabled_before=False, jit_enabled_after=False, runtime=hardware,
+        )
+        request = dict(
+            plan=dict(session_id="fixture"),
+            comfy_subject_sha256=comfy_subject(declaration),
+            selection=dict(profile_id="m5-wan22-s2v14b-5090-v1", hardware=dict(gpu="NVIDIA GeForce RTX 5090")),
+            profile=dict(id="m5-wan22-s2v14b-5090-v1", scope_sha256=HASH),
+        )
+        with tempfile.TemporaryDirectory(prefix="cf-comfy-current-") as temporary:
             root = Path(temporary)
-            self.assertIsNone(worker._server_log_tail(root))
-            (root / worker.COMFY_SERVER_LOG_FILENAME).write_bytes(b"complete log\n")
-            self.assertEqual(worker._server_log_tail(root), "complete log\n")
-
-    def test_large_server_log_is_bounded_truncated_and_utf8_replaced(self):
-        with tempfile.TemporaryDirectory(prefix="cf-comfy-log-") as temporary:
-            root = Path(temporary)
-            (root / worker.COMFY_SERVER_LOG_FILENAME).write_bytes(b"x" * 100000 + b"\xff")
-            tail = worker._server_log_tail(root)
-            self.assertTrue(tail.startswith(worker.COMFY_SERVER_LOG_TRUNCATION))
-            self.assertLessEqual(len(tail), 64 * 1024 + len(worker.COMFY_SERVER_LOG_TRUNCATION))
-            self.assertTrue(tail.endswith("\ufffd"))
-
-    def test_unreadable_server_log_is_optional(self):
-        with patch.object(Path, "open", side_effect=OSError("private foreign text")):
-            self.assertIsNone(worker._server_log_tail(Path("/fixture")))
+            native = root / "native"
+            native.mkdir()
+            for name, value in (("comfy-selection.json", declaration), ("comfy-probe.json", facts)):
+                path = root / name
+                path.write_bytes(nr_encode(value))
+                path.chmod(0o600)
+            (root / worker.COMFY_SERVER_LOG_FILENAME).write_bytes(b"synthetic server output\n")
+            with (
+                patch("cineforge.worker_bootstrap.worker_root", return_value=root),
+                patch.object(worker, "verify_runtime"),
+                patch.object(worker, "verify_source"),
+                patch("cineforge.worker_bootstrap.s2v_hardware_admission", return_value=hardware),
+            ):
+                result = worker.current_comfy(request, native, time.monotonic() + 30)
+            self.assertNotIn("server_log_tail", result)
+            self.assertEqual(set(result), {
+                "subject_sha256", "installed_sha256", "probe_sha256",
+                "execution_sha256", "jit_enabled", "phase",
+            })

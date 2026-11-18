@@ -200,11 +200,8 @@ class ClosedComfyRuntime:
             raise ValueError("closed Comfy setup incomplete or unconfirmed; never replay") from None
 
     def _check_fact(self, fact: Any) -> None:
-        required = {"subject_sha256", "installed_sha256", "probe_sha256",
-                    "execution_sha256", "jit_enabled", "phase"}
-        if (type(fact) is not dict or set(fact) - {"server_log_tail"} != required
-                or "server_log_tail" in fact and (not isinstance(fact["server_log_tail"], str)
-                    or len(fact["server_log_tail"]) > 64 * 1024 + 256)
+        if (type(fact) is not dict or set(fact) != {"subject_sha256", "installed_sha256", "probe_sha256",
+                                                 "execution_sha256", "jit_enabled", "phase"}
                 or fact["subject_sha256"] != self._subject or fact["jit_enabled"] is not False
                 or fact["phase"] != "after_core_startup"):
             raise ValueError("closed Comfy worker facts differ")

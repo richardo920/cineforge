@@ -32,20 +32,6 @@ from cineforge.native_speech_integrity import NativeBinary, NativeTree, verify_b
 # The probe re-hashes full runtime/source trees, including on cache-cold pods.
 COMFY_PROBE_TIMEOUT_SECONDS = 120
 COMFY_SERVER_LOG_FILENAME = "comfy-server.log"
-COMFY_SERVER_LOG_TAIL_BYTES = 64 * 1024
-COMFY_SERVER_LOG_TRUNCATION = "[...truncated...]\n"
-
-
-def _server_log_tail(root: Path) -> str | None:
-    try:
-        with (root / COMFY_SERVER_LOG_FILENAME).open("rb") as stream:
-            size = stream.seek(0, os.SEEK_END)
-            dropped = size > COMFY_SERVER_LOG_TAIL_BYTES
-            stream.seek(max(0, size - COMFY_SERVER_LOG_TAIL_BYTES))
-            tail = stream.read(COMFY_SERVER_LOG_TAIL_BYTES).decode("utf-8", errors="replace")
-    except OSError:
-        return None
-    return (COMFY_SERVER_LOG_TRUNCATION if dropped else "") + tail
 
 
 # Files the long-lived ComfyUI server loads but the probe child does not: stdlib
@@ -577,7 +563,4 @@ def current_comfy(request: dict[str, Any], native: Path, deadline: float) -> dic
     result = {"subject_sha256": comfy_subject(plan),
             "installed_sha256": nr_digest(plan["installed"]), "probe_sha256": nr_digest({"probe": facts, "server": observed}),
             "execution_sha256": nr_digest(plan["execution"]), "jit_enabled": False, "phase": phase}
-    tail = _server_log_tail(root)
-    if tail is not None:
-        result["server_log_tail"] = tail
     return result
