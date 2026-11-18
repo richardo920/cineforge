@@ -134,8 +134,14 @@ def _verify_nodes(transport: ComfyTransport, selection: ApprovedComfySelection,
             if field in ("unet_name", "clip_name", "vae_name") or paired_file or (
                     node["class_type"] == "LoadImage" and field == "image"):
                 spec = (required | optional)[field]
-                if (not isinstance(spec, list) or not spec or not isinstance(spec[0], list)
-                        or value not in spec[0]):
+                if isinstance(spec, list) and spec and isinstance(spec[0], list):
+                    candidates = spec[0]
+                elif (isinstance(spec, list) and len(spec) == 2 and spec[0] == "COMBO"
+                        and isinstance(spec[1], dict) and isinstance(spec[1].get("options"), list)):
+                    candidates = spec[1]["options"]
+                else:
+                    raise _VerifyNodesFileError("worker does not expose the approved model file")
+                if value not in candidates:
                     raise _VerifyNodesFileError("worker does not expose the approved model file")
     output = graph[selection.workflow.output_node]
     if schemas[output["class_type"]].get("output_node") is not True:
