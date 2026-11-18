@@ -1022,8 +1022,9 @@ def dispatch(request: dict[str, Any]) -> dict[str, Any]:
         except (Exception, KeyboardInterrupt):
             return {"status": "stop_unconfirmed"}
     timeout = request["timeout_seconds"]
+    # Approval lifetime ceiling minus the 60-second cleanup reserve.
     if (request.get("allow_live") is not True or type(timeout) not in (int, float)
-            or not math.isfinite(timeout) or not 0 < timeout <= 1740):
+            or not math.isfinite(timeout) or not 0 < timeout <= 7140):
         raise BootstrapError("worker operation requires bounded opt-in")
     deadline = time.monotonic() + timeout
     operation = request["operation"]
@@ -1073,8 +1074,9 @@ def main() -> int:
         if len(encode(request)) > 256 * 1024:
             raise BootstrapError("worker request too large")
         timeout = request.get("timeout_seconds")
+        # Approval lifetime ceiling minus the 60-second cleanup reserve.
         if (not isinstance(timeout, (int, float)) or isinstance(timeout, bool)
-                or not math.isfinite(timeout) or not 0 < timeout <= 1740):
+                or not math.isfinite(timeout) or not 0 < timeout <= 7140):
             raise BootstrapError("invalid worker deadline")
 
         def expire(_signum: int, _frame: Any) -> None:

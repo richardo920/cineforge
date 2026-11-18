@@ -31,7 +31,7 @@ from cineforge.runpod import RunpodPodProvisioner, RunpodPodSpec
 from cineforge.runpod_transport import CloudTransport
 from cineforge.s2v import VerifiedS2V, select_s2v
 from cineforge.s2v_run import run_s2v
-from cineforge.s2v_service import S2VServiceContext, prepare_service_journal
+from cineforge.s2v_service import S2VBudgetApproval, S2VServiceContext, prepare_service_journal
 from cineforge.speech import (
     CanonicalVoiceBinding,
     QwenBaseSpeechAdapter,
@@ -140,6 +140,14 @@ class CoreProbe:
         return result
 
 
+def acquisition_max_cost_usd(spec: RunpodPodSpec, approval: S2VBudgetApproval) -> float:
+    # Mirror before_create's micro-dollar reserve; the aggregate cap fails closed
+    # when the full lease reservation would exceed the approved aggregate.
+    reserve = math.ceil((spec.max_hourly_usd + .02)
+                        * approval.lifetime_seconds / 3600 * 1_000_000) / 1_000_000
+    return min(reserve, approval.aggregate_usd)
+
+
 def attempt_cap(parent: float, remaining: float, now: float) -> float:
     """600 s hold means execution attempt cap, retaining the separate lease reserve."""
     if (any(not math.isfinite(v) for v in (parent, remaining, now))
@@ -239,8 +247,9 @@ def run_a20(b: A20Bindings, frozen: FrozenInputs, output: Path, *,
                 device = None
                 try:
                     guard()
-                    device = provisioner.acquire(b.service.model, max_cost_usd=.635,
-                                                 idempotency_key=b.acquisition_id)
+                    device = provisioner.acquire(b.service.model,
+                        max_cost_usd=acquisition_max_cost_usd(spec, approval),
+                        idempotency_key=b.acquisition_id)
                     guard()
                     # stage() includes native_preflight BEFORE installing runtime.
                     native_cap = min(absolute_deadline, time.monotonic() + approval.lifetime_seconds)

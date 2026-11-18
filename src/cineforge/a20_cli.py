@@ -16,7 +16,7 @@ from cineforge.workflows import strict_object
 
 def command(args: argparse.Namespace) -> dict[str, Any]:
     # Start the original cap before local input review/import; never renew it.
-    deadline = time.monotonic() + 1800
+    deadline = time.monotonic() + 7200  # Maximum approval lifetime.
     value = strict_object(read_private_input(args.inputs))
     if any(type(v) is not str for v in value.values()):
         raise A20Error("A20_INPUT_PATHS")

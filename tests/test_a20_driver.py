@@ -1,4 +1,4 @@
-"""Offline orchestration/receipt tests. Every cloud/native component is replaced before use."""
+"""Offline orchestration/receipt tests. Cloud admission is real; native effects are replaced before use."""
 from __future__ import annotations
 
 import json
@@ -18,13 +18,17 @@ from test_speech import wav_bytes
 from cineforge import a20_driver as driver
 from cineforge.a20_inputs import INPUT_NAMES, A20Error, CreativeInputs, FrozenInputs
 from cineforge.audio_analysis import ToolIdentity
+from cineforge.cloud_budget import CloudBudgetError, CloudBudgetSession
+from cineforge.cloud_journal import CloudJournal
 from cineforge.native_speech import OriginalVoiceDesign
 from cineforge.private_store import PrivateRunDirectory
 from cineforge.rights import EvidenceRef
-from cineforge.runpod import LeaseSnapshot, RunpodPodSpec
+from cineforge.runpod import AcquisitionIntent, LeaseSnapshot, RunpodPodSpec
+from cineforge.runpod_transport import CloudResponse
 from cineforge.s2v_profile import IMAGE, L40S_GPU_ID
-from cineforge.s2v_service import S2VBudgetApproval, S2VServiceContext
+from cineforge.s2v_service import S2VBudgetApproval, S2VServiceContext, prepare_service_journal
 from cineforge.ssh_worker import SSHWorker, WorkerError
+from cineforge.workflows import canonical, strict_object
 
 
 def creative(root):
@@ -163,9 +167,63 @@ class CoreTests(unittest.TestCase):
                 driver.attempt_cap(parent, remaining, 10)
 
 
+class AdmissionCatalog:
+    def request(self, method, path, body=None, *, timeout_seconds, max_bytes):
+        if method != "GET" or not path.startswith("/v2/catalog/gpus/"):
+            raise AssertionError("unexpected cloud request")
+        return CloudResponse(200, canonical(dict(id=L40S_GPU_ID, secure=True,
+            price={"secure": 0.89}, availability="HIGH", maxCount={"secure": 8},
+            dataCenters=[{"id": "EUR-IS-2", "availability": "LOW"}],
+            cudaVersions=[{"version": "13.2", "available": True}])))
+
+
+class AcquisitionAdmissionTests(unittest.TestCase):
+    def check_admission(self, lifetime_seconds, expected_reserve, aggregate_usd=5):
+        with tempfile.TemporaryDirectory() as tmp:
+            approval = S2VBudgetApproval.for_scope(str(Path(tmp).resolve() / "journal"),
+                "EUR-IS-2", EvidenceRef("private://synthetic/review", "a" * 64),
+                gpu_id=L40S_GPU_ID, lifetime_seconds=lifetime_seconds,
+                aggregate_usd=aggregate_usd)
+            service = S2VServiceContext(approval)
+            spec = RunpodPodSpec("a20test", IMAGE, L40S_GPU_ID, "EUR-IS-2", "ssh-ed25519 AAAA",
+                max_hourly_usd=1.25, disk_gb=150, min_ram_per_gpu_gb=64)
+            derived = driver.acquisition_max_cost_usd(spec, approval)
+            self.assertEqual(derived, min(expected_reserve, aggregate_usd))
+            self.assertLessEqual(derived, approval.aggregate_usd)
+            prepare_service_journal(service)
+            intent = AcquisitionIntent("acquisition", spec, "a" * 32,
+                "cineforge-a20test-admission", service.model, derived,
+                approval.lifetime_seconds, 120, 10)
+            with CloudBudgetSession(approval.journal_directory, approval, AdmissionCatalog(),
+                                    guard_deployment_configured=True) as session:
+                session.event_sink(intent, LeaseSnapshot(intent.key, "reserved"))
+                if expected_reserve > aggregate_usd:
+                    self.assertLess(derived, expected_reserve)
+                    with self.assertRaisesRegex(CloudBudgetError, "aggregate estimated budget"):
+                        session.before_create(intent)
+                else:
+                    self.assertGreaterEqual(derived, expected_reserve)
+                    session.before_create(intent)
+            # Reopen the journal to check durable authorization and reservation.
+            with CloudJournal(approval.journal_directory) as journal:
+                record = strict_object(journal.initial)["records"][intent.key]
+                self.assertEqual(record["authorized"], expected_reserve <= aggregate_usd)
+                self.assertEqual(record["reservation_usd"],
+                                 expected_reserve if expected_reserve <= aggregate_usd else None)
+
+    def test_7200_lifetime_admitted_with_254_reservation(self):
+        self.check_admission(7200, 2.54)
+
+    def test_1800_lifetime_preserves_exact_0635_reservation(self):
+        self.check_admission(1800, 0.635)
+
+    def test_7200_lifetime_over_aggregate_fails_closed(self):
+        self.check_admission(7200, 2.54, aggregate_usd=2)
+
+
 class Harness:
     """Replace effects, retain real driver flow, local freeze and durable run storage."""
-    def __init__(self, root, stack, failure=None, mutation=None):
+    def __init__(self, root, stack, failure=None, mutation=None, lifetime_seconds=1800):
         self.root, self.events, self.failure = root, [], failure
         self.inputs = creative(root / "data")
         code = root / "code"
@@ -209,7 +267,8 @@ class Harness:
         self.adapter = Mock()
         self.adapter.synthesize.side_effect = self.synthesize
         approval = S2VBudgetApproval.for_scope(str(root / "budget"), "EUR-IS-2",
-            EvidenceRef("private://synthetic/review", "a" * 64), gpu_id=L40S_GPU_ID)
+            EvidenceRef("private://synthetic/review", "a" * 64), gpu_id=L40S_GPU_ID,
+            lifetime_seconds=lifetime_seconds)
         service = S2VServiceContext(approval)
         spec = RunpodPodSpec("a20test", IMAGE, L40S_GPU_ID, "EUR-IS-2", "ssh-ed25519 AAAA",
             max_hourly_usd=1.25, disk_gb=150, min_ram_per_gpu_gb=64)
@@ -288,6 +347,7 @@ class DriverTests(unittest.TestCase):
                 "prepare", "pair", "s2v-en", "speech-zh", "checkpoint-ZH", "pair", "s2v-zh",
                 "stem", "stem", "stem", "mix", "mux", "stem", "stem", "stem", "mix", "mux",
                 "release", "worker-close"]
+            self.assertEqual(h.provisioner.acquire.call_args.kwargs["max_cost_usd"], 0.635)
             self.assertEqual(h.events, expected)
             self.assertEqual(result["outcome"], "pending_human_review")
             self.assertTrue(result["release_verified"])
@@ -308,6 +368,12 @@ class DriverTests(unittest.TestCase):
             h.budget.snapshot_for.assert_not_called()
             self.assertEqual(h.patches["RunpodPodProvisioner"].call_args.kwargs["lease_seconds"], 1800)
             self.assertNotIn("cleanup_timeout_seconds", h.patches["RunpodPodProvisioner"].call_args.kwargs)
+
+    def test_7200_lifetime_passes_derived_acquisition_cap(self):
+        with tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
+            h = Harness(Path(tmp).resolve(), stack, lifetime_seconds=7200)
+            h.run()
+            self.assertEqual(h.provisioner.acquire.call_args.kwargs["max_cost_usd"], 2.54)
 
     def test_retains_node_on_success_and_each_failure_boundary(self):
         failures = (None, "capabilities", "stage", "select", "design", "speech-en",
@@ -748,10 +814,14 @@ class CLITests(unittest.TestCase):
                           "human_review": "pending_human_review", "export_authority": "none"}
                 if retain:
                     report["retained_node"] = {"pod_id": "owned"}
-                stack.enter_context(patch.object(a20_cli.runpy, "run_path",
-                    return_value={"build_bindings": lambda creative, h=h: h.bindings}))
-                stack.enter_context(patch.object(a20_cli, "run_a20", return_value=report))
+                clock = stack.enter_context(patch.object(a20_cli.time, "monotonic", return_value=100))
+                def load_controller(*args, clock=clock, h=h, **kwargs):
+                    clock.return_value = 400  # Local review/import consumes the original cap.
+                    return {"build_bindings": lambda creative, h=h: h.bindings}
+                stack.enter_context(patch.object(a20_cli.runpy, "run_path", side_effect=load_controller))
+                run = stack.enter_context(patch.object(a20_cli, "run_a20", return_value=report))
                 self.assertEqual(a20_cli.command(args), report)
+                self.assertEqual(run.call_args.kwargs["absolute_deadline"], 7300)
 
     def test_help_missing_input_codes_and_no_private_diagnostics(self):
         help_result = subprocess.run([sys.executable, "-m", "cineforge", "a20-run", "--help"],

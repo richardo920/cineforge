@@ -43,7 +43,7 @@ from cineforge.worker_guard import worker_guard_source_sha256
 from cineforge.worker_profiles import require_s2v_hardware
 
 # Match the budget approval lifetime ceiling for an approved run.
-MAX_NATIVE_TIMEOUT_SECONDS = 1800
+MAX_NATIVE_TIMEOUT_SECONDS = 7200
 
 
 @dataclass(frozen=True, slots=True)

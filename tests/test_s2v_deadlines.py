@@ -14,11 +14,24 @@ import test_ssh_tunnel as tunnel_fixtures
 from test_s2v import context
 from test_s2v_profile import png
 
+from cineforge.cloud_budget import CloudBudgetError
 from cineforge.private_store import PrivateRunDirectory
+from cineforge.rights import EvidenceRef
 from cineforge.s2v import S2VError, select_s2v
-from cineforge.s2v_service import S2VServiceContext
+from cineforge.s2v_service import S2VBudgetApproval, S2VServiceContext
 from cineforge.ssh_worker import SSHWorker, WorkerError
 from cineforge.workflows import canonical
+
+
+class ApprovalLifetimeTests(unittest.TestCase):
+    def test_approved_lifetime_ceiling(self):
+        receipt = EvidenceRef("private://synthetic/approval", "a" * 64)
+        approval = S2VBudgetApproval.for_scope("/tmp/synthetic-budget", "EU-RO-1", receipt,
+                                               lifetime_seconds=7200)
+        self.assertEqual(approval.lifetime_seconds, 7200)
+        with self.assertRaises(CloudBudgetError):
+            S2VBudgetApproval.for_scope("/tmp/synthetic-budget", "EU-RO-1", receipt,
+                                       lifetime_seconds=7201)
 
 
 class PairedDeadlineTests(unittest.TestCase):
