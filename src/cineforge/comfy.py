@@ -26,6 +26,7 @@ from cineforge.comfy_transport import (
     request_capped,
     request_deadline,
     require_time,
+    reraised_marker,
 )
 from cineforge.contracts import Artifact, RunStatus, ShotRun
 from cineforge.providers import (
@@ -158,11 +159,11 @@ class ComfyExecutionProvider:
         except (OSError, TimeoutError, TransportError) as error:
             failed = True
             if isinstance(error, (VerifyCurrentError, PrecisionPostError)):
-                marker = type(error)
+                marker = reraised_marker(error)
         if self._clock() >= deadline:
             raise JobDeadlineError("ComfyUI client deadline exceeded; cancel the job explicitly")
         if marker is not None:
-            raise marker() from None
+            raise marker from None
         if failed:
             raise TransportError("ComfyUI connection or timeout failure")
         if not isinstance(raw, bytes) or len(raw) > max_bytes:
@@ -200,7 +201,7 @@ class ComfyExecutionProvider:
                     raise ValueError
             except (ProviderError, ValueError, TypeError, AttributeError) as error:
                 if isinstance(error, (VerifyCurrentError, PrecisionPostError)):
-                    failure = type(error)()
+                    failure = reraised_marker(error)
                 elif isinstance(error, JobDeadlineError):
                     failure = JobDeadlineError("ComfyUI client deadline exceeded; cancel the job explicitly")
                 elif isinstance(error, TransportError):

@@ -1165,26 +1165,34 @@ class SupervisedComfyTransport:
                 absolute_deadline: float | None = None,
                 clock: Callable[[], float] | None = None) -> bytes:
         clock = time.monotonic if clock is None else clock
-        deadline = request_deadline(timeout_seconds, absolute_deadline, clock)
         self.worker.check()
         if (type(self.worker.selection) is S2VServiceContext
                 and method == "POST" and path == "/prompt"):
+            verify_deadline = request_deadline(120, absolute_deadline, clock)
             failed = False
+            stage = "worker"
             try:
-                self.worker.verify_comfy_current(absolute_deadline=deadline)
+                self.worker.verify_comfy_current(absolute_deadline=verify_deadline)
             except Exception:
                 failed = True
+                try:
+                    now = clock()
+                    if type(now) in (int, float) and math.isfinite(now) and now >= verify_deadline:
+                        stage = "deadline"
+                except Exception:
+                    pass
             if failed:
-                raise VerifyCurrentError() from None
+                raise VerifyCurrentError(verify_stage=stage) from None
             if self.worker._closed_comfy is None:
                 raise AssertionError
             failed = False
             try:
-                self.worker._closed_comfy.require_precision_post(self.worker, body, deadline=deadline)
+                self.worker._closed_comfy.require_precision_post(self.worker, body, deadline=verify_deadline)
             except Exception:
                 failed = True
             if failed:
                 raise PrecisionPostError() from None
+        deadline = request_deadline(timeout_seconds, absolute_deadline, clock)
         reserve = 120 if type(self.worker.selection) is S2VServiceContext else 0
         remaining = min(require_time(deadline, clock),
                         self.worker.budget.remaining_seconds(self.worker._key) - reserve)

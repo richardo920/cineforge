@@ -23,7 +23,9 @@ class TransportError(ProviderError):
 class VerifyCurrentError(TransportError):
     """Current worker verification failed before POST."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, verify_stage: str | None = None) -> None:
+        self.verify_stage = (verify_stage if type(verify_stage) is str
+                             and verify_stage in ("deadline", "worker") else None)
         super().__init__("ComfyUI current verification failed before submission")
 
 
@@ -32,6 +34,14 @@ class PrecisionPostError(TransportError):
 
     def __init__(self) -> None:
         super().__init__("ComfyUI precision admission failed before submission")
+
+
+def reraised_marker(error: TransportError) -> TransportError:
+    if isinstance(error, VerifyCurrentError):
+        return VerifyCurrentError(verify_stage=error.verify_stage)
+    if isinstance(error, PrecisionPostError):
+        return PrecisionPostError()
+    return error
 
 
 def positive_seconds(value: object) -> float:
