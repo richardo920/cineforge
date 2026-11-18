@@ -1128,15 +1128,15 @@ class ComfyServerImageFilesTests(unittest.TestCase):
     def test_server_image_files_are_pinned_and_allowed(self):
         expected = {
             "/usr/lib/python3.11/lib-dynload/_sqlite3.cpython-311-x86_64-linux-gnu.so": (
-                127752, "ef4a5bac5f08a194fe4dbb860363018962c2249f1bcf84190c3934ebc32c973a"),
+                127752, "ef4a5bac5f08a194fe4dbb860363018962c2249f1bcf84190c3934ebc32c973a"),  # pragma: allowlist secret - public image file hash
             "/usr/lib/python3.11/lib-dynload/_zoneinfo.cpython-311-x86_64-linux-gnu.so": (
-                36400, "dd15c02efc5b7bc5183550731cc21fed89b647757edb1a503861b9bf844ceec4"),
+                36400, "dd15c02efc5b7bc5183550731cc21fed89b647757edb1a503861b9bf844ceec4"),  # pragma: allowlist secret - public image file hash
             "/usr/lib/python3.11/lib-dynload/resource.cpython-311-x86_64-linux-gnu.so": (
-                19392, "d849af91b617c9f0e967c2cdbc1bc99f066f6afdb357a0826df01be695530a1e"),
+                19392, "d849af91b617c9f0e967c2cdbc1bc99f066f6afdb357a0826df01be695530a1e"),  # pragma: allowlist secret - public image file hash
             "/usr/lib/x86_64-linux-gnu/libsqlite3.so.0.8.6": (
-                1468440, "eac351cf84d688d1f9235e6165bd57555b31a491cd2f65e0dca67daa69036370"),
+                1468440, "eac351cf84d688d1f9235e6165bd57555b31a491cd2f65e0dca67daa69036370"),  # pragma: allowlist secret - public image file hash
             "/usr/local/cuda-12.8/targets/x86_64-linux/lib/libcublasLt.so.12.8.4.1": (
-                751771728, "10b5e6631cf8115c661eb895ed1533826308b58f7956466f53d236a40c9b622c"),
+                751771728, "10b5e6631cf8115c661eb895ed1533826308b58f7956466f53d236a40c9b622c"),  # pragma: allowlist secret - public image file hash
         }
         self.assertEqual(worker.SERVER_IMAGE_FILES, expected)
         declaration = {
@@ -1170,7 +1170,7 @@ class ComfyServerImageFilesTests(unittest.TestCase):
                 {str(path): sha(body)},
             )
             allowed = {str(path): (
-                127752, "ef4a5bac5f08a194fe4dbb860363018962c2249f1bcf84190c3934ebc32c973a")}
+                127752, "ef4a5bac5f08a194fe4dbb860363018962c2249f1bcf84190c3934ebc32c973a")}  # pragma: allowlist secret - public image file hash
             with self.assertRaises(ValueError):
                 worker._verify_server_maps(allowed, raw_maps, time.monotonic() + 30)
 
