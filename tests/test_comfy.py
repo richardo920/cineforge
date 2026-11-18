@@ -13,6 +13,7 @@ from cineforge.comfy import (
     JobDeadlineError,
     JobStateUncertainError,
     SubmissionUncertainError,
+    TransportUncertainError,
 )
 from cineforge.comfy_transport import ComfyHTTPTransport, TransportError
 from cineforge.contracts import RunStatus, Shot
@@ -176,6 +177,15 @@ class ComfyProviderTests(unittest.TestCase):
                        self.provider.output_descriptor):
             with self.assertRaises(UnknownJobError):
                 method(OTHER)
+
+    def test_transport_submit_uncertainty_is_sanitized_subclass(self):
+        self.server.error = TransportError("private foreign text")
+        with self.assertRaises(TransportUncertainError) as caught:
+            self.submit()
+        self.assertIsInstance(caught.exception, SubmissionUncertainError)
+        self.assertIsNone(caught.exception.__context__)
+        self.assertIsNone(caught.exception.__cause__)
+        self.assertNotIn("private foreign text", str(caught.exception))
 
     def test_uncertain_submit_never_replays(self):
         for failure in (OSError("fake-credential-value"), TimeoutError("timeout"),

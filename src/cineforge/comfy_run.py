@@ -9,12 +9,20 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from cineforge.comfy import TERMINAL, ComfyExecutionProvider, JobDeadlineError
+from cineforge.comfy import (
+    TERMINAL,
+    ComfyExecutionProvider,
+    JobDeadlineError,
+    SubmissionUncertainError,
+    TransportUncertainError,
+)
 from cineforge.comfy_policy import ApprovedComfySelection, WorkerVerification
 from cineforge.comfy_transport import (
     ComfyHTTPTransport,
     ComfyTransport,
+    PrecisionPostError,
     TransportError,
+    VerifyCurrentError,
     positive_seconds,
     request_capped,
     request_deadline,
@@ -30,6 +38,36 @@ class ComfyRunError(ValueError):
     """Sanitized failure; a claimed run directory retains the last known job state."""
 
 
+class _VerifyNodesSchemaError(ComfyRunError):
+    """The worker schema differs from the reviewed graph."""
+
+
+class _VerifyNodesFileError(ComfyRunError):
+    """The worker does not expose an approved file."""
+
+
+def _failure_class(error: BaseException, phase: str, clock: Callable[[], float],
+                   inference_deadline: float, deadline: float) -> str:
+    if isinstance(error, VerifyCurrentError):
+        return "verify_current"
+    if isinstance(error, PrecisionPostError):
+        return "precision_post"
+    if isinstance(error, _VerifyNodesFileError):
+        return "verify_nodes_file"
+    if isinstance(error, _VerifyNodesSchemaError):
+        return "verify_nodes_schema"
+    if isinstance(error, JobDeadlineError):
+        return "deadline"
+    if isinstance(error, TransportUncertainError):
+        return "transport"
+    if isinstance(error, SubmissionUncertainError):
+        return "submit_uncertain"
+    if isinstance(error, TransportError):
+        cutoff = deadline if phase == "result" else inference_deadline
+        return "deadline" if clock() >= cutoff else "transport"
+    return "unknown"
+
+
 class _BoundedTransport:
     def __init__(self, transport: ComfyTransport, deadline: float,
                  clock: Callable[[], float]) -> None:
@@ -41,17 +79,22 @@ class _BoundedTransport:
         if remaining <= 0:
             raise JobDeadlineError("single-shot deadline exceeded")
         failed = False
+        marker = None
         raw = b""
         try:
             raw = request_capped(self.transport, method, path, body,
                 timeout_seconds=min(remaining, timeout_seconds), max_bytes=max_bytes,
                 absolute_deadline=self.deadline, clock=self.clock)
-        except Exception:
+        except Exception as error:
             failed = True
+            if isinstance(error, (VerifyCurrentError, PrecisionPostError)):
+                marker = type(error)
         # Raise outside the exception handler so neither traceback context nor cause
         # retains arbitrary transport/HTTP exception text containing credentials.
         if self.clock() >= self.deadline:
             raise JobDeadlineError("single-shot deadline exceeded")
+        if marker is not None:
+            raise marker() from None
         if failed:
             raise TransportError("ComfyUI transport request failed")
         return raw
@@ -67,23 +110,23 @@ def _verify_nodes(transport: ComfyTransport, selection: ApprovedComfySelection,
                                                   max_bytes=1024 * 1024))
         schema = response.get(kind)
         if not isinstance(schema, dict) or not isinstance(schema.get("input"), dict):
-            raise ComfyRunError("worker is missing a reviewed core node schema")
+            raise _VerifyNodesSchemaError("worker is missing a reviewed core node schema")
         if (not isinstance(schema.get("output"), list)
                 or not isinstance(schema["input"].get("required", {}), dict)
                 or not isinstance(schema["input"].get("optional", {}), dict)):
-            raise ComfyRunError("malformed core node schema")
+            raise _VerifyNodesSchemaError("malformed core node schema")
         schemas[kind] = schema
     for node in graph.values():
         schema = schemas[node["class_type"]]
         required, optional = (schema["input"].get(key, {}) for key in ("required", "optional"))
         inputs = node["inputs"]
         if not set(required) <= set(inputs) or not set(inputs) <= set(required) | set(optional):
-            raise ComfyRunError("worker node inputs differ from reviewed graph")
+            raise _VerifyNodesSchemaError("worker node inputs differ from reviewed graph")
         for field, value in inputs.items():
             if isinstance(value, list):
                 target = schemas[graph[value[0]]["class_type"]]
                 if value[1] >= len(target["output"]):
-                    raise ComfyRunError("worker node output slot is missing")
+                    raise _VerifyNodesSchemaError("worker node output slot is missing")
             from cineforge.s2v import S2VSelection
             paired_file = (type(selection) is S2VSelection and (
                 node["class_type"] == "LoadAudio" and field == "audio"
@@ -93,10 +136,10 @@ def _verify_nodes(transport: ComfyTransport, selection: ApprovedComfySelection,
                 spec = (required | optional)[field]
                 if (not isinstance(spec, list) or not spec or not isinstance(spec[0], list)
                         or value not in spec[0]):
-                    raise ComfyRunError("worker does not expose the approved model file")
+                    raise _VerifyNodesFileError("worker does not expose the approved model file")
     output = graph[selection.workflow.output_node]
     if schemas[output["class_type"]].get("output_node") is not True:
-        raise ComfyRunError("worker output node is not executable")
+        raise _VerifyNodesSchemaError("worker output node is not executable")
 
 
 @preserve_interruption
@@ -202,6 +245,7 @@ def execute_comfy(
     failed = False
     try:
         with PrivateRunDirectory(output_dir) as store:
+            phase = "verify_nodes"
             try:
                 # Persist intent before any request; never replay this directory on restart.
                 store.checkpoint(prepared_record)
@@ -209,9 +253,11 @@ def execute_comfy(
                 _verify_nodes(bounded, selection, request_timeout_seconds)
                 record["outcome"] = "submitting"
                 store.checkpoint(canonical(record))
+                phase = "submit"
                 run = provider.submit(request, key)
                 record.update(outcome="submitted", known_run=run.to_dict())
                 store.checkpoint(canonical(record))
+                phase = "poll"
                 while run.status not in TERMINAL:
                     run = provider.status(run.job_id)
                     record.update(outcome="awaiting_artifact" if run.status == RunStatus.SUCCEEDED
@@ -228,6 +274,7 @@ def execute_comfy(
                 # Only retrieval can use the reserved window; the original absolute
                 # cap still includes it and remains inside any caller's lease cutoff.
                 bounded.deadline = deadline
+                phase = "result"
                 result = provider.result(run.job_id)
                 require_time(deadline, clock)
                 artifact = store.put(result)
@@ -240,6 +287,9 @@ def execute_comfy(
             except (Exception, KeyboardInterrupt) as interruption_error:
                 remember_interruption(interruption_error)
                 failed = True
+                original_failure = interruption_error
+                record["failure_class"] = _failure_class(
+                    original_failure, phase, clock, inference_deadline, deadline)
                 # One bounded attempt, for this instance's confirmed job only. A missing
                 # acknowledgement/history never becomes a fabricated cancelled state.
                 if run is not None and run.status not in TERMINAL:

@@ -19,7 +19,9 @@ from urllib.parse import urlencode
 
 from cineforge.comfy_transport import (
     ComfyTransport,
+    PrecisionPostError,
     TransportError,
+    VerifyCurrentError,
     positive_seconds,
     request_capped,
     request_deadline,
@@ -66,6 +68,13 @@ def _history_graph_matches(submitted: object, observed: object) -> bool:
 
 class SubmissionUncertainError(ProviderError):
     """Submission may have reached the server; this key will never be submitted again."""
+
+
+class TransportUncertainError(SubmissionUncertainError):
+    """A transport failure left submission unconfirmed."""
+
+    def __init__(self) -> None:
+        super().__init__("transport submission not confirmed; key cannot replay")
 
 
 class JobStateUncertainError(ProviderError):
@@ -140,15 +149,20 @@ class ComfyExecutionProvider:
         if remaining <= 0:
             raise JobDeadlineError("ComfyUI client deadline exceeded; cancel the job explicitly")
         failed = False
+        marker = None
         raw = b""
         try:
             raw = request_capped(self._transport, method, path, body,
                 timeout_seconds=min(remaining, self._request_timeout), max_bytes=max_bytes,
                 absolute_deadline=deadline, clock=self._clock)
-        except (OSError, TimeoutError, TransportError):
+        except (OSError, TimeoutError, TransportError) as error:
             failed = True
+            if isinstance(error, (VerifyCurrentError, PrecisionPostError)):
+                marker = type(error)
         if self._clock() >= deadline:
             raise JobDeadlineError("ComfyUI client deadline exceeded; cancel the job explicitly")
+        if marker is not None:
+            raise marker() from None
         if failed:
             raise TransportError("ComfyUI connection or timeout failure")
         if not isinstance(raw, bytes) or len(raw) > max_bytes:
@@ -175,6 +189,7 @@ class ComfyExecutionProvider:
             # Reserve before I/O. ComfyUI does not provide server-side idempotency.
             self._keys[idempotency_key] = (snapshot, None)
             deadline = self._clock() + self._job_timeout if original_cap is None else original_cap
+            failure: ProviderError | None = None
             try:
                 response = strict_object(self._call("POST", "/prompt", {"prompt": graph},
                                                     deadline=deadline))
@@ -183,8 +198,17 @@ class ComfyExecutionProvider:
                         or identity in self._jobs or response.get("error")
                         or response.get("node_errors") not in ({}, None)):
                     raise ValueError
-            except (ProviderError, ValueError, TypeError, AttributeError):
-                raise SubmissionUncertainError("submission not confirmed; key cannot replay") from None
+            except (ProviderError, ValueError, TypeError, AttributeError) as error:
+                if isinstance(error, (VerifyCurrentError, PrecisionPostError)):
+                    failure = type(error)()
+                elif isinstance(error, JobDeadlineError):
+                    failure = JobDeadlineError("ComfyUI client deadline exceeded; cancel the job explicitly")
+                elif isinstance(error, TransportError):
+                    failure = TransportUncertainError()
+                else:
+                    failure = SubmissionUncertainError("submission not confirmed; key cannot replay")
+            if failure is not None:
+                raise failure from None
             run = ShotRun(shot_id=request.shot.shot_id, shot_revision=request.shot.revision,
                           attempt=request.attempt, provider_id=self.provider_id, job_id=identity,
                           idempotency_key=idempotency_key, status=RunStatus.QUEUED)

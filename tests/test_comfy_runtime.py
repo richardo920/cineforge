@@ -514,6 +514,16 @@ class ComfyControllerTests(unittest.TestCase):
         runtime = ClosedComfyRuntime(bridge, checked)
         return runtime, worker, selected, reviewer, state, bridge
 
+    def test_check_fact_accepts_bounded_optional_server_log(self):
+        runtime, service, selected, _, _, bridge = self.fixture()
+        runtime.prepare(service, selected, deadline=time.monotonic() + 30)
+        fact = bridge._call("native_comfy_setup")["comfy"]
+        runtime._check_fact(fact)
+        runtime._check_fact(dict(fact, server_log_tail="synthetic server output"))
+        for tail in (None, 123, b"bytes", "x" * (64 * 1024 + 257)):
+            with self.subTest(tail_type=type(tail)), self.assertRaises(ValueError):
+                runtime._check_fact(dict(fact, server_log_tail=tail))
+
     def test_closed_once_phases_preserve_current_rights_and_original_cap(self):
         runtime, worker, selected, reviewer, state, bridge = self.fixture()
         cap = time.monotonic() + 30
@@ -1303,7 +1313,7 @@ class ComfyServerDriverMapsTests(unittest.TestCase):
 
 
 class ComfyLaunchDeadlineTests(unittest.TestCase):
-    def exercise(self, delay, deadline=103.0):
+    def exercise(self, delay, deadline=103.0, check_log=False):
         from cineforge import worker_bootstrap
         from cineforge.worker_profiles import S2V_WORKER
 
@@ -1348,6 +1358,14 @@ class ComfyLaunchDeadlineTests(unittest.TestCase):
                 )
 
             def spawn(argv, **options):
+                if check_log:
+                    import subprocess
+
+                    self.assertNotEqual(options["stdout"], subprocess.DEVNULL)
+                    self.assertIs(options["stdout"], options["stderr"])
+                    self.assertEqual(options["stdout"].name, str(root / "comfy-server.log"))
+                    self.assertFalse(options["stdout"].closed)
+                    self.server_log_handle = options["stdout"]
                 spawned.append(
                     {
                         "at": now[0],
@@ -1389,6 +1407,10 @@ class ComfyLaunchDeadlineTests(unittest.TestCase):
             self.assertFalse((root / "server-pid.json").exists())
             return spawned
 
+    def test_spawn_captures_server_log_and_closes_parent_on_failure(self):
+        self.assertEqual(len(self.exercise(None, check_log=True)), 1)
+        self.assertTrue(self.server_log_handle.closed)
+
     def test_probe_allows_120_seconds_when_deadline_is_far_away(self):
         self.assertEqual(self.exercise(None, deadline=300.0)[0]["cap"], 300.0)
 
@@ -1415,3 +1437,25 @@ class ComfyLaunchDeadlineTests(unittest.TestCase):
         for delay in ("probe-return", "launch-command-return"):
             with self.subTest(delay=delay):
                 self.assertEqual(self.exercise(delay), [])
+
+
+class ComfyServerLogTailTests(unittest.TestCase):
+    def test_small_and_missing_server_log(self):
+        with tempfile.TemporaryDirectory(prefix="cf-comfy-log-") as temporary:
+            root = Path(temporary)
+            self.assertIsNone(worker._server_log_tail(root))
+            (root / worker.COMFY_SERVER_LOG_FILENAME).write_bytes(b"complete log\n")
+            self.assertEqual(worker._server_log_tail(root), "complete log\n")
+
+    def test_large_server_log_is_bounded_truncated_and_utf8_replaced(self):
+        with tempfile.TemporaryDirectory(prefix="cf-comfy-log-") as temporary:
+            root = Path(temporary)
+            (root / worker.COMFY_SERVER_LOG_FILENAME).write_bytes(b"x" * 100000 + b"\xff")
+            tail = worker._server_log_tail(root)
+            self.assertTrue(tail.startswith(worker.COMFY_SERVER_LOG_TRUNCATION))
+            self.assertLessEqual(len(tail), 64 * 1024 + len(worker.COMFY_SERVER_LOG_TRUNCATION))
+            self.assertTrue(tail.endswith("\ufffd"))
+
+    def test_unreadable_server_log_is_optional(self):
+        with patch.object(Path, "open", side_effect=OSError("private foreign text")):
+            self.assertIsNone(worker._server_log_tail(Path("/fixture")))
