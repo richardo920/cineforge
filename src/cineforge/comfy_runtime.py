@@ -12,6 +12,7 @@ from cineforge.comfy_precision import POLICY, precision_receipt, precision_reque
 from cineforge.comfy_runtime_plan import comfy_plan, comfy_subject, comfy_worker
 from cineforge.interruptions import preserve_interruption, remember_interruption
 from cineforge.native_remote_plan import NR_BLOB_MAX, nr_digest, nr_encode, nr_hash, nr_json
+from cineforge.s2v_service import LongSessionServiceContext
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,7 +162,8 @@ class ClosedComfyRuntime:
         self._attempted = True
         if self._bridge._deadline is None or self._bridge._expires_unix is None:
             raise AssertionError
-        self._bridge._deadline = min(deadline, self._bridge._deadline)
+        if type(worker.selection) is not LongSessionServiceContext:
+            self._bridge._deadline = min(deadline, self._bridge._deadline)
         self._expires_unix = min(self._bridge._expires_unix,
                                 time.time() + self._bridge._deadline - time.monotonic())
         try:
@@ -238,14 +240,17 @@ class ClosedComfyRuntime:
         from cineforge.native_remote_plan import nr_digest
         from cineforge.private_store import read_private_input
         from cineforge.workflows import strict_object
-        if not self._prepared or self._precision is not None or len(self._precision_used) >= 2:
+        long_session = type(worker.selection) is LongSessionServiceContext
+        limit = self._bridge._max_operations - 1 if long_session else 2
+        if not self._prepared or self._precision is not None or len(self._precision_used) >= limit:
             raise ValueError("current precision intent unavailable or consumed")
         plan = self._admit(worker, deadline)
         worker._require_s2v(selection)
         language = selection.gate.utterance.language
-        if language not in ("en", "zh") or language in self._precision_used:
+        use = selection.approved_subject_sha256 if long_session else language
+        if language not in ("en", "zh") or use in self._precision_used:
             raise ValueError("language precision intent already consumed")
-        self._precision_used.add(language)
+        self._precision_used.add(use)
         nonce = uuid.uuid4().hex
         package, _ = native_package()
         if self._bridge._binding is None:

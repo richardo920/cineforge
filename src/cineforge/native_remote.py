@@ -36,7 +36,7 @@ from cineforge.native_speech_pcm import pcm_wav
 from cineforge.native_speech_pins import BASE_FILES, DESIGN_FILES, SDK_FILES
 from cineforge.native_speech_process import pack, unpack
 from cineforge.s2v import NativeSpeechProof
-from cineforge.s2v_service import S2VServiceContext
+from cineforge.s2v_service import LongSessionServiceContext, S2VServiceContext, is_speech_service
 from cineforge.speech import QwenBaseRequest, SpeechArtifact
 from cineforge.ssh_worker import SSHWorker
 from cineforge.worker_guard import worker_guard_source_sha256
@@ -82,16 +82,19 @@ class RemoteNativeSpeechRuntime:
         *,
         allow_native: bool = False,
         timeout_seconds: float = 1200,
+        max_operations: int = 3,
         seed: int = 0,
         absolute_deadline: float | None = None,
     ) -> None:
         if (
             type(worker) is not SSHWorker
-            or type(worker.selection) is not S2VServiceContext
+            or not is_speech_service(worker.selection)
             or allow_native is not True
             or type(timeout_seconds) not in (int, float)
             or not math.isfinite(timeout_seconds)
-            or not 3 <= timeout_seconds <= MAX_NATIVE_TIMEOUT_SECONDS
+            or not 3 <= timeout_seconds <= (50400 if type(worker.selection) is LongSessionServiceContext else MAX_NATIVE_TIMEOUT_SECONDS)
+            or type(max_operations) is not int or not 1 <= max_operations <= 10001
+            or (type(worker.selection) is S2VServiceContext and max_operations != 3)
             or type(seed) is not int
             or not 0 <= seed < 2**32
         ):
@@ -117,6 +120,10 @@ class RemoteNativeSpeechRuntime:
         self._capabilities_sha256: str | None = None
         self._capabilities_payload: bytes | None = None
         self._unresolved = False
+        self._max_operations = max_operations
+        self._long_session = type(worker.selection) is LongSessionServiceContext
+        if self._long_session:
+            worker._s2v_pair_limit = max_operations - 1
         self._attempts = 0
         self._used: set[str] = set()
         self._proofs: dict[tuple[str, str, str], RemoteNativeProof] = {}
@@ -140,6 +147,8 @@ class RemoteNativeSpeechRuntime:
                 cap = min(cap, controller_deadline)
             if time.monotonic() >= cap:
                 raise ValueError
+            if type(worker.selection) is LongSessionServiceContext:
+                fields["native_operation_limit"] = self._max_operations
             result = worker.native_request(
                 dict(
                     fields,
@@ -166,7 +175,7 @@ class RemoteNativeSpeechRuntime:
         if self._unresolved or self._deadline is None or self._binding is None:
             raise NativeSpeechError("remote native work is unavailable or unresolved")
         worker = self._worker
-        if not isinstance(worker.selection, S2VServiceContext):
+        if not isinstance(worker.selection, (S2VServiceContext, LongSessionServiceContext)):
             raise AssertionError
         plan = worker.plan
         if (
@@ -196,13 +205,15 @@ class RemoteNativeSpeechRuntime:
         self._deadline = min(started_deadline,
             time.monotonic() + worker.budget.remaining_seconds(worker._key) - 120)
         self._expires_unix = time.time() + self._deadline - time.monotonic()
-        if not isinstance(worker.selection, S2VServiceContext):
+        if not isinstance(worker.selection, (S2VServiceContext, LongSessionServiceContext)):
             raise AssertionError
         self._binding = {"worker": plan.pod_id, "session": plan.session_id,
             "scope": worker.selection.approval.subject_sha256,
             "guard": worker_guard_source_sha256(), "package": hashlib.sha256(package).hexdigest(),
             "source": hashlib.sha256(worker._source).hexdigest(),
             "phase_expires_unix": self._expires_unix}
+        if self._long_session:
+            self._binding["operation_limit"] = self._max_operations
 
     @preserve_interruption
     def measure_capabilities(self, *, absolute_deadline: float | None = None) -> dict[str, Any]:
@@ -441,7 +452,7 @@ class RemoteNativeSpeechRuntime:
             raise NativeSpeechError("separately reviewed installed native selection required")
         service = self._worker.selection
         try:
-            if type(service) is not S2VServiceContext:
+            if not is_speech_service(service):
                 raise ValueError
             require_s2v_hardware(service.worker_profile["id"], selection.hardware.gpu_name,
                                  selection.hardware.memory_mib, selection.hardware.capability)
@@ -502,11 +513,13 @@ class RemoteNativeSpeechRuntime:
             self._selection is None
             or self._binding is None
             or self._recipe is None
-            or self._attempts >= 3
+            or self._attempts >= self._max_operations
         ):
             raise NativeSpeechError("remote native runtime unavailable or capacity exhausted")
         operation = "base" if type(request) is QwenBaseRequest else "design"
         use = "design" if operation == "design" else "base-" + request.language
+        if self._long_session and operation == "base":
+            use += "-" + str(self._attempts)
         if use in self._used:
             raise NativeSpeechError("reviewed native operation already consumed")
         self._used.add(use)
@@ -641,10 +654,10 @@ class RemoteNativeSpeechRuntime:
         return nr_json(self.proof_for(request, payload)._receipt)
 
     def verify_speech(
-        self, speech: SpeechArtifact, service: S2VServiceContext
+        self, speech: SpeechArtifact, service: S2VServiceContext | LongSessionServiceContext
     ) -> NativeSpeechProof:
         """Trusted S2V callback; actual bytes only, separate from fresh S2V work gates."""
-        if type(speech) is not SpeechArtifact or type(service) is not S2VServiceContext:
+        if type(speech) is not SpeechArtifact or not is_speech_service(service):
             raise NativeSpeechError("typed S2V speech and service required")
         service.preflight()
         proof = self.proof_for(speech.request, speech.payload)

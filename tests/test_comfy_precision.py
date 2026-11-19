@@ -620,6 +620,19 @@ class PrecisionWorkerProtocolTests(unittest.TestCase):
                 self.finish()
         self.assertFalse((self.f.directory / (self.base["precision_nonce"] + ".finished")).exists())
 
+    def test_long_session_supports_five_sequential_intents_and_bounds_sixth(self):
+        self.binding["operation_limit"] = 6
+        self.f.expected["binding_sha256"] = nr_digest(self.binding)
+        self.f.guard.max_requests = 5
+        for _ in range(5):
+            self.base["precision_nonce"] = uuid.uuid4().hex
+            self.f.ctx.prompt_id = str(uuid.uuid4())
+            self.generate()
+            self.finish()
+        self.base["precision_nonce"] = uuid.uuid4().hex
+        with self.assertRaisesRegex(ValueError, "exhausted"):
+            self.begin()
+
     def test_other_active_request_and_more_than_two_are_refused(self):
         self.begin()
         self.base["precision_nonce"] = uuid.uuid4().hex

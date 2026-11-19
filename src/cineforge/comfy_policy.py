@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from cineforge.s2v_service import S2VServiceContext
+    from cineforge.s2v_service import LongSessionServiceContext, S2VServiceContext
 from urllib.parse import urlsplit
 
 from cineforge.comfy import SUPPORTED_SERVER_REVISION
@@ -236,7 +236,7 @@ class WorkerVerification:
     def record(self) -> dict[str, Any]:
         return strict_object(self.record_json)
 
-    def require_matches(self, selection: ApprovedComfySelection | S2VServiceContext) -> None:
+    def require_matches(self, selection: ApprovedComfySelection | S2VServiceContext | LongSessionServiceContext) -> None:
         failed = False
         try:
             data, declarations = self.record, selection.declarations

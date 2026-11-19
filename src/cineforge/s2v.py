@@ -24,7 +24,7 @@ from cineforge.paired_media import PNG_MAX_BYTES, image_metadata, speech_metadat
 from cineforge.private_store import read_private_input
 from cineforge.providers import ExecutionRequest
 from cineforge.rights import EvidenceRef, RightsLedger, RightsRef, SubjectRef, Use
-from cineforge.s2v_service import S2VServiceContext
+from cineforge.s2v_service import LongSessionServiceContext, S2VServiceContext
 from cineforge.skills import CatalogEntry, ShotSkills, SkillCatalog
 from cineforge.speech import QwenBaseRequest, SpeechArtifact
 from cineforge.workflows import InputBinding, WorkflowTemplate, canonical, strict_object
@@ -132,7 +132,7 @@ class NativeSpeechProof:
 
 
 ActorVerifier = Callable[[CharacterPin, ReferenceArtifact, bytes, ActorDescriptor], ActorReviewProof]
-SpeechVerifier = Callable[[SpeechArtifact, S2VServiceContext], NativeSpeechProof]
+SpeechVerifier = Callable[[SpeechArtifact, S2VServiceContext | LongSessionServiceContext], NativeSpeechProof]
 SubjectVerifier = Callable[[dict[str, Any]], object]
 
 
@@ -177,7 +177,7 @@ class StagedS2VPair:
 
 @dataclass(frozen=True)
 class VerifiedS2V:
-    service: S2VServiceContext = field(repr=False)
+    service: S2VServiceContext | LongSessionServiceContext = field(repr=False)
     sheet: CueSheet = field(repr=False)
     plan: ProjectPlan = field(repr=False)
     current_picture: RevisionPin
@@ -230,7 +230,7 @@ class VerifiedS2V:
 
     def _current(self) -> dict[str, Any]:
         """Pure current admission; never calls operator/proof code."""
-        for value, kind in ((self.service, S2VServiceContext), (self.sheet, CueSheet),
+        for value, kind in ((self.sheet, CueSheet),
                 (self.plan, ProjectPlan), (self.actor, PrivateActorReference),
                 (self.speech, SpeechArtifact), (self.registry, CharacterRegistry),
                 (self.ledger, RightsLedger), (self.catalog, SkillCatalog),
@@ -238,6 +238,8 @@ class VerifiedS2V:
             if type(value) is not kind:
                 raise ValueError
         if type(self.attempt) is not S2VAttempt:
+            raise ValueError
+        if type(self.service) not in (S2VServiceContext, LongSessionServiceContext):
             raise ValueError
         self.service.preflight()
         ActorDescriptor.__post_init__(self.descriptor)

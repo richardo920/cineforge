@@ -18,7 +18,7 @@ from cineforge.audio import CueSheet, RevisionPin
 from cineforge.audio_analysis import FFmpegTool, ToolIdentity
 from cineforge.audio_mix import DeliveryPreset, MixSettings, mix_scene
 from cineforge.characters import CharacterRegistry
-from cineforge.cloud_budget import CloudBudgetSession
+from cineforge.cloud_budget import BudgetApproval, CloudBudgetSession
 from cineforge.comfy_runtime import CheckedComfyRuntime, ClosedComfyRuntime
 from cineforge.contracts import ProjectPlan
 from cineforge.interruptions import preserve_interruption, remember_interruption
@@ -31,7 +31,7 @@ from cineforge.runpod import RunpodPodProvisioner, RunpodPodSpec
 from cineforge.runpod_transport import CloudTransport
 from cineforge.s2v import VerifiedS2V, select_s2v
 from cineforge.s2v_run import ATTEMPT_CAP_SECONDS, run_s2v
-from cineforge.s2v_service import S2VBudgetApproval, S2VServiceContext, prepare_service_journal
+from cineforge.s2v_service import S2VServiceContext, prepare_service_journal
 from cineforge.speech import (
     CanonicalVoiceBinding,
     QwenBaseSpeechAdapter,
@@ -140,7 +140,7 @@ class CoreProbe:
         return result
 
 
-def acquisition_max_cost_usd(spec: RunpodPodSpec, approval: S2VBudgetApproval) -> float:
+def acquisition_max_cost_usd(spec: RunpodPodSpec, approval: BudgetApproval) -> float:
     # Mirror before_create's micro-dollar reserve; the aggregate cap fails closed
     # when the full lease reservation would exceed the approved aggregate.
     reserve = math.ceil((spec.max_hourly_usd + .02)

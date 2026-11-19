@@ -390,7 +390,11 @@ def setup_comfy(request: dict[str, Any], native: Path, deadline: float) -> dict[
         "gpu": {"name": selection["hardware"]["gpu"], "backend": "cuda",
                 "memory_mib": runtime["gpu_memory_mib"]},
         "model_files": files, "custom_nodes_disabled": True}
-    command, environment = launch_command(plan, root, native, "server", deadline)
+    # Setup RPCs stay bounded; the owned server uses the immutable session cap.
+    server_deadline = deadline
+    if "native_operation_limit" in request:
+        server_deadline = nr_json(nr_read(native / "comfy-local-cap.json"))["deadline"]
+    command, environment = launch_command(plan, root, native, "server", server_deadline)
     if (root / "server-pid.json").exists() or (root / "comfy-jit-startup.json").exists():
         raise ValueError("closed Comfy production state was preexisting")
     import subprocess
