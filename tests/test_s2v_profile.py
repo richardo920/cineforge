@@ -4,6 +4,7 @@ import struct
 import traceback
 import unittest
 import zlib
+from copy import deepcopy
 from dataclasses import replace
 
 from test_speech import wav_bytes
@@ -12,6 +13,7 @@ from cineforge import s2v_profile as profile
 from cineforge.cloud_budget import BudgetApproval, CloudBudgetError
 from cineforge.comfy_policy import CORE_CLASSES
 from cineforge.devices import Precision
+from cineforge.native_remote_plan import nr_digest
 from cineforge.paired_media import PairedMediaError, image_metadata, speech_metadata
 from cineforge.rights import EvidenceRef
 from cineforge.s2v_service import S2VBudgetApproval, S2VServiceContext
@@ -28,6 +30,34 @@ def png(width=1651, height=953, *, color=2, compressed=True, ancillary=b""):
 
 
 class S2VRecipeTests(unittest.TestCase):
+    def test_float_typed_inputs_are_json_floats(self):
+        graph = profile.graph("a" * 64, "b" * 64, "en")
+        for node, field in (("152", "cfg"), ("154", "shift"), ("152", "denoise"),
+                            ("168", "crf"), ("168", "fps")):
+            with self.subTest(node=node, field=field):
+                self.assertIs(type(graph[node]["inputs"][field]), float)
+        for field in ("seed", "steps"):
+            with self.subTest(field=field):
+                self.assertIs(type(graph["152"]["inputs"][field]), int)
+
+    def test_precision_digest_survives_comfy_float_cast(self):
+        graph = profile.graph("a" * 64, "b" * 64, "en")
+        self.assertEqual(len(graph), 14)
+        self.assertEqual(graph["161"]["class_type"], "CineforgeBF16UNETLoader")
+        expected = nr_digest(graph)
+        cast = deepcopy(graph)
+        # FLOAT inputs in the production schemas; validation casts integer literals.
+        for node, field in (("152", "cfg"), ("154", "shift"), ("152", "denoise"),
+                            ("168", "crf"), ("168", "fps")):
+            value = cast[node]["inputs"][field]
+            if type(value) is int:
+                cast[node]["inputs"][field] = float(value)
+        for node in ("160", "161", "162"):
+            cast[node]["is_changed"] = ["dummy"]
+        projected = {k: {f: n[f] for f in ("class_type", "inputs")}
+                     for k, n in cast.items()}
+        self.assertEqual(nr_digest(projected), expected)
+
     def test_closed_candidate_four_assets_and_storage_compute_distinction(self):
         self.assertEqual(hashlib.sha256(profile._CANDIDATE.encode()).hexdigest(),
                          profile.CANDIDATE_SHA256)
