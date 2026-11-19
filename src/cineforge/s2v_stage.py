@@ -134,8 +134,19 @@ def paired_transfer(request: dict[str, Any], root: Path) -> dict[str, Any]:
         record_name = "s2v-" + pair + ".json"
         fd, root_fd = _input_directory(root), os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         operation = request["operation"]
+        limit = request.get("pair_limit", MAX_PAIRS)
+        if type(limit) is not int or not 1 <= limit <= 10000:
+            raise ValueError
+        try:
+            saved = _pair_json(_read_at(root_fd, "s2v-pair-limit.json", 1024))
+        except FileNotFoundError:
+            saved = {"limit": limit}
+            if "pair_limit" in request:
+                private_write(root, "s2v-pair-limit.json", encode(saved))
+        if saved != {"limit": limit}:
+            raise ValueError
         if operation == "s2v_pair_begin":
-            if len(tuple(root.glob("s2v-" + "[0-9a-f]" * 64 + ".json"))) >= MAX_PAIRS:
+            if len(tuple(root.glob("s2v-" + "[0-9a-f]" * 64 + ".json"))) >= limit:
                 raise ValueError
             state: dict[str, Any] = {"scope_sha256": scope, "subject_sha256": subject,
                 "stage_id": stage_id, "media": media, "status": "receiving", "items": {}}

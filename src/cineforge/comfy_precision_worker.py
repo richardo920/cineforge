@@ -30,7 +30,8 @@ def precision_operation(request: dict[str, Any], native: Path, deadline: float,
             native / "firstparty/cineforge/comfy_model_precision.py")).hexdigest())
     if request["operation"] == "native_comfy_precision_begin":
         entries = list(directory.glob("*.request.json"))
-        if len(entries) >= 2 or any(not p.with_name(p.name[:-13] + ".finished").exists()
+        limit = binding["operation_limit"] - 1 if "operation_limit" in binding else 2
+        if len(entries) >= limit or any(not p.with_name(p.name[:-13] + ".finished").exists()
                                     for p in entries):
             raise ValueError("precision request already active or exhausted")
         value = precision_request(dict(request["precision_binding"], nonce=nonce,

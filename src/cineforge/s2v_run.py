@@ -21,7 +21,7 @@ from cineforge.contracts import RunManifest
 from cineforge.interruptions import preserve_interruption, remember_interruption
 from cineforge.private_store import PrivateRunDirectory, read_private_input
 from cineforge.s2v import S2VError, S2VSelection
-from cineforge.s2v_service import S2VServiceContext
+from cineforge.s2v_service import is_speech_service
 from cineforge.ssh_worker import SSHWorker, run_process
 from cineforge.worker_bootstrap import validate_s2v_runtime
 from cineforge.workflows import canonical, strict_object
@@ -179,7 +179,7 @@ def _admit(selection: S2VSelection, verification: WorkerVerification, driver: SS
            deadline: float, clock: Callable[[], float]) -> None:
     _window(driver, deadline, clock)
     if (type(selection) is not S2VSelection or type(verification) is not WorkerVerification
-            or type(driver.selection) is not S2VServiceContext
+            or not is_speech_service(driver.selection)
             or driver.selection != selection.gate.service or driver.plan is None
             or driver.s2v_verification != verification
             or driver.plan.pod_id != verification.record["worker_id"]

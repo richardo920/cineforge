@@ -516,6 +516,20 @@ class ComfyControllerTests(unittest.TestCase):
         runtime = ClosedComfyRuntime(bridge, checked)
         return runtime, worker, selected, reviewer, state, bridge
 
+    def test_long_prepare_keeps_phase_cap_separate_from_setup_rpc(self):
+        from test_speech import EVIDENCE
+
+        from cineforge.s2v_service import LongSessionBudgetApproval, LongSessionServiceContext
+        runtime, worker, selected, reviewer, state, bridge = self.fixture()
+        worker.selection = LongSessionServiceContext(LongSessionBudgetApproval.for_scope(
+            "/private/tmp/synthetic-long-prepare", "EU-RO-1", EVIDENCE, phase_id="test"))
+        bridge._deadline = time.monotonic() + 50000
+        bridge._expires_unix = time.time() + 50000
+        original = bridge._deadline
+        runtime.prepare(worker, selected, deadline=time.monotonic() + 7200)
+        self.assertEqual(bridge._deadline, original)
+        self.assertGreater(runtime._expires_unix, time.time() + 49000)
+
     def test_closed_once_phases_preserve_current_rights_and_original_cap(self):
         runtime, worker, selected, reviewer, state, bridge = self.fixture()
         cap = time.monotonic() + 30

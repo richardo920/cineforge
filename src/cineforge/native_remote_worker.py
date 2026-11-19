@@ -402,6 +402,8 @@ def remote_operation(
             if not isinstance(typed, QwenBaseRequest):
                 raise AssertionError
             use = {"English": "base-en", "Chinese": "base-zh"}[typed.language]
+            if "operation_limit" in binding:
+                use += "-" + token
             nr_write(root / ("used-" + use), b"consumed before child launch")
             payload = runtime.synthesize(typed, inspect_pcm16_wav(reference))
         elif header["operation"] == "design" and not reference:

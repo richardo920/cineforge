@@ -32,10 +32,10 @@ from cineforge.native_remote_plan import nr_digest, nr_encode, nr_json
 
 _INSTALLED: tuple[Any, dict[str, Any]] | None = None
 
-def active_request(root: Path, deadline: float) -> dict[str, Any]:
+def active_request(root: Path, deadline: float, max_requests: int = 2) -> dict[str, Any]:
     nr_check(deadline)
     files = sorted((root / "comfy-precision").glob("*.request.json"))
-    if not 1 <= len(files) <= 2:
+    if type(max_requests) is not int or not 1 <= max_requests <= 10000 or not 1 <= len(files) <= max_requests:
         raise ValueError("one owned current precision request required")
     active = [p for p in files if not p.with_name(p.name[:-13] + ".finished").exists()]
     if len(active) != 1:
@@ -51,7 +51,8 @@ class ModelGuard:
     """Process-local instance state; persisted receipts never restore this authority."""
     def __init__(self, root: Path, deadline: float, torch: Any, ops: Any,
                  callbacks: Any, wrappers: Any, expected: dict[str, Any], context: Any, backend_check: Callable[[], None],
-                 module_check: Callable[[Any], None]) -> None:
+                 module_check: Callable[[Any], None], max_requests: int = 2) -> None:
+        self.max_requests = max_requests
         self.root, self.deadline, self.torch, self.ops = root, deadline, torch, ops
         self.callbacks, self.wrappers, self.expected = callbacks, wrappers, expected
         self.context = context
@@ -84,7 +85,7 @@ class ModelGuard:
 
     def _current(self) -> dict[str, Any]:
         self._time()
-        request = active_request(self.root, self.deadline)
+        request = active_request(self.root, self.deadline, self.max_requests)
         if any(request[key] != value for key, value in self.expected.items()):
             raise ValueError("precision request differs from actual sealed producer")
         if (self.root / "comfy-precision" / (request["nonce"] + ".failed")).exists():
@@ -397,7 +398,7 @@ class ModelGuard:
             raise
 
 
-def install(root: Path, deadline: float, expected: dict[str, Any]) -> type[Any]:
+def install(root: Path, deadline: float, expected: dict[str, Any], *, max_requests: int = 2) -> type[Any]:
     # Called only after current package/runtime/source verification by fixed launcher.
     global _INSTALLED
     if _INSTALLED is not None:
@@ -454,7 +455,7 @@ def install(root: Path, deadline: float, expected: dict[str, Any]) -> type[Any]:
             raise ValueError("quantized operation has an unsupported source role")
     backend_check()
     guard = ModelGuard(root, deadline, torch, ops, extension.CallbacksMP,
-                       extension.WrappersMP, expected, get_executing_context, backend_check, module_check)
+                       extension.WrappersMP, expected, get_executing_context, backend_check, module_check, max_requests)
 
     class CineforgeBF16UNETLoader(original):  # type: ignore[misc, valid-type]
         @classmethod

@@ -318,18 +318,26 @@ def _nr_dispatch(request: dict[str, Any], deadline: float) -> tuple[dict[str, An
         "source": request["native_source_sha256"],
         "phase_expires_unix": expiry,
     }
+    operation_limit = request.get("native_operation_limit", 3)
+    if type(operation_limit) is not int or not 1 <= operation_limit <= 10001:
+        raise ValueError("invalid bounded native operation capacity")
+    if "native_operation_limit" in request:
+        binding["operation_limit"] = operation_limit
     nr_hash(binding["source"])
     if op == "native_capabilities" and set(request) - {
             "operation", "plan", "profile", "guard_sha256", "native_source_sha256",
-            "native_sent_unix", "native_expires_unix", "allow_live", "timeout_seconds"}:
+            "native_sent_unix", "native_expires_unix", "native_operation_limit", "allow_live", "timeout_seconds"}:
         raise ValueError("fixed native measurements accept no path or command selector")
     if op == "native_capabilities" or op == "native_preflight" and "capabilities_sha256" not in request:
         root = nr_root(session, create=True)  # Existing/uncertain setup cannot be restarted.
         nr_write(root / "operation.lock", b"")
         nr_write(root / "binding.json", nr_encode(binding))
-        deadline = min(deadline, now + expiry - wall - 5)
+        phase_cap = min(now + expiry - wall - 5, now + request["plan"]["stop_at_unix"] - wall - 120)
+        if "operation_limit" not in binding:
+            phase_cap = min(deadline, phase_cap)
+        deadline = min(deadline, phase_cap)
         nr_check(deadline)
-        nr_write(root / "local-cap.json", nr_encode({"deadline": deadline}))
+        nr_write(root / "local-cap.json", nr_encode({"deadline": phase_cap}))
     root = nr_root(session)
     if nr_json(nr_read(root / "binding.json")) != binding or (root / "failed").exists():
         raise ValueError("remote speech session differs or is unresolved")
@@ -370,7 +378,11 @@ def _nr_dispatch(request: dict[str, Any], deadline: float) -> tuple[dict[str, An
                     raise ValueError("invalid fixed Comfy original cap")
                 cap_file = root / "comfy-local-cap.json"
                 if op == "native_begin":
-                    cap: dict[str, Any] = {"expires_unix": cutoff, "deadline": min(deadline, now + cutoff - wall - 5)}
+                    phase_cap = min(now + cutoff - wall - 5,
+                        nr_json(nr_read(root / "local-cap.json"))["deadline"])
+                    if "operation_limit" not in binding:
+                        phase_cap = min(deadline, phase_cap)
+                    cap: dict[str, Any] = {"expires_unix": cutoff, "deadline": phase_cap}
                     nr_check(cap["deadline"])
                     nr_write(cap_file, nr_encode(cap))
                 else:
@@ -403,7 +415,7 @@ def _nr_dispatch(request: dict[str, Any], deadline: float) -> tuple[dict[str, An
                     if type(size) is not int or not 1 <= size <= NR_BLOB_MAX:
                         raise ValueError("remote speech transfer exceeds bound")
                     # Input capacity is a fixed reviewed one-design/two-utterance recipe.
-                    if role == "input" and len(list(root.glob("*.input.json"))) >= 3:
+                    if role == "input" and len(list(root.glob("*.input.json"))) >= operation_limit:
                         raise ValueError("remote speech attempt capacity exhausted")
                     nr_write(
                         declaration, nr_encode({"token": token, "size_bytes": size, "sha256": sha})
