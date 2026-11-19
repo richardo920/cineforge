@@ -115,10 +115,18 @@ def _verified(segment: dict[str, Any], index: int, line: str, output: Path) -> b
 
 @preserve_interruption
 def run_long_session(b: LongSessionBindings, frozen: FrozenInputs, output: Path, *,
-                     absolute_deadline: float, allow_live: bool = False) -> dict[str, Any]:
-    """Resume only a released local run; every new lease is journal-wide admission."""
+                     absolute_deadline: float, allow_live: bool = False,
+                     planned_segments: int | None = None) -> dict[str, Any]:
+    """Resume only a released local run; every new lease is journal-wide admission.
+
+    planned_segments caps NEW segments generated this admission, regardless of verified
+    segments. None means all remaining lines; otherwise size the lease from the
+    smaller of planned_segments and the number of remaining lines.
+    """
     if allow_live is not True:
         raise A20Error("LONG_LIVE_OPT_IN_REQUIRED")
+    if planned_segments is not None and (type(planned_segments) is not int or planned_segments < 1):
+        raise A20Error("LONG_PLANNED_SEGMENTS")
     if not math.isfinite(absolute_deadline):
         raise A20Error("LONG_ORIGINAL_CAP")
     frozen.check()
@@ -180,6 +188,10 @@ def run_long_session(b: LongSessionBindings, frozen: FrozenInputs, output: Path,
         lease_seconds = (min(approval.lifetime_seconds, math.ceil(
             (len(lines) - len(complete)) * PER_SEGMENT_SECONDS + SETUP_SECONDS + SLACK_SECONDS))
             if complete else approval.lifetime_seconds)
+        if planned_segments is not None:
+            lease_seconds = min(approval.lifetime_seconds, math.ceil(
+                min(planned_segments, len(lines) - len(complete)) * PER_SEGMENT_SECONDS
+                + SETUP_SECONDS + SLACK_SECONDS))
         max_cost_usd = acquisition_max_cost_usd(spec, approval)
         record["budget"] = {"lease_seconds": lease_seconds,
             "acquisition_max_cost_usd": max_cost_usd, "aggregate_usd": approval.aggregate_usd,
@@ -266,10 +278,13 @@ def run_long_session(b: LongSessionBindings, frozen: FrozenInputs, output: Path,
                             checkpoint("design")
                             verification = None
                             voices = record.get("canonical_voices_sha256")
+                            generated = 0
                             for index, line in enumerate(lines):
                                 if index in complete:
                                     continue
                                 stage = "speech"
+                                if planned_segments is not None and generated >= planned_segments:
+                                    raise _DeadlineStopped("LONG_PLANNED_SEGMENTS_REACHED")
                                 guard()
                                 if (budget.remaining_seconds(b.acquisition_id) - 120
                                         < ATTEMPT_CAP_SECONDS + SPEECH_MARGIN_SECONDS):
@@ -342,6 +357,7 @@ def run_long_session(b: LongSessionBindings, frozen: FrozenInputs, output: Path,
                                 record["segments"] = [complete[i] for i in sorted(complete)]
                                 stage = "checkpoint"
                                 checkpoint(f"segment-{index}")
+                                generated += 1
                             record["outcome"] = "complete"
                             store.checkpoint(canonical(record))
                     except (Exception, KeyboardInterrupt) as error:
