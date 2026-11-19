@@ -18,6 +18,7 @@ from cineforge.cloud_budget import CloudBudgetError
 from cineforge.private_store import PrivateRunDirectory
 from cineforge.rights import EvidenceRef
 from cineforge.s2v import S2VError, select_s2v
+from cineforge.s2v_run import ATTEMPT_CAP_SECONDS
 from cineforge.s2v_service import S2VBudgetApproval, S2VServiceContext
 from cineforge.ssh_worker import SSHWorker, WorkerError
 from cineforge.workflows import canonical
@@ -314,6 +315,69 @@ class ExecutionDeadlineTests(unittest.TestCase):
 
     def run_scene(self, **kw):
         return self.f.run_scene(clock=lambda: self.now, **kw)
+
+    def test_attempt_cap_fits_measured_profile_and_approved_lifetime(self):
+        self.assertEqual(ATTEMPT_CAP_SECONDS, 1800)
+        self.assertLess(340 + 709 + 119, ATTEMPT_CAP_SECONDS)
+        self.assertLess(2 * ATTEMPT_CAP_SECONDS + 1344, 7200 - 120)
+
+    def test_slow_pre_submit_and_measured_generation_fit_entry_window(self):
+        from cineforge.comfy_run import execute_comfy
+        self.f.fixture.remaining = 5000
+        entry = self.now
+        endpoint = self.f.driver.endpoint
+        calls = []
+        def slow_endpoint(**kwargs):
+            self.now += 340
+            return endpoint(**kwargs)
+        def execute(*args, **kwargs):
+            calls.append(kwargs)
+            self.now += 646
+            return execute_comfy(*args, **kwargs)
+        self.f.driver.endpoint = slow_endpoint
+        result = self.run_scene(execute=execute)
+        self.assertEqual(result['outcome'], 'pending_human_review')
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]['timeout_seconds'], ATTEMPT_CAP_SECONDS - 340)
+        self.assertGreater(calls[0]['timeout_seconds'], 900)
+        self.assertEqual(calls[0]['absolute_deadline'], entry + ATTEMPT_CAP_SECONDS)
+        self.assertEqual(result['controller_deadline'], entry + ATTEMPT_CAP_SECONDS)
+
+    def test_stuck_execution_cannot_return_success_after_entry_deadline(self):
+        from cineforge.comfy_run import execute_comfy
+        self.f.fixture.remaining = 5000
+        entry = self.now
+        def execute(*args, **kwargs):
+            manifest = execute_comfy(*args, **kwargs)
+            self.now = entry + ATTEMPT_CAP_SECONDS + 1
+            return manifest
+        with self.assertRaises(S2VError):
+            self.run_scene(execute=execute)
+
+    def test_attempt_window_uses_its_own_later_entry_time(self):
+        # The fixture consumes one shot; use a later entry for this fresh fixture.
+        self.f.fixture.remaining = 5000
+        self.now = 2100.0
+        result = self.run_scene()
+        self.assertEqual(result['controller_deadline'], 2100 + ATTEMPT_CAP_SECONDS)
+
+    def test_parent_still_clamps_raised_attempt_cap(self):
+        from cineforge.comfy_run import execute_comfy
+        self.f.fixture.remaining = 5000
+        parent = self.now + 300
+        caps = []
+        def execute(*args, **kwargs):
+            caps.append(kwargs['absolute_deadline'])
+            return execute_comfy(*args, **kwargs)
+        result = self.run_scene(absolute_deadline=parent, execute=execute)
+        self.assertEqual(caps, [parent])
+        self.assertEqual(result['controller_deadline'], parent)
+
+    def test_sampled_lease_reserve_still_clamps_raised_attempt_cap(self):
+        self.f.fixture.remaining = 1000
+        sampled = self.now
+        result = self.run_scene()
+        self.assertEqual(result['controller_deadline'], sampled + 1000 - 120)
 
     def test_expired_or_invalid_parent_refuses_before_callback_directory_or_calls(self):
         with patch.object(type(self.f.selection.gate), 'preflight') as admission:

@@ -27,6 +27,16 @@ from cineforge.worker_bootstrap import validate_s2v_runtime
 from cineforge.workflows import canonical, strict_object
 
 
+# Diag-30: full attempts took ~1,036-1,093 s; allow headroom for ~340 s
+# pre-submit + 709 s execute (646 s generation) + 119 s finish_precision.
+# 1,800 = 7,200 / 4 of S2VBudgetApproval's maximum approved lifetime;
+# two capped attempts + ~1,344 s staging = ~4,944 s, before lease reserves.
+# Keep one entry deadline through finish_precision, technical_result and
+# finalization; re-anchoring would need new post-execution deadlines and risk
+# re-coupling POST-hook verifies (their own 120 s cap remains unchanged).
+ATTEMPT_CAP_SECONDS = 1800
+
+
 @preserve_interruption
 def inspect_s2v_media(path: Path, *, absolute_deadline: float | None = None,
                       clock: Callable[[], float] = time.monotonic) -> dict[str, Any]:
@@ -195,7 +205,7 @@ def run_s2v(selection: S2VSelection, verification: WorkerVerification, driver: S
         if allow_live is not True:
             raise ValueError
         # Capture the controller cap before any foreign proof/admission code.
-        deadline = request_deadline(600, absolute_deadline, clock)
+        deadline = request_deadline(ATTEMPT_CAP_SECONDS, absolute_deadline, clock)
         sampled = clock()
         remaining = driver.budget.remaining_seconds(driver._key)
         if (type(remaining) not in (int, float) or not math.isfinite(remaining)

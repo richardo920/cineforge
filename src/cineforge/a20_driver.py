@@ -30,7 +30,7 @@ from cineforge.rights import EvidenceRef, RightsLedger
 from cineforge.runpod import RunpodPodProvisioner, RunpodPodSpec
 from cineforge.runpod_transport import CloudTransport
 from cineforge.s2v import VerifiedS2V, select_s2v
-from cineforge.s2v_run import run_s2v
+from cineforge.s2v_run import ATTEMPT_CAP_SECONDS, run_s2v
 from cineforge.s2v_service import S2VBudgetApproval, S2VServiceContext, prepare_service_journal
 from cineforge.speech import (
     CanonicalVoiceBinding,
@@ -149,11 +149,11 @@ def acquisition_max_cost_usd(spec: RunpodPodSpec, approval: S2VBudgetApproval) -
 
 
 def attempt_cap(parent: float, remaining: float, now: float) -> float:
-    """600 s hold means execution attempt cap, retaining the separate lease reserve."""
+    """Share run_s2v's entry ATTEMPT_CAP_SECONDS, retaining the separate lease reserve."""
     if (any(not math.isfinite(v) for v in (parent, remaining, now))
             or remaining <= 150 or parent <= now):
         raise A20Error("A20_ATTEMPT_CAP_EXHAUSTED")
-    return min(parent, now + 600, now + remaining - 120)
+    return min(parent, now + ATTEMPT_CAP_SECONDS, now + remaining - 120)
 
 
 def _language_inputs(b: A20Bindings, frozen: FrozenInputs, language: str,

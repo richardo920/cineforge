@@ -26,6 +26,7 @@ from cineforge.rights import EvidenceRef
 from cineforge.runpod import AcquisitionIntent, LeaseSnapshot, RunpodPodSpec
 from cineforge.runpod_transport import CloudResponse
 from cineforge.s2v_profile import IMAGE, L40S_GPU_ID
+from cineforge.s2v_run import ATTEMPT_CAP_SECONDS
 from cineforge.s2v_service import S2VBudgetApproval, S2VServiceContext, prepare_service_journal
 from cineforge.ssh_worker import SSHWorker, WorkerError
 from cineforge.workflows import canonical, strict_object
@@ -158,13 +159,19 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(result["findings"]["failure_code"], "A20_CORE_CAP_EXHAUSTED")
         snapshot.assert_not_called()
 
-    def test_hold_is_minimum_of_600_original_parent_and_lease_reserve(self):
-        self.assertEqual(driver.attempt_cap(2000, 1800, 10), 610)
+    def test_hold_is_minimum_of_attempt_cap_original_parent_and_lease_reserve(self):
+        self.assertEqual(driver.attempt_cap(2000, 1800, 10), 1690)
         self.assertEqual(driver.attempt_cap(100, 1800, 10), 100)
         self.assertEqual(driver.attempt_cap(2000, 200, 10), 90)
+        self.assertEqual(driver.attempt_cap(10000, 9000, 10), 10 + ATTEMPT_CAP_SECONDS)
         for parent, remaining in ((10, 1000), (2000, 150), (float("inf"), 1000)):
             with self.assertRaises(A20Error):
                 driver.attempt_cap(parent, remaining, 10)
+
+    def test_each_language_gets_a_fresh_attempt_window(self):
+        # a20_driver.run calls attempt_cap inside its per-language EN/ZH loop.
+        for now in (10, 2000):
+            self.assertEqual(driver.attempt_cap(10000, 9000, now), now + ATTEMPT_CAP_SECONDS)
 
 
 class AdmissionCatalog:
