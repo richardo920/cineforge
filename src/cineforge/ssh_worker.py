@@ -191,6 +191,7 @@ class SSHWorker:
             self._profile = selection.worker_profile
         self._s2v_lock = Lock()
         self._s2v_consumed: set[str] = set()
+        self._s2v_pair_limit = 4
         self._s2v_setup_attempted = False
         self._prepared_s2v: WorkerVerification | None = None
         self._closed_comfy: ClosedComfyRuntime | None = None
@@ -770,13 +771,15 @@ class SSHWorker:
             subject = selection.approved_subject_sha256
             pair = hashlib.sha256(canonical({"scope_sha256": scope, "subject_sha256": subject,
                                              "media": media})).hexdigest()
-            if pair in self._s2v_consumed or len(self._s2v_consumed) >= 4:
+            if pair in self._s2v_consumed or len(self._s2v_consumed) >= self._s2v_pair_limit:
                 raise WorkerError("S2V pair transfer already consumed or limit exceeded")
             window()
             self._s2v_consumed.add(pair)
             stage_id = uuid.uuid4().hex
-            common = {"plan": self.plan.to_dict(), "stage_id": stage_id,
+            common: dict[str, Any] = {"plan": self.plan.to_dict(), "stage_id": stage_id,
                       "subject_sha256": subject, "media": media}
+            if type(self.selection) is LongSessionServiceContext:
+                common["pair_limit"] = self._s2v_pair_limit
             failed = False
             result = None
             try:

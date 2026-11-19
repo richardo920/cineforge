@@ -70,9 +70,10 @@ def read_private_input(path: str | Path, *, max_bytes: int = 1024 * 1024) -> byt
 
 
 class PrivateRunDirectory:
-    """Claim an empty, owner-only directory once; no resume or hostile-writer claim.
+    """Claim an owner-only directory; default callers still require an empty store.
 
-    A retained exclusive .lock makes crashes/nonterminal runs refuse a fresh submission.
+    Explicit resume takes a nonblocking writer lock and adopts the safe record.
+    The caller must validate its scope and prior resource release before resuming.
     Same-host POSIX dir_fd/O_NOFOLLOW, hard links, atomic rename and fsync are required.
     """
 

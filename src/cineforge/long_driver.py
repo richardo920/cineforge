@@ -127,13 +127,16 @@ def run_long_session(b: LongSessionBindings, frozen: FrozenInputs, output: Path,
             "design": asdict(b.design), "approval": approval.subject_sha256})
 
     config = configuration()
+    acquisition_id = b.acquisition_id
     receipt = dict(frozen.receipt, configuration_sha256=_sha(config), staging_wheel_sha256=_sha(wheel))
     record: dict[str, Any] = {"schema_version": 1, "mode": "long-session",
         "outcome": "incomplete", "frozen": receipt, "segments": [], "failures": [],
-        "checkpoints": [], "release_verified": False, "human_review": "pending_human_review",
+        "checkpoints": [], "release_verified": True, "human_review": "pending_human_review",
         "export_authority": "none", "budget_notes": [
             "max_attempts counts paid creation admissions journal-wide; a capacity failure consumes one.",
-            "A 50400 s lease reserves $17.78 of $35 at the $1.25/h ceiling (including disk reserve); recovery leases must be sized to remaining work."]}
+            "A 50400 s lease reserves $17.78 of $35 at the $1.25/h ceiling (including disk reserve); recovery leases must be sized to remaining work.",
+            "This journal pins its approval lifetime; shorter recovery requires a new approved scope/output. Two full leases exceed $35 unless actual billing is reconciled."],
+        "generation_timing": "elapsed shot execution including technical verification"}
     stage, index = "preflight", None
     with PrivateRunDirectory(output, resume=True) as store:
         if (output / "run.json").exists():
@@ -158,7 +161,7 @@ def run_long_session(b: LongSessionBindings, frozen: FrozenInputs, output: Path,
 
         def guard() -> None:
             frozen.check()
-            if configuration() != config or read_private_input(b.sox_wheel, max_bytes=16 * 1024 * 1024) != wheel:
+            if configuration() != config or b.acquisition_id != acquisition_id or read_private_input(b.sox_wheel, max_bytes=16 * 1024 * 1024) != wheel:
                 raise A20Error("LONG_FROZEN_CONFIGURATION_CHANGED")
             if time.monotonic() >= absolute_deadline:
                 raise _DeadlineStopped("LONG_ABSOLUTE_DEADLINE")

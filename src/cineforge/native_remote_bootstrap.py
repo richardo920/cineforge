@@ -332,9 +332,12 @@ def _nr_dispatch(request: dict[str, Any], deadline: float) -> tuple[dict[str, An
         root = nr_root(session, create=True)  # Existing/uncertain setup cannot be restarted.
         nr_write(root / "operation.lock", b"")
         nr_write(root / "binding.json", nr_encode(binding))
-        deadline = min(deadline, now + expiry - wall - 5)
+        phase_cap = min(now + expiry - wall - 5, now + request["plan"]["stop_at_unix"] - wall - 120)
+        if "operation_limit" not in binding:
+            phase_cap = min(deadline, phase_cap)
+        deadline = min(deadline, phase_cap)
         nr_check(deadline)
-        nr_write(root / "local-cap.json", nr_encode({"deadline": deadline}))
+        nr_write(root / "local-cap.json", nr_encode({"deadline": phase_cap}))
     root = nr_root(session)
     if nr_json(nr_read(root / "binding.json")) != binding or (root / "failed").exists():
         raise ValueError("remote speech session differs or is unresolved")
@@ -375,7 +378,11 @@ def _nr_dispatch(request: dict[str, Any], deadline: float) -> tuple[dict[str, An
                     raise ValueError("invalid fixed Comfy original cap")
                 cap_file = root / "comfy-local-cap.json"
                 if op == "native_begin":
-                    cap: dict[str, Any] = {"expires_unix": cutoff, "deadline": min(deadline, now + cutoff - wall - 5)}
+                    phase_cap = min(now + cutoff - wall - 5,
+                        nr_json(nr_read(root / "local-cap.json"))["deadline"])
+                    if "operation_limit" not in binding:
+                        phase_cap = min(deadline, phase_cap)
+                    cap: dict[str, Any] = {"expires_unix": cutoff, "deadline": phase_cap}
                     nr_check(cap["deadline"])
                     nr_write(cap_file, nr_encode(cap))
                 else:

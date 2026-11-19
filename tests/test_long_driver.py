@@ -156,6 +156,14 @@ class LongDriverTests(unittest.TestCase):
             self.assertEqual(h.generated, [0, 1])
             self.assertTrue(record["release_verified"])
 
+    def test_expired_entry_can_resume_without_acquisition(self):
+        with tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
+            h = LongHarness(Path(tmp).resolve(), stack)
+            result = h.run(deadline=driver.time.monotonic() - 1)
+            self.assertEqual(result["outcome"], "deadline_stopped")
+            h.provisioner.acquire.assert_not_called()
+            self.assertEqual(h.run()["outcome"], "complete")
+
     def test_frozen_mutation_and_cleanup_failure_are_recorded(self):
         for fail in ("source", "release"):
             with self.subTest(fail=fail), tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:

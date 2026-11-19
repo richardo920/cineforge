@@ -122,6 +122,8 @@ class RemoteNativeSpeechRuntime:
         self._unresolved = False
         self._max_operations = max_operations
         self._long_session = type(worker.selection) is LongSessionServiceContext
+        if self._long_session:
+            worker._s2v_pair_limit = max_operations - 1
         self._attempts = 0
         self._used: set[str] = set()
         self._proofs: dict[tuple[str, str, str], RemoteNativeProof] = {}
@@ -145,7 +147,7 @@ class RemoteNativeSpeechRuntime:
                 cap = min(cap, controller_deadline)
             if time.monotonic() >= cap:
                 raise ValueError
-            if self._long_session:
+            if type(worker.selection) is LongSessionServiceContext:
                 fields["native_operation_limit"] = self._max_operations
             result = worker.native_request(
                 dict(

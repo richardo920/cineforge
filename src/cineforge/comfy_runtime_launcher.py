@@ -282,7 +282,8 @@ def main() -> int:
         install(root, deadline, dict(worker_id=binding["worker"], session_id=binding["session"],
             profile_id=comfy_worker(plan).profile_id, binding_sha256=nr_digest(binding),
             package_sha256=binding["package"], comfy_sha256=comfy_subject(plan),
-            source_sha256=nr_digest(plan["source"]), runtime_sha256=nr_digest(plan["installed"])))
+            source_sha256=nr_digest(plan["source"]), runtime_sha256=nr_digest(plan["installed"])),
+            max_requests=binding["operation_limit"] - 1 if "operation_limit" in binding else 2)
         nr_check(deadline)
         _startup_observer(root, deadline)
         runpy.run_path(sys.argv[0], run_name="__main__")

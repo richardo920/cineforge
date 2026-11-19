@@ -257,6 +257,29 @@ class RemoteTests(RemoteFixture):
                 token="f" * 32, size_bytes=1, sha256=hashlib.sha256(b"x").hexdigest()),
                 30, absolute_deadline=time.monotonic() + 30)
 
+    def test_long_phase_caps_survive_short_rpc_without_renewal(self):
+        short = self.gate.service.approval
+        approval = LongSessionBudgetApproval.for_scope(short.journal_directory, short.region,
+            short.operator_receipt, phase_id="long-phase-test", gpu_id=short.gpu_id)
+        self.worker.selection = LongSessionServiceContext(approval)
+        self.worker._profile = self.worker.selection.worker_profile
+        self.budget.approval = approval
+        self.remaining = 50000
+        self.plan = replace(self.plan, stop_at_unix=time.time() + 50400)
+        self.worker.plan = self.plan
+        self.bridge = RemoteNativeSpeechRuntime(self.worker, allow_native=True,
+            timeout_seconds=50400, max_operations=6)
+        entered = time.monotonic()
+        self.prepare()
+        native_cap = nr_json(bootstrap.nr_read(self.remote / "local-cap.json"))["deadline"]
+        self.assertGreater(native_cap - entered, 49000)
+        self.bridge._upload("comfy", b"synthetic closure", comfy_expires_unix=self.bridge._expires_unix)
+        comfy_cap = nr_json(bootstrap.nr_read(self.remote / "comfy-local-cap.json"))["deadline"]
+        self.assertGreater(comfy_cap - entered, 49000)
+        self.bridge.preview(self.design)
+        self.assertEqual(nr_json(bootstrap.nr_read(self.remote / "local-cap.json"))["deadline"], native_cap)
+        self.assertEqual(nr_json(bootstrap.nr_read(self.remote / "comfy-local-cap.json"))["deadline"], comfy_cap)
+
     def test_timeout_accepts_approved_lifetime_and_rejects_above_ceiling(self):
         bridge = RemoteNativeSpeechRuntime(self.worker, allow_native=True, timeout_seconds=7200)
         self.assertEqual(bridge._timeout, 7200)

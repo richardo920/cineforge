@@ -123,6 +123,22 @@ class PairTransferTests(unittest.TestCase):
         self.assertIsNone(caught.exception.__context__)
         self.assertIsNone(caught.exception.__cause__)
 
+    def test_explicit_long_pair_bound_allows_five_and_refuses_expansion(self):
+        import uuid
+
+        from cineforge.s2v_stage import paired_transfer
+        base = dict(operation="s2v_pair_begin", profile=self.driver._profile,
+            media=self.gate.media, pair_limit=5)
+        for index in range(5):
+            request = dict(base, stage_id=uuid.uuid4().hex,
+                subject_sha256=hashlib.sha256(str(index).encode()).hexdigest())
+            paired_transfer(request, self.remote)
+        request = dict(base, stage_id=uuid.uuid4().hex, subject_sha256="f" * 64)
+        with self.assertRaises(ValueError):
+            paired_transfer(request, self.remote)
+        with self.assertRaises(ValueError):
+            paired_transfer(dict(request, pair_limit=6), self.remote)
+
     def test_worker_constructor_requires_all_exact_scope_resources(self):
         for change in (dict(disk_gb=80), dict(min_cuda_version="12.9"),
                        dict(max_hourly_usd=2), dict(min_ram_per_gpu_gb=32)):
