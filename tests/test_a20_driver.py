@@ -26,6 +26,7 @@ from cineforge.rights import EvidenceRef
 from cineforge.runpod import AcquisitionIntent, LeaseSnapshot, RunpodPodSpec
 from cineforge.runpod_transport import CloudResponse
 from cineforge.s2v_profile import IMAGE, L40S_GPU_ID
+from cineforge.s2v_run import ATTEMPT_CAP_SECONDS
 from cineforge.s2v_service import S2VBudgetApproval, S2VServiceContext, prepare_service_journal
 from cineforge.ssh_worker import SSHWorker, WorkerError
 from cineforge.workflows import canonical, strict_object
@@ -158,13 +159,19 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(result["findings"]["failure_code"], "A20_CORE_CAP_EXHAUSTED")
         snapshot.assert_not_called()
 
-    def test_hold_is_minimum_of_600_original_parent_and_lease_reserve(self):
-        self.assertEqual(driver.attempt_cap(2000, 1800, 10), 610)
+    def test_hold_is_minimum_of_attempt_cap_original_parent_and_lease_reserve(self):
+        self.assertEqual(driver.attempt_cap(2000, 1800, 10), 1690)
         self.assertEqual(driver.attempt_cap(100, 1800, 10), 100)
         self.assertEqual(driver.attempt_cap(2000, 200, 10), 90)
+        self.assertEqual(driver.attempt_cap(10000, 9000, 10), 10 + ATTEMPT_CAP_SECONDS)
         for parent, remaining in ((10, 1000), (2000, 150), (float("inf"), 1000)):
             with self.assertRaises(A20Error):
                 driver.attempt_cap(parent, remaining, 10)
+
+    def test_each_language_gets_a_fresh_attempt_window(self):
+        # a20_driver.run calls attempt_cap inside its per-language EN/ZH loop.
+        for now in (10, 2000):
+            self.assertEqual(driver.attempt_cap(10000, 9000, now), now + ATTEMPT_CAP_SECONDS)
 
 
 class AdmissionCatalog:
@@ -225,6 +232,7 @@ class Harness:
     """Replace effects, retain real driver flow, local freeze and durable run storage."""
     def __init__(self, root, stack, failure=None, mutation=None, lifetime_seconds=1800):
         self.root, self.events, self.failure = root, [], failure
+        self.s2v_deadlines = []
         self.inputs = creative(root / "data")
         code = root / "code"
         code.mkdir()
@@ -328,6 +336,7 @@ class Harness:
 
     def s2v(self, *args, **kwargs):
         language = Path(args[3]).name
+        self.s2v_deadlines.append(kwargs['absolute_deadline'])
         self.event("s2v-" + language)
         return {"manifest": {"artifacts": [{"uri": "artifact-" + "a" * 64 + ".webm", "sha256": "a" * 64}]}}
 
@@ -338,6 +347,30 @@ class Harness:
 
 
 class DriverTests(unittest.TestCase):
+    def test_each_language_receives_a_fresh_attempt_window(self):
+        with tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
+            h = Harness(Path(tmp).resolve(), stack)
+            now, deadlines = [100.0], []
+            attempt_cap = driver.attempt_cap
+            def measured_cap(*args, **kwargs):
+                cap = attempt_cap(*args, **kwargs)
+                deadlines.append(cap)
+                return cap
+            def s2v(*args, **kwargs):
+                result = h.s2v(*args, **kwargs)
+                now[0] += 100
+                return result
+            with (patch.object(driver.time, 'monotonic', side_effect=lambda: now[0]),
+                  patch.object(driver, 'attempt_cap', wraps=measured_cap) as cap,
+                  patch.object(driver, 'run_s2v', side_effect=s2v)):
+                result = h.run()
+            self.assertEqual(result['outcome'], 'pending_human_review')
+            self.assertEqual(cap.call_count, 2)
+            self.assertGreater(cap.call_args_list[1].args[2], cap.call_args_list[0].args[2])
+            self.assertEqual(h.s2v_deadlines, deadlines)
+            self.assertEqual([event for event in h.events if event.startswith('s2v-')],
+                             ['s2v-en', 's2v-zh'])
+
     def test_sequence_once_only_prepare_two_languages_and_delivery(self):
         with tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
             h = Harness(Path(tmp).resolve(), stack)
