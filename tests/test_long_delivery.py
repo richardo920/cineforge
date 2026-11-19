@@ -11,6 +11,7 @@ import unittest
 import wave
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from test_audio_mix import pcm
@@ -18,10 +19,10 @@ from test_speech import EVIDENCE, Runtime, adapter, fixture, reviewed
 
 from cineforge.a20_inputs import A20Error
 from cineforge.audio import RevisionPin, ShotTiming
-from cineforge.audio_analysis import FFmpegTool
+from cineforge.audio_analysis import FFmpegTool, ToolIdentity
 from cineforge.audio_mix import MixSettings, StemMix, mix_scene
 from cineforge.audio_process import run_audio_process
-from cineforge.long_delivery import mux_long_delivery, stitch_shots
+from cineforge.long_delivery import _count, _probe, _qc, mux_long_delivery, stitch_shots
 from cineforge.private_store import PrivateRunDirectory
 from cineforge.rights import RightsLedger, Use, with_review
 from cineforge.stem_import import import_original_stem
@@ -123,6 +124,10 @@ class LongDeliveryTests(unittest.TestCase):
             self.assertTrue(all(value > 0 for value in qc["dialogue_rms"]))
             self.assertIn("hard_cut_outlier", qc["boundaries"][0]["flags"])
             self.assertTrue(all("frozen_suspect" in segment["flags"] for segment in qc["segments"]))
+            self.assertEqual(qc["qc_pixel_source"],
+                             "pre-concat segments (stream-copy identical to master)")
+            self.assertEqual(self.packet_hashes(store.path / result["master"]),
+                             [digest for shot in self.shots for digest in self.packet_hashes(shot)])
             # Decode PCM to prove the master contains exactly the final measured mix bytes.
             sound = self.root / "extracted.wav"
             self.command((str(self.ffmpeg), "-v", "error", "-nostdin", "-n", "-i",
@@ -133,6 +138,60 @@ class LongDeliveryTests(unittest.TestCase):
                                  mixed.readframes(mixed.getnframes()))
             review = (store.path / result["review"]).read_bytes()
             self.assertLess(review.index(b"moov"), review.index(b"mdat"))
+
+    def packet_hashes(self, path):
+        data = self.command((str(self.ffmpeg), "-v", "error", "-nostdin", "-i", str(path),
+            "-map", "0:v:0", "-c:v", "copy", "-f", "framemd5", "-"))
+        return [line.rsplit(",", 1)[1].strip() for line in data.decode().splitlines()
+                if line and not line.startswith("#")]
+
+    def test_partial_freeze_and_moving_qc(self):
+        with tempfile.TemporaryDirectory(dir=self.root) as temporary:
+            root = Path(temporary)
+            segments = []
+            for name, filters in (("moving", []), ("partial", ["-vf",
+                    "trim=end_frame=37,tpad=stop_mode=clone:stop=40"])):
+                path = root / f"{name}.webm"
+                self.command((str(self.ffmpeg), "-v", "error", "-nostdin", "-n", "-f", "lavfi",
+                    "-i", "testsrc2=s=832x480:r=16", *filters, "-frames:v", "77", "-c:v",
+                    "libvpx-vp9", "-lossless", "1", "-speed", "8", "-threads", "2", str(path)))
+                segments.append(path)
+            qc = _qc([*segments, self.shots[0]], root, self.ffmpeg, time.monotonic() + 60)
+        moving, partial, solid = qc["segments"]
+        self.assertNotIn("frozen_suspect", moving["flags"])
+        self.assertIn("frozen_suspect", partial["flags"])
+        self.assertGreater(partial["mean_squared_successive_difference"], .01)
+        self.assertGreaterEqual(partial["longest_near_identical_run_frames"], 40)
+        self.assertIn("frozen_suspect", solid["flags"])
+        self.assertEqual(solid["longest_near_identical_run_frames"], 77)
+
+    def test_relative_and_absolute_cut_rules(self):
+        size = 64 * 40
+        # Boundary differences 1, 1, 1, 20, 200: median=1, MAD=0.
+        values = [0, 1, 2, 3, 23, 223]
+        with tempfile.TemporaryDirectory(dir=self.root) as temporary, patch(
+                "cineforge.long_delivery._encode"), patch(
+                "cineforge.long_delivery.read_private_input",
+                side_effect=[bytes([v]) * size * 77 for v in values]), patch("pathlib.Path.unlink"):
+            qc = _qc([Path(str(i)) for i in values], Path(temporary), self.ffmpeg, 100)
+        self.assertEqual(qc["thresholds"]["hard_cut_relative"], 1)
+        self.assertTrue(all(not b["flags"] for b in qc["boundaries"][:3]))
+        self.assertEqual(qc["boundaries"][3]["hard_cut_rules"], ["median_plus_3_mad"])
+        self.assertEqual(qc["boundaries"][4]["hard_cut_rules"], ["absolute", "median_plus_3_mad"])
+        self.assertIn("hard_cut_outlier", qc["boundaries"][3]["flags"])
+
+    def test_wrong_resolution_rate_and_codec_refused(self):
+        for name, size, rate, codec, extension in (
+                ("resolution", "640x480", "16", "libvpx-vp9", "webm"),
+                ("rate", "832x480", "24", "libvpx-vp9", "webm"),
+                ("codec", "832x480", "16", "libx264", "mkv")):
+            with self.subTest(name=name):
+                path = self.root / f"invalid-{name}.{extension}"
+                self.command((str(self.ffmpeg), "-v", "error", "-nostdin", "-n", "-f", "lavfi",
+                    "-i", f"color=black:s={size}:r={rate}", "-frames:v", "77", "-c:v", codec,
+                    "-threads", "2", str(path)))
+                with self.assertRaises(ValueError):
+                    stitch_shots([path], **self.options())
 
     def test_short_segment_rejected_before_concat(self):
         short = self.root / "short.webm"
@@ -181,3 +240,51 @@ class LongDeliveryTests(unittest.TestCase):
             mux_long_delivery(self.shots[:2], store=None, **args, output_id="mix", output_revision=1,
                               expected_tool=None, **self.options())
         tool.assert_not_called()
+
+
+class LongDeliveryUnitTests(unittest.TestCase):
+    def test_probe_parsing_failures_are_technical_errors(self):
+        stream = {"codec_type": "video", "codec_name": "vp9", "width": 832, "height": 480,
+                  "pix_fmt": "yuv420p", "nb_read_frames": "77", "avg_frame_rate": "16/1"}
+        facts = {"streams": [stream], "format": {"duration": "4.8125"}}
+        cases = [{"streams": [stream]}, {**facts, "format": {}},
+                 {**facts, "streams": [{**stream, "avg_frame_rate": "0/0"}]}]
+        for value in cases:
+            with self.subTest(value=value), patch("cineforge.long_delivery._run",
+                    return_value=json.dumps(value).encode()), self.assertRaisesRegex(
+                    A20Error, "LONG_DELIVERY_TECHNICAL"):
+                _probe(Path("picture"), Path("ffprobe"), 100, 77)
+
+    def test_segment_count_cap(self):
+        self.assertEqual(_count([b"shot"] * 37), 37)
+        with self.assertRaisesRegex(A20Error, "LONG_DELIVERY_SEGMENTS"):
+            _count([b"shot"] * 38)
+
+    def test_dialogue_start_at_segment_26(self):
+        args = long_scene(27)
+        sheet = args["sheet"]
+        dialogue = tuple(c for c in sheet.cues if c.kind == "dialogue")
+        self.assertEqual(dialogue[26].start_ticks / 16000, 125.125)
+        options = dict(store=None, output_id="mix", output_revision=1, expected_tool=None,
+                       ffmpeg=Path("ffmpeg"), ffprobe=Path("ffprobe"), deadline=100)
+        with patch("cineforge.long_delivery.FFmpegTool", side_effect=RuntimeError("validated")), \
+                self.assertRaisesRegex(RuntimeError, "validated"):
+            mux_long_delivery([b"shot"] * 27, **args, **options)
+        args["sheet"] = SimpleNamespace(timebase=sheet.timebase, cues=(*dialogue[:26],
+            replace(dialogue[26], start_ticks=dialogue[26].start_ticks - 1)))
+        with self.assertRaisesRegex(A20Error, "LONG_DELIVERY_DIALOGUE"):
+            mux_long_delivery([b"shot"] * 27, **args, **options)
+
+    def test_insufficient_mix_time_is_technical_error(self):
+        args = long_scene(1)
+        identity = ToolIdentity("9.0.2", "a" * 64, "b" * 64)
+        for remaining in (.099, 0, -1):
+            with self.subTest(remaining=remaining), patch("cineforge.long_delivery.FFmpegTool") as tool, \
+                    patch("cineforge.long_delivery._remaining", return_value=1), \
+                    patch("cineforge.long_delivery.time.monotonic", return_value=100 - remaining), \
+                    patch("cineforge.long_delivery.mix_scene") as mix:
+                tool.return_value.identify.return_value = identity
+                with self.assertRaisesRegex(A20Error, "LONG_DELIVERY_TECHNICAL"):
+                    mux_long_delivery([b"shot"], **args, store=None, output_id="mix", output_revision=1,
+                        expected_tool=identity, ffmpeg=Path("ffmpeg"), ffprobe=Path("ffprobe"), deadline=100)
+                mix.assert_not_called()

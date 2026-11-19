@@ -9,6 +9,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import replace
 from fractions import Fraction
 from pathlib import Path
+from statistics import median
 from typing import Any
 
 from cineforge import s2v_profile as profile
@@ -29,9 +30,10 @@ from cineforge.stem_import import ImportedStemArtifact
 from cineforge.workflows import strict_object
 
 # Metrics use 64x40 grayscale thumbnails in [0,255]. MAD > 80 is informational;
-# temporal mean squared difference <= .01 marks a near-static/frozen segment.
+# Successive-frame MSE <= .01 marks a near-static segment or a frozen run.
 HARD_CUT_MAD = 80.0
 FROZEN_VARIANCE = .01
+FROZEN_RUN_FRAMES = 16
 _SEGMENT_BYTES = 32 * 1024 * 1024
 _PIECE_BYTES = VIDEO_MAX_BYTES
 _RAW_BYTES = profile.WIDTH * profile.HEIGHT * 3 // 2 * profile.FRAMES
@@ -56,19 +58,26 @@ def _encode(ffmpeg: Path, args: Sequence[str], deadline: float) -> None:
 
 def _probe(path: Path, ffprobe: Path, deadline: float, frames: int,
            audio: str | None = None, video: str = "vp9") -> dict[str, Any]:
-    facts = strict_object(_run((str(ffprobe), "-v", "error", "-max_alloc", "67108864",
+    raw = _run((str(ffprobe), "-v", "error", "-max_alloc", "67108864",
         "-protocol_whitelist", "file,pipe", "-count_frames", "-show_entries",
         "stream=codec_type,codec_name,width,height,pix_fmt,avg_frame_rate,nb_read_frames,sample_rate,channels:format=duration",
-        "-of", "json", str(path)), deadline))
-    streams = facts["streams"]
-    duration = float(facts["format"]["duration"])
+        "-of", "json", str(path)), deadline)
+    try:
+        facts = strict_object(raw)
+        streams = facts["streams"]
+        duration = float(facts["format"]["duration"])
+        if not isinstance(streams, list) or any(not isinstance(s, dict) for s in streams):
+            raise ValueError
+        fps = Fraction(streams[0].get("avg_frame_rate", "0")) if streams else Fraction(0)
+    except (KeyError, TypeError, ValueError, ZeroDivisionError, OverflowError):
+        raise A20Error("LONG_DELIVERY_TECHNICAL") from None
     if not isinstance(streams, list) or len(streams) != (2 if audio else 1):
         raise A20Error("LONG_DELIVERY_STREAMS")
     v = streams[0]
     if (v.get("codec_type") != "video" or v.get("codec_name") != video
             or v.get("width") != profile.WIDTH or v.get("height") != profile.HEIGHT
             or v.get("pix_fmt") != "yuv420p" or v.get("nb_read_frames") != str(frames)
-            or Fraction(v.get("avg_frame_rate", "0")) != profile.FPS
+            or fps != profile.FPS
             or not math.isfinite(duration) or abs(duration - frames / profile.FPS) > 1 / profile.FPS
             or audio and (streams[1].get("codec_type") != "audio"
                           or streams[1].get("codec_name") != audio)):
@@ -148,9 +157,19 @@ def _qc(segments: list[Path], root: Path, ffmpeg: Path, deadline: float) -> dict
         if len(data) != size * profile.FRAMES:
             raise A20Error("LONG_DELIVERY_QC_FRAMES")
         first, last = data[:size], data[-size:]
-        variance = sum((a - b) ** 2 for a, b in zip(data[size:], data[:-size], strict=True)) / (len(data) - size)
-        reports.append({"segment_index": index, "temporal_variance": variance,
-                        "flags": ["frozen_suspect"] if variance <= FROZEN_VARIANCE else []})
+        differences = [sum((a - b) ** 2 for a, b in zip(data[offset:offset + size],
+            data[offset - size:offset], strict=True)) / size
+            for offset in range(size, len(data), size)]
+        mean_squared_difference = sum(differences) / len(differences)
+        run = longest_run = 1
+        for difference in differences:
+            run = run + 1 if difference <= FROZEN_VARIANCE else 1
+            longest_run = max(longest_run, run)
+        frozen = mean_squared_difference <= FROZEN_VARIANCE or longest_run >= FROZEN_RUN_FRAMES
+        reports.append({"segment_index": index,
+                        "mean_squared_successive_difference": mean_squared_difference,
+                        "longest_near_identical_run_frames": longest_run,
+                        "flags": ["frozen_suspect"] if frozen else []})
         if previous is not None:
             mad = sum(abs(a - b) for a, b in zip(previous, first, strict=True)) / size
             hist_a, hist_b = [0] * 16, [0] * 16
@@ -160,11 +179,27 @@ def _qc(segments: list[Path], root: Path, ffmpeg: Path, deadline: float) -> dict
             boundaries.append({"left_segment": index - 1, "right_segment": index,
                 "mean_absolute_pixel_difference": mad,
                 "histogram_distance": sum(abs(a - b) for a, b in zip(hist_a, hist_b, strict=True)) / (2 * size),
-                "flags": ["hard_cut_outlier"] if mad > HARD_CUT_MAD else []})
+                "flags": [], "hard_cut_rules": []})
         previous = last
         raw.unlink()
+    relative_threshold = None
+    if boundaries:
+        center = median(b["mean_absolute_pixel_difference"] for b in boundaries)
+        deviation = median(abs(b["mean_absolute_pixel_difference"] - center) for b in boundaries)
+        relative_threshold = center + 3 * deviation
+        for boundary in boundaries:
+            difference = boundary["mean_absolute_pixel_difference"]
+            rules = (["absolute"] if difference > HARD_CUT_MAD else [])
+            if difference > relative_threshold:
+                rules.append("median_plus_3_mad")
+            boundary["hard_cut_rules"] = rules
+            boundary["flags"] = ["hard_cut_outlier"] if rules else []
     return {"boundaries": boundaries, "segments": reports,
-            "thresholds": {"hard_cut_mad": HARD_CUT_MAD, "frozen_temporal_variance": FROZEN_VARIANCE},
+            "qc_pixel_source": "pre-concat segments (stream-copy identical to master)",
+            "thresholds": {"hard_cut_mad": HARD_CUT_MAD,
+                           "hard_cut_relative": relative_threshold,
+                           "frozen_mean_squared_successive_difference": FROZEN_VARIANCE,
+                           "frozen_run_frames": FROZEN_RUN_FRAMES},
             "metric": "64x40 grayscale; 16-bin normalized histogram total variation"}
 
 
@@ -204,8 +239,10 @@ def mux_long_delivery(segment_shots: Sequence[Path | bytes], sheet: CueSheet,
             or tool.identify(timeout_seconds=_remaining(deadline), max_output_bytes=65536) != expected_tool):
         raise A20Error("LONG_DELIVERY_TOOL")
     # mix_scene owns rights, exact sample placement, ducking, final linear gain and remeasurement.
-    _remaining(deadline)
-    bounded_settings = replace(settings, timeout_seconds=min(settings.timeout_seconds, deadline - time.monotonic()))
+    remaining = deadline - time.monotonic()
+    if not math.isfinite(remaining) or remaining < .1:
+        raise A20Error("LONG_DELIVERY_TECHNICAL")
+    bounded_settings = replace(settings, timeout_seconds=min(settings.timeout_seconds, remaining))
     mix = mix_scene(sheet, sources, bounded_settings, INTERNAL_REVIEW_STEREO, plan=plan,
         registry=registry, ledger=ledger, current_picture=current_picture, current_script=current_script,
         output_id=output_id, output_revision=output_revision, tool=tool, expected_tool=expected_tool)
