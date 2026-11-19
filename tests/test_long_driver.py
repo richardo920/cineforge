@@ -9,18 +9,29 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import Mock, patch
 
-from test_a20_driver import Harness
+from test_a20_driver import AdmissionCatalog, Harness
 from test_speech import CanonicalVoiceBinding, fixture, wav_bytes
 
 from cineforge import long_driver as driver
 from cineforge.a20_inputs import A20Error, FrozenInputs
+from cineforge.cloud_budget import CloudBudgetSession
+from cineforge.cloud_journal import CloudJournal
+from cineforge.rights import EvidenceRef
 from cineforge.runpod import (
+    AcquisitionIntent,
     AcquisitionUncertainError,
     CleanupUncertainError,
     LeaseSnapshot,
     ProvisioningError,
+    RunpodPodSpec,
 )
-from cineforge.s2v_service import LongSessionBudgetApproval, LongSessionServiceContext
+from cineforge.s2v_profile import IMAGE, L40S_GPU_ID
+from cineforge.s2v_service import (
+    LongSessionBudgetApproval,
+    LongSessionServiceContext,
+    prepare_long_session_journal,
+)
+from cineforge.workflows import strict_object
 
 
 class LongHarness(Harness):
@@ -88,7 +99,7 @@ class LongHarness(Harness):
 
 class LongDriverTests(unittest.TestCase):
     def test_planned_segments_sizes_lease(self):
-        for planned, seconds in ((3, 6900), (1, 3900), (2, 5400), (100, 50400)):
+        for planned, seconds in ((3, 6900), (1, 3900), (2, 5400), (100, 6900)):
             with self.subTest(planned=planned), tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
                 h = LongHarness(Path(tmp).resolve(), stack)
                 record = h.run(planned_segments=planned)
@@ -103,12 +114,12 @@ class LongDriverTests(unittest.TestCase):
                     h.run(planned_segments=planned)
                 h.patches["RunpodPodProvisioner"].assert_not_called()
 
-    def test_planned_lease_stops_before_fourth_segment_speech(self):
+    def test_planned_lease_stops_before_third_segment_speech(self):
         with tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
             h = LongHarness(Path(tmp).resolve(), stack,
                 lines=["Approved English.", "Second.", "Third.", "Fourth."])
             def checkpoint(name, record):
-                if name == "segment-2":
+                if name == "segment-1":
                     h.budget.remaining_seconds.return_value = (
                         120 + driver.ATTEMPT_CAP_SECONDS + driver.SPEECH_MARGIN_SECONDS - 1)
             h.bindings = replace(h.bindings, checkpoint=checkpoint)
@@ -116,9 +127,39 @@ class LongDriverTests(unittest.TestCase):
             self.assertEqual(h.patches["RunpodPodProvisioner"].call_args.kwargs["lease_seconds"], 6900)
             self.assertEqual(record["budget"]["lease_seconds"], 6900)
             self.assertEqual(record["outcome"], "deadline_stopped", record)
-            self.assertEqual(h.generated, [0, 1, 2])
+            self.assertEqual(h.generated, [0, 1])
             self.assertEqual(record["failures"][-1]["message"], "LONG_SEGMENT_LEASE_EXHAUSTED")
             self.assertTrue(record["release_verified"])
+
+    def test_planned_segments_stops_before_fourth_segment_speech(self):
+        with tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
+            h = LongHarness(Path(tmp).resolve(), stack,
+                lines=["Approved English.", "Second.", "Third.", "Fourth."])
+            record = h.run(planned_segments=3)
+            self.assertEqual(h.patches["RunpodPodProvisioner"].call_args.kwargs["lease_seconds"], 6900)
+            self.assertEqual(record["budget"]["lease_seconds"], 6900)
+            self.assertEqual(h.generated, [0, 1, 2])
+            self.assertEqual(record["outcome"], "deadline_stopped", record)
+            self.assertEqual(record["failures"][-1]["message"], "LONG_PLANNED_SEGMENTS_REACHED")
+            self.assertEqual(record["failures"][-1]["stage"], "speech")
+            self.assertTrue(record["release_verified"])
+            h.provisioner.release.assert_called_once_with("owned")
+
+    def test_planned_resume_sizes_only_remaining_segments(self):
+        with tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
+            h = LongHarness(Path(tmp).resolve(), stack)
+            h.fail_segment = 2
+            first = h.run()
+            self.assertEqual(first["outcome"], "failed", first)
+            self.assertEqual([s["index"] for s in first["segments"]], [0, 1])
+            h.generated.clear()
+            h.fail_segment = None
+            h.bindings = replace(h.bindings, acquisition_id="recovery")
+            record = h.run(planned_segments=3)
+            self.assertEqual(h.patches["RunpodPodProvisioner"].call_args.kwargs["lease_seconds"], 3900)
+            self.assertEqual(record["budget"]["lease_seconds"], 3900)
+            self.assertEqual(h.generated, [2])
+            self.assertEqual(record["outcome"], "complete", record)
 
     def test_happy_path_three_ordered_verified_segments(self):
         with tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
@@ -326,3 +367,28 @@ class LongDriverTests(unittest.TestCase):
             with self.assertRaisesRegex(A20Error, "LONG_RETAIN_NODE_UNSUPPORTED"):
                 h.run()
             h.provisioner.acquire.assert_not_called()
+
+
+class LongAdmissionTests(unittest.TestCase):
+    def test_planned_lease_reserves_requested_duration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            approval = LongSessionBudgetApproval.for_scope(
+                str(Path(tmp).resolve() / "journal"), "EUR-IS-2",
+                EvidenceRef("private://synthetic/review", "a" * 64),
+                gpu_id=L40S_GPU_ID, aggregate_usd=35, lifetime_seconds=50400, phase_id="test")
+            service = LongSessionServiceContext(approval)
+            spec = RunpodPodSpec("a20test", IMAGE, L40S_GPU_ID, "EUR-IS-2", "ssh-ed25519 AAAA",
+                max_hourly_usd=1.25, disk_gb=150, min_ram_per_gpu_gb=64)
+            maximum = driver.acquisition_max_cost_usd(spec, approval)
+            self.assertEqual(maximum, 17.78)
+            intent = AcquisitionIntent("acquisition", spec, "a" * 32,
+                "cineforge-a20test-admission", service.model, maximum, 6900, 120, 10)
+            prepare_long_session_journal(service)
+            with CloudBudgetSession(approval.journal_directory, approval, AdmissionCatalog(),
+                                    guard_deployment_configured=True) as session:
+                session.event_sink(intent, LeaseSnapshot(intent.key, "reserved"))
+                session.before_create(intent)
+            with CloudJournal(approval.journal_directory) as journal:
+                record = strict_object(journal.initial)["records"][intent.key]
+                self.assertTrue(record["authorized"])
+                self.assertEqual(record["reservation_usd"], 2.434167)
