@@ -14,6 +14,8 @@ from types import TracebackType
 from cineforge.contracts import Artifact
 from cineforge.providers import ExecutionResult
 
+VIDEO_MAX_BYTES = 512 * 1024 * 1024
+
 
 class ArtifactStoreError(ValueError):
     """A destination is unsafe, already used, or could not be written atomically."""
@@ -252,12 +254,13 @@ class PrivateRunDirectory:
 
     def put_payload(self, payload: bytes, suffix: str) -> str:
         """Persist bounded controller output under its content identity, without overwrite."""
-        if (type(payload) is not bytes or not 0 < len(payload) <= 64 * 1024 * 1024
-                or suffix not in ("wav", "mkv", "webm", "json")):
+        maximum = VIDEO_MAX_BYTES if suffix in ("mkv", "mp4") else 64 * 1024 * 1024
+        if (type(payload) is not bytes or not 0 < len(payload) <= maximum
+                or suffix not in ("wav", "mkv", "mp4", "webm", "json")):
             raise ArtifactStoreError("invalid private controller output")
         name = "artifact-" + hashlib.sha256(payload).hexdigest() + "." + suffix
         if name in self._payload_names:
-            if read_private_input(self.path / name, max_bytes=64 * 1024 * 1024) != payload:
+            if read_private_input(self.path / name, max_bytes=maximum) != payload:
                 raise ArtifactStoreError("private controller output changed")
             return name
         self._write(name, payload)

@@ -47,6 +47,7 @@ _PACKAGE_FILES = (
     "devices.py",
     "interruptions.py",
     "json_codec.py",
+    "long_delivery.py",
     "long_driver.py",
     "mock.py",
     "native_driver.py",
