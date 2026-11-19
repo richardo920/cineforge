@@ -937,9 +937,9 @@ class ComfyPreimportTests(unittest.TestCase):
                     sentinel = object()
                     calls = []
 
-                    def init(**kwargs):
-                        calls.append(kwargs)
-                        control.lib = sentinel
+                    def init(_calls=calls, _control=control, _sentinel=sentinel, **kwargs):
+                        _calls.append(kwargs)
+                        _control.lib = _sentinel
                         return False  # The launcher must not gate startup on this result.
 
                     control.init = init
