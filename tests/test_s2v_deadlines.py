@@ -18,7 +18,7 @@ from cineforge.cloud_budget import CloudBudgetError
 from cineforge.private_store import PrivateRunDirectory
 from cineforge.rights import EvidenceRef
 from cineforge.s2v import S2VError, select_s2v
-from cineforge.s2v_run import ATTEMPT_CAP_SECONDS
+from cineforge.s2v_run import ATTEMPT_CAP_SECONDS, ATTEMPT_MAX_POLLS
 from cineforge.s2v_service import S2VBudgetApproval, S2VServiceContext
 from cineforge.ssh_worker import SSHWorker, WorkerError
 from cineforge.workflows import canonical
@@ -319,7 +319,32 @@ class ExecutionDeadlineTests(unittest.TestCase):
     def test_attempt_cap_fits_measured_profile_and_approved_lifetime(self):
         self.assertEqual(ATTEMPT_CAP_SECONDS, 1800)
         self.assertLess(340 + 709 + 119, ATTEMPT_CAP_SECONDS)
-        self.assertLess(2 * ATTEMPT_CAP_SECONDS + 1344, 7200 - 120)
+        self.assertLess(2 * ATTEMPT_CAP_SECONDS + 1748, 7200 - 120)
+        self.assertIs(type(ATTEMPT_MAX_POLLS), int)
+        self.assertGreater(ATTEMPT_MAX_POLLS, ATTEMPT_CAP_SECONDS)
+        self.assertLessEqual(ATTEMPT_MAX_POLLS, 10000)
+
+    def test_generation_exceeding_600_polls_completes(self):
+        from cineforge.comfy_run import execute_comfy
+        self.f.fixture.remaining = 5000
+        self.f.wire.mode = 'running'
+        request = self.f.wire.request
+        history_calls, calls = [], []
+        def counting_request(method, path, *args, **kwargs):
+            if path.startswith('/history/'):
+                history_calls.append(path)
+                if len(history_calls) > 700:
+                    self.f.wire.mode = 'success'
+            return request(method, path, *args, **kwargs)
+        def execute(*args, **kwargs):
+            calls.append(kwargs)
+            return execute_comfy(*args, poll_interval_seconds=0, **kwargs)
+        self.f.wire.request = counting_request
+        result = self.run_scene(execute=execute)
+        self.assertEqual(result['outcome'], 'pending_human_review')
+        self.assertGreater(len(history_calls), 600)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]['max_polls'], ATTEMPT_MAX_POLLS)
 
     def test_slow_pre_submit_and_measured_generation_fit_entry_window(self):
         from cineforge.comfy_run import execute_comfy
@@ -343,7 +368,9 @@ class ExecutionDeadlineTests(unittest.TestCase):
         self.assertEqual(calls[0]['absolute_deadline'], entry + ATTEMPT_CAP_SECONDS)
         self.assertEqual(result['controller_deadline'], entry + ATTEMPT_CAP_SECONDS)
 
-    def test_stuck_execution_cannot_return_success_after_entry_deadline(self):
+    def test_late_execute_return_cannot_finalize(self):
+        # In-flight interruption: test_comfy_run's test_poll_budget_attempts_only_owned_job_cancel
+        # and test_expired_wall_deadline_gets_separate_bounded_cleanup.
         from cineforge.comfy_run import execute_comfy
         self.f.fixture.remaining = 5000
         entry = self.now

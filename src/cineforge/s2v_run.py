@@ -26,15 +26,22 @@ from cineforge.ssh_worker import SSHWorker, run_process
 from cineforge.worker_bootstrap import validate_s2v_runtime
 from cineforge.workflows import canonical, strict_object
 
-
-# Diag-30: full attempts took ~1,036-1,093 s; allow headroom for ~340 s
-# pre-submit + 709 s execute (646 s generation) + 119 s finish_precision.
-# 1,800 = 7,200 / 4 of S2VBudgetApproval's maximum approved lifetime;
-# two capped attempts + ~1,344 s staging = ~4,944 s, before lease reserves.
+# Diag-30 full attempts took ~1,036-1,093 s (~340 s pre-submit, 709 s execute
+# including 646 s generation, and 119 s finish_precision within that profile).
+# 1,800 s gives ~1.65x headroom over the ~1,093 s worst full attempt.
+# Lifetime fit is enforced by request_deadline's parent clamp, run_s2v's sampled
+# lease-reserve clamp (deadline - 120), and a20_driver.attempt_cap: two capped
+# attempts + worst-observed 1,748 s staging = 5,348 s, within 7,200 s minus reserves.
 # Keep one entry deadline through finish_precision, technical_result and
 # finalization; re-anchoring would need new post-execution deadlines and risk
 # re-coupling POST-hook verifies (their own 120 s cap remains unchanged).
 ATTEMPT_CAP_SECONDS = 1800
+ATTEMPT_POLL_INTERVAL_SECONDS = 1  # execute_comfy's default; run_s2v does not override it.
+ATTEMPT_POLL_SAFETY_FACTOR = 2
+# Poll periods are strictly > 1 s (GET time + sleep up to the 1 s interval),
+# so a 1,800 s attempt permits at most ~1,800 polls. A 3,600-poll budget leaves
+# clear margin: within any attempt window, the time deadline binds first.
+ATTEMPT_MAX_POLLS = ATTEMPT_CAP_SECONDS * ATTEMPT_POLL_SAFETY_FACTOR // ATTEMPT_POLL_INTERVAL_SECONDS
 
 
 @preserve_interruption
@@ -257,7 +264,7 @@ def run_s2v(selection: S2VSelection, verification: WorkerVerification, driver: S
                 _admit(selection, verification, driver, deadline, clock)
                 manifest = execute(selection.plan(), selection, verification, directory / "shot",
                     allow_live=True, endpoint=endpoint,
-                    transport=transport, timeout_seconds=remaining, clock=clock,
+                    transport=transport, timeout_seconds=remaining, clock=clock, max_polls=ATTEMPT_MAX_POLLS,
                     result_timeout_seconds=min(30, remaining / 2), absolute_deadline=deadline)
                 # Preserve paid output identity before fallible technical inspection.
                 record.update(outcome="generated", manifest=manifest.to_dict())

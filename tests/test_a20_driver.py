@@ -232,6 +232,7 @@ class Harness:
     """Replace effects, retain real driver flow, local freeze and durable run storage."""
     def __init__(self, root, stack, failure=None, mutation=None, lifetime_seconds=1800):
         self.root, self.events, self.failure = root, [], failure
+        self.s2v_deadlines = []
         self.inputs = creative(root / "data")
         code = root / "code"
         code.mkdir()
@@ -335,6 +336,7 @@ class Harness:
 
     def s2v(self, *args, **kwargs):
         language = Path(args[3]).name
+        self.s2v_deadlines.append(kwargs['absolute_deadline'])
         self.event("s2v-" + language)
         return {"manifest": {"artifacts": [{"uri": "artifact-" + "a" * 64 + ".webm", "sha256": "a" * 64}]}}
 
@@ -345,6 +347,30 @@ class Harness:
 
 
 class DriverTests(unittest.TestCase):
+    def test_each_language_receives_a_fresh_attempt_window(self):
+        with tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
+            h = Harness(Path(tmp).resolve(), stack)
+            now, deadlines = [100.0], []
+            attempt_cap = driver.attempt_cap
+            def measured_cap(*args, **kwargs):
+                cap = attempt_cap(*args, **kwargs)
+                deadlines.append(cap)
+                return cap
+            def s2v(*args, **kwargs):
+                result = h.s2v(*args, **kwargs)
+                now[0] += 100
+                return result
+            with (patch.object(driver.time, 'monotonic', side_effect=lambda: now[0]),
+                  patch.object(driver, 'attempt_cap', wraps=measured_cap) as cap,
+                  patch.object(driver, 'run_s2v', side_effect=s2v)):
+                result = h.run()
+            self.assertEqual(result['outcome'], 'pending_human_review')
+            self.assertEqual(cap.call_count, 2)
+            self.assertGreater(cap.call_args_list[1].args[2], cap.call_args_list[0].args[2])
+            self.assertEqual(h.s2v_deadlines, deadlines)
+            self.assertEqual([event for event in h.events if event.startswith('s2v-')],
+                             ['s2v-en', 's2v-zh'])
+
     def test_sequence_once_only_prepare_two_languages_and_delivery(self):
         with tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
             h = Harness(Path(tmp).resolve(), stack)

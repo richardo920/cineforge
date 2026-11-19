@@ -230,7 +230,8 @@ class S2VRunTests(unittest.TestCase):
     def test_known_running_job_uses_only_owned_atomic_cancel(self):
         self.wire.mode = "running"
         def execute(*args, **options):
-            return execute_comfy(*args, max_polls=1, poll_interval_seconds=0, **options)
+            options['max_polls'] = 1
+            return execute_comfy(*args, poll_interval_seconds=0, **options)
         with self.assertRaises(S2VError):
             self.run_scene(execute=execute)
         inner = json.loads((self.output / "shot/run.json").read_text())
