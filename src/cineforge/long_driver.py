@@ -1,4 +1,8 @@
-"""One guarded lease, one canonical voice and ordered, locally verified segments."""
+"""One guarded lease, one canonical voice and ordered, locally verified segments.
+
+A lock-only output directory (crash before the first run.json) requires a new
+output directory; the shared private store refuses to adopt it.
+"""
 from __future__ import annotations
 
 import hashlib
@@ -20,14 +24,27 @@ from cineforge.native_speech import OriginalVoiceDesign
 from cineforge.native_speech_integrity import NativeSpeechSelection
 from cineforge.paired_media import image_metadata
 from cineforge.private_store import PrivateRunDirectory, read_private_input
-from cineforge.runpod import RunpodPodProvisioner, RunpodPodSpec
+from cineforge.runpod import (
+    AcquisitionUncertainError,
+    CleanupUncertainError,
+    ProvisioningError,
+    RunpodPodProvisioner,
+    RunpodPodSpec,
+)
 from cineforge.runpod_transport import CloudTransport
 from cineforge.s2v import VerifiedS2V, select_s2v
-from cineforge.s2v_run import run_s2v
+from cineforge.s2v_run import ATTEMPT_CAP_SECONDS, run_s2v
 from cineforge.s2v_service import LongSessionServiceContext, prepare_long_session_journal
 from cineforge.speech import QwenBaseSpeechAdapter, SpeechArtifact
 from cineforge.ssh_worker import SSHWorker
 from cineforge.workflows import canonical, strict_object
+
+# Recovery planning allowances: shot work per segment, one-time staging/design,
+# and lease slack. Admission still enforces the journal-wide aggregate cap.
+PER_SEGMENT_SECONDS = 1500
+SETUP_SECONDS = 1500
+SLACK_SECONDS = 900
+SPEECH_MARGIN_SECONDS = 300
 
 
 def _sha(payload: bytes) -> str:
@@ -119,6 +136,8 @@ def run_long_session(b: LongSessionBindings, frozen: FrozenInputs, output: Path,
             or b.design.language != "English" or b.design.text != lines[design_index]
             or b.design.description != data["voice_design"].decode().strip()):
         raise A20Error("LONG_SCOPE_OR_CREATIVE_INPUT")
+    if spec.retain_node:
+        raise A20Error("LONG_RETAIN_NODE_UNSUPPORTED")
     wheel = read_private_input(b.sox_wheel, max_bytes=16 * 1024 * 1024)
 
     def configuration() -> bytes:
@@ -134,8 +153,8 @@ def run_long_session(b: LongSessionBindings, frozen: FrozenInputs, output: Path,
         "checkpoints": [], "release_verified": True, "human_review": "pending_human_review",
         "export_authority": "none", "budget_notes": [
             "max_attempts counts paid creation admissions journal-wide; a capacity failure consumes one.",
-            "A 50400 s lease reserves $17.78 of $35 at the $1.25/h ceiling (including disk reserve); recovery leases must be sized to remaining work.",
-            "This journal pins its approval lifetime; shorter recovery requires a new approved scope/output. Two full leases exceed $35 unless actual billing is reconciled."],
+            "Recovery leases use remaining verified work; journal-wide reservations include disk reserve.",
+            "acquisition_max_cost_usd is the approved per-acquisition ceiling; admission reserves the requested lease against aggregate_usd."],
         "generation_timing": "elapsed shot execution including technical verification"}
     stage, index = "preflight", None
     with PrivateRunDirectory(output, resume=True) as store:
@@ -145,6 +164,7 @@ def run_long_session(b: LongSessionBindings, frozen: FrozenInputs, output: Path,
                     or previous.get("release_verified") is not True
                     or not isinstance(previous.get("segments"), list)):
                 raise A20Error("LONG_RESUME_SCOPE_OR_RELEASE")
+            previous["budget_notes"] = record["budget_notes"]
             record = previous
         complete = {s["index"]: s for s in record["segments"]
                     if isinstance(s, dict) and type(s.get("index")) is int
@@ -157,6 +177,13 @@ def run_long_session(b: LongSessionBindings, frozen: FrozenInputs, output: Path,
             record["outcome"] = "complete"
             store.checkpoint(canonical(record))
             return record
+        lease_seconds = (min(approval.lifetime_seconds, math.ceil(
+            (len(lines) - len(complete)) * PER_SEGMENT_SECONDS + SETUP_SECONDS + SLACK_SECONDS))
+            if complete else approval.lifetime_seconds)
+        max_cost_usd = acquisition_max_cost_usd(spec, approval)
+        record["budget"] = {"lease_seconds": lease_seconds,
+            "acquisition_max_cost_usd": max_cost_usd, "aggregate_usd": approval.aggregate_usd,
+            "max_hourly_usd": spec.max_hourly_usd}
         attempt = "attempt-" + uuid.uuid4().hex
 
         def guard() -> None:
@@ -191,7 +218,7 @@ def run_long_session(b: LongSessionBindings, frozen: FrozenInputs, output: Path,
                                output / attempt / "worker", allow_live=allow_live) as worker:
                     provisioner = RunpodPodProvisioner(spec, b.transport, probe=worker.probe,
                         before_create=budget.before_create, event_sink=budget.event_sink,
-                        lease_seconds=approval.lifetime_seconds)
+                        lease_seconds=lease_seconds)
                     worker.set_enforcer(lambda: budget.enforce_limits(provisioner))
                     device = None
                     try:
@@ -199,14 +226,20 @@ def run_long_session(b: LongSessionBindings, frozen: FrozenInputs, output: Path,
                         guard()
                         record["release_verified"] = False
                         store.checkpoint(canonical(record))
-                        device = provisioner.acquire(b.service.model,
-                            max_cost_usd=acquisition_max_cost_usd(spec, approval),
-                            idempotency_key=b.acquisition_id)
+                        try:
+                            device = provisioner.acquire(b.service.model,
+                                max_cost_usd=max_cost_usd, idempotency_key=b.acquisition_id)
+                        except ProvisioningError as error:
+                            record["acquisition_snapshot"] = (asdict(error.snapshot)
+                                if error.snapshot is not None else None)
+                            if not isinstance(error, (AcquisitionUncertainError, CleanupUncertainError)):
+                                record["release_verified"] = True
+                            raise
                         stage = "stage"
                         guard()
-                        native_cap = min(absolute_deadline, time.monotonic() + approval.lifetime_seconds)
+                        native_cap = min(absolute_deadline, time.monotonic() + lease_seconds)
                         bridge = RemoteNativeSpeechRuntime(worker, allow_native=allow_live,
-                            timeout_seconds=approval.lifetime_seconds, max_operations=len(lines) + 1, seed=int(data["seed"].strip()),
+                            timeout_seconds=lease_seconds, max_operations=len(lines) + 1, seed=int(data["seed"].strip()),
                             absolute_deadline=native_cap)
                         record["capabilities"] = bridge.measure_capabilities(absolute_deadline=native_cap)
                         guard()
@@ -238,6 +271,9 @@ def run_long_session(b: LongSessionBindings, frozen: FrozenInputs, output: Path,
                                     continue
                                 stage = "speech"
                                 guard()
+                                if (budget.remaining_seconds(b.acquisition_id) - 120
+                                        < ATTEMPT_CAP_SECONDS + SPEECH_MARGIN_SECONDS):
+                                    raise _DeadlineStopped("LONG_SEGMENT_LEASE_EXHAUSTED")
                                 context = b.segment(index, reference)
                                 utterance = next((u for u in context.sheet.script.utterances
                                     if u.utterance_id == context.utterance_id), None)

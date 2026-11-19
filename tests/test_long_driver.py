@@ -13,7 +13,13 @@ from test_a20_driver import Harness
 from test_speech import CanonicalVoiceBinding, fixture, wav_bytes
 
 from cineforge import long_driver as driver
-from cineforge.a20_inputs import FrozenInputs
+from cineforge.a20_inputs import A20Error, FrozenInputs
+from cineforge.runpod import (
+    AcquisitionUncertainError,
+    CleanupUncertainError,
+    LeaseSnapshot,
+    ProvisioningError,
+)
 from cineforge.s2v_service import LongSessionBudgetApproval, LongSessionServiceContext
 
 
@@ -40,6 +46,7 @@ class LongHarness(Harness):
             stack.enter_context(patch.object(driver, name, self.patches[name]))
         stack.enter_context(patch.object(driver, "prepare_long_session_journal", Mock()))
         stack.enter_context(patch.object(driver, "run_s2v", self.s2v))
+        self.budget.remaining_seconds.return_value = 50000
         self.generated = []
         self.fail_segment = None
         self.adapter.synthesize.side_effect = self.speech
@@ -106,6 +113,9 @@ class LongDriverTests(unittest.TestCase):
             h.bindings = replace(h.bindings, acquisition_id="recovery")
             second = h.run()
             self.assertEqual(second["outcome"], "complete", second)
+            self.assertEqual(h.patches["RunpodPodProvisioner"].call_args.kwargs["lease_seconds"], 5400)
+            self.assertEqual(second["budget"], {"lease_seconds": 5400,
+                "acquisition_max_cost_usd": 17.78, "aggregate_usd": 35, "max_hourly_usd": 1.25})
             self.assertEqual(h.generated, [1, 2])
             self.assertEqual(first["segments"][0], second["segments"][0])
             h.bridge.preview.assert_called_once()
@@ -176,3 +186,107 @@ class LongDriverTests(unittest.TestCase):
                 self.assertEqual(record["outcome"], "failed")
                 self.assertTrue(record["failures"])
                 self.assertEqual(record["release_verified"], fail != "release")
+
+    def test_failed_acquisition_records_snapshot_and_allows_resume(self):
+        for state in ("released", "not_created"):
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
+                h = LongHarness(Path(tmp).resolve(), stack)
+                snapshot = LeaseSnapshot("acquire", state, "owned" if state == "released" else None)
+                h.provisioner.acquire.side_effect = ProvisioningError("acquire failed", snapshot)
+                record = h.run()
+                self.assertEqual(record["outcome"], "failed")
+                self.assertTrue(record["release_verified"])
+                self.assertEqual(record["acquisition_snapshot"]["state"], state)
+                self.assertEqual(json.loads((h.output / "run.json").read_bytes()), record)
+                h.provisioner.release.assert_not_called()
+                h.provisioner.acquire.side_effect = None
+                h.bindings = replace(h.bindings, acquisition_id="recovery")
+                self.assertEqual(h.run()["outcome"], "complete")
+
+    def test_uncertain_acquisition_or_release_blocks_resume(self):
+        for error in (AcquisitionUncertainError("uncertain"), CleanupUncertainError("uncertain")):
+            with self.subTest(error=type(error)), tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
+                h = LongHarness(Path(tmp).resolve(), stack)
+                h.provisioner.acquire.side_effect = error
+                self.assertFalse(h.run()["release_verified"])
+                h.provisioner.acquire.reset_mock()
+                with self.assertRaisesRegex(A20Error, "LONG_RESUME_SCOPE_OR_RELEASE"):
+                    h.run()
+                h.provisioner.acquire.assert_not_called()
+
+    def test_segment_stops_before_speech_when_lease_too_short(self):
+        with tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
+            h = LongHarness(Path(tmp).resolve(), stack)
+            def checkpoint(name, record):
+                if name == "segment-0":
+                    h.budget.remaining_seconds.return_value = (
+                        120 + driver.ATTEMPT_CAP_SECONDS + driver.SPEECH_MARGIN_SECONDS - 1)
+            h.bindings = replace(h.bindings, checkpoint=checkpoint)
+            record = h.run()
+            self.assertEqual(record["outcome"], "deadline_stopped", record)
+            self.assertEqual(h.generated, [0])
+            self.assertEqual(record["failures"][-1]["message"], "LONG_SEGMENT_LEASE_EXHAUSTED")
+            self.assertTrue(record["release_verified"])
+
+    def test_voice_lock_within_run_and_across_resume(self):
+        for resume in (False, True):
+            with self.subTest(resume=resume), tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
+                h = LongHarness(Path(tmp).resolve(), stack)
+                if resume:
+                    h.fail_segment = 1
+                    h.run()
+                    h.fail_segment = None
+                    h.generated.clear()
+                    h.bindings = replace(h.bindings, acquisition_id="recovery")
+                def segment(index, reference, h=h):
+                    context = h.segment(index, reference)
+                    if index == 1:
+                        context.voices = ()
+                    return context
+                h.bindings = replace(h.bindings, segment=segment)
+                record = h.run()
+                self.assertEqual(record["outcome"], "failed", record)
+                self.assertEqual(record["failures"][-1]["message"], "A20_CANONICAL_VOICE_CHANGED")
+                self.assertEqual(h.generated, [] if resume else [0])
+                self.assertTrue(record["release_verified"])
+
+    def test_checkpoint_failures_written_before_release(self):
+        for source in ("binding", "store"):
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
+                h = LongHarness(Path(tmp).resolve(), stack)
+                events = []
+                original = driver.PrivateRunDirectory.checkpoint
+                injected = [False]
+                def checkpoint(store, payload, source=source, h=h, injected=injected,
+                               original=original, events=events):
+                    record = json.loads(payload)
+                    if (source == "store" and store.path == h.output and record["checkpoints"]
+                            and not injected[0]):
+                        injected[0] = True
+                        raise OSError("checkpoint failed")
+                    original(store, payload)
+                    if store.path == h.output and record["failures"]:
+                        events.append("failure_written")
+                stack.enter_context(patch.object(driver.PrivateRunDirectory, "checkpoint", checkpoint))
+                if source == "binding":
+                    h.bindings = replace(h.bindings, checkpoint=Mock(side_effect=RuntimeError("checkpoint failed")))
+                def release(device_id, h=h, events=events):
+                    self.assertEqual(device_id, "owned")
+                    self.assertEqual(json.loads((h.output / "run.json").read_bytes())["outcome"], "failed")
+                    events.append("release")
+                h.provisioner.release.side_effect = release
+                record = h.run()
+                self.assertEqual(record["outcome"], "failed", record)
+                self.assertEqual(record["failures"][-1]["message"], "checkpoint failed")
+                self.assertTrue(record["release_verified"])
+                h.provisioner.release.assert_called_once()
+                self.assertLess(events.index("failure_written"), events.index("release"))
+                self.assertEqual(json.loads((h.output / "run.json").read_bytes()), record)
+
+    def test_retain_node_rejected_before_acquisition(self):
+        with tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
+            h = LongHarness(Path(tmp).resolve(), stack)
+            h.bindings = replace(h.bindings, spec=replace(h.bindings.spec, retain_node=True))
+            with self.assertRaisesRegex(A20Error, "LONG_RETAIN_NODE_UNSUPPORTED"):
+                h.run()
+            h.provisioner.acquire.assert_not_called()
