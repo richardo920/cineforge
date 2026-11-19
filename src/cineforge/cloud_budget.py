@@ -301,8 +301,8 @@ class CloudBudgetSession:
                 or not _number(idle_seconds) or idle_seconds > 300
                 or not _number(quote_max_age_seconds) or quote_max_age_seconds > 30):
             raise CloudBudgetError("invalid cloud budget configuration")
-        if (type(approval) in (ConditioningBudgetApproval, S2VBudgetApproval,
-                              LongSessionBudgetApproval)
+        if (isinstance(approval, (ConditioningBudgetApproval, S2VBudgetApproval,
+                                  LongSessionBudgetApproval))
                 and str(Path(path).absolute()) != approval.journal_directory):
             raise CloudBudgetError("M4 journal path differs from the independently approved scope"
                 if type(approval) is ConditioningBudgetApproval else
