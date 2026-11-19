@@ -24,11 +24,13 @@ from cineforge.s2v_service import LongSessionBudgetApproval, LongSessionServiceC
 
 
 class LongHarness(Harness):
-    def __init__(self, root, stack):
+    def __init__(self, root, stack, lines=None):
         super().__init__(root, stack)
         paths = {k: v for k, v in self.inputs.paths.items()
                  if k in ("actor_png", "voice_design", "seed")}
-        for name, value in (("segments", json.dumps(["Approved English.", "Second.", "Third."])),
+        if lines is None:
+            lines = ["Approved English.", "Second.", "Third."]
+        for name, value in (("segments", json.dumps(lines)),
                             ("design_index", "0")):
             paths[name] = root / "data" / name
             paths[name].write_text(value)
@@ -78,12 +80,46 @@ class LongHarness(Harness):
         return {"outcome": "pending_human_review", "technical_result": {"video_sha256": sha},
                 "manifest": {"artifacts": [{"uri": name, "sha256": sha}]}}
 
-    def run(self, deadline=None):
+    def run(self, deadline=None, planned_segments=None):
         return driver.run_long_session(self.bindings, self.frozen, self.output,
-            absolute_deadline=deadline or driver.time.monotonic() + 50000, allow_live=True)
+            absolute_deadline=deadline or driver.time.monotonic() + 50000, allow_live=True,
+            planned_segments=planned_segments)
 
 
 class LongDriverTests(unittest.TestCase):
+    def test_planned_segments_sizes_lease(self):
+        for planned, seconds in ((3, 6900), (1, 3900), (2, 5400), (100, 50400)):
+            with self.subTest(planned=planned), tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
+                h = LongHarness(Path(tmp).resolve(), stack)
+                record = h.run(planned_segments=planned)
+                self.assertEqual(h.patches["RunpodPodProvisioner"].call_args.kwargs["lease_seconds"], seconds)
+                self.assertEqual(record["budget"]["lease_seconds"], seconds)
+
+    def test_planned_segments_rejects_invalid_values_before_acquisition(self):
+        for planned in (True, False, 0, -1, 1.0, "3"):
+            with self.subTest(planned=planned), tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
+                h = LongHarness(Path(tmp).resolve(), stack)
+                with self.assertRaisesRegex(A20Error, "^LONG_PLANNED_SEGMENTS$"):
+                    h.run(planned_segments=planned)
+                h.patches["RunpodPodProvisioner"].assert_not_called()
+
+    def test_planned_lease_stops_before_fourth_segment_speech(self):
+        with tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
+            h = LongHarness(Path(tmp).resolve(), stack,
+                lines=["Approved English.", "Second.", "Third.", "Fourth."])
+            def checkpoint(name, record):
+                if name == "segment-2":
+                    h.budget.remaining_seconds.return_value = (
+                        120 + driver.ATTEMPT_CAP_SECONDS + driver.SPEECH_MARGIN_SECONDS - 1)
+            h.bindings = replace(h.bindings, checkpoint=checkpoint)
+            record = h.run(planned_segments=3)
+            self.assertEqual(h.patches["RunpodPodProvisioner"].call_args.kwargs["lease_seconds"], 6900)
+            self.assertEqual(record["budget"]["lease_seconds"], 6900)
+            self.assertEqual(record["outcome"], "deadline_stopped", record)
+            self.assertEqual(h.generated, [0, 1, 2])
+            self.assertEqual(record["failures"][-1]["message"], "LONG_SEGMENT_LEASE_EXHAUSTED")
+            self.assertTrue(record["release_verified"])
+
     def test_happy_path_three_ordered_verified_segments(self):
         with tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
             h = LongHarness(Path(tmp).resolve(), stack)

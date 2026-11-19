@@ -115,10 +115,13 @@ def _verified(segment: dict[str, Any], index: int, line: str, output: Path) -> b
 
 @preserve_interruption
 def run_long_session(b: LongSessionBindings, frozen: FrozenInputs, output: Path, *,
-                     absolute_deadline: float, allow_live: bool = False) -> dict[str, Any]:
+                     absolute_deadline: float, allow_live: bool = False,
+                     planned_segments: int | None = None) -> dict[str, Any]:
     """Resume only a released local run; every new lease is journal-wide admission."""
     if allow_live is not True:
         raise A20Error("LONG_LIVE_OPT_IN_REQUIRED")
+    if planned_segments is not None and (type(planned_segments) is not int or planned_segments < 1):
+        raise A20Error("LONG_PLANNED_SEGMENTS")
     if not math.isfinite(absolute_deadline):
         raise A20Error("LONG_ORIGINAL_CAP")
     frozen.check()
@@ -180,6 +183,9 @@ def run_long_session(b: LongSessionBindings, frozen: FrozenInputs, output: Path,
         lease_seconds = (min(approval.lifetime_seconds, math.ceil(
             (len(lines) - len(complete)) * PER_SEGMENT_SECONDS + SETUP_SECONDS + SLACK_SECONDS))
             if complete else approval.lifetime_seconds)
+        if planned_segments is not None:
+            lease_seconds = min(approval.lifetime_seconds, math.ceil(
+                planned_segments * PER_SEGMENT_SECONDS + SETUP_SECONDS + SLACK_SECONDS))
         max_cost_usd = acquisition_max_cost_usd(spec, approval)
         record["budget"] = {"lease_seconds": lease_seconds,
             "acquisition_max_cost_usd": max_cost_usd, "aggregate_usd": approval.aggregate_usd,
