@@ -5,6 +5,10 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass, field
 
+MAX_DURATION_SECONDS = 180.0
+# 180 s stereo PCM16: 17.28 MB at 24 kHz, 34.56 MB at 48 kHz; allow 48 MiB.
+MAX_PCM_BYTES = 48 * 1024 * 1024
+
 
 class PCMError(ValueError):
     """Static diagnostics without input bytes or private metadata."""
@@ -22,13 +26,17 @@ class PCM16Wave:
 
 
 def inspect_pcm16_wav(payload: bytes, *, max_input_bytes: int = 16 * 1024 * 1024,
-                      max_duration_seconds: int = 60) -> PCM16Wave:
+                      max_duration_seconds: int = 60, long_form: bool = False) -> PCM16Wave:
     """RIFF/fmt16/data only; mono/stereo, 16/24/44.1/48kHz, PCM little-endian16.
 
     The returned framing is not a rights, generation or content-identity assertion.
     """
-    if (type(max_input_bytes) is not int or not 44 <= max_input_bytes <= 16 * 1024 * 1024
-            or type(max_duration_seconds) is not int or not 1 <= max_duration_seconds <= 60):
+    byte_cap = MAX_PCM_BYTES if long_form else 16 * 1024 * 1024
+    duration_cap = int(MAX_DURATION_SECONDS) if long_form else 60
+    if (type(long_form) is not bool or type(max_input_bytes) is not int
+            or not 44 <= max_input_bytes <= byte_cap
+            or type(max_duration_seconds) is not int
+            or not 1 <= max_duration_seconds <= duration_cap):
         raise PCMError("invalid PCM inspection bounds")
     if (not isinstance(payload, bytes) or not 44 <= len(payload) <= max_input_bytes
             or payload[:4] != b"RIFF" or payload[8:12] != b"WAVE"
