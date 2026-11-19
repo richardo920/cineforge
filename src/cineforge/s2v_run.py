@@ -45,14 +45,16 @@ ATTEMPT_MAX_POLLS = ATTEMPT_CAP_SECONDS * ATTEMPT_POLL_SAFETY_FACTOR // ATTEMPT_
 
 
 @preserve_interruption
-def inspect_s2v_media(path: Path, *, absolute_deadline: float | None = None,
+def inspect_s2v_media(path: Path, *, ffprobe: Path | None = None,
+                      absolute_deadline: float | None = None,
                       clock: Callable[[], float] = time.monotonic) -> dict[str, Any]:
     """Fixed local Matroska/VP9 probe; no network protocols or arbitrary media URL."""
     candidate = None
     deadline = 0.0
     try:
         deadline = request_deadline(10, absolute_deadline, clock)
-        binary = shutil.which("ffprobe")
+        binary = str(ffprobe) if ffprobe is not None and ffprobe.is_absolute() else (
+            shutil.which("ffprobe") if ffprobe is None else None)
         if binary is None:
             raise ValueError
         def check() -> None:

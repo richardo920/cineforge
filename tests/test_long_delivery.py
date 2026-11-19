@@ -164,6 +164,11 @@ class LongDeliveryTests(unittest.TestCase):
         self.assertGreater(data[77], data[0])
         self.assertGreater(data[154], data[77])
 
+    def test_explicit_tools_work_without_path_discovery(self):
+        with patch("cineforge.s2v_run.shutil.which", return_value=None):
+            payload = stitch_shots(self.shots[:1], **self.options())
+        self.assertTrue(payload)
+
     def test_invalid_hook_output_and_empty_input_rejected(self):
         with self.assertRaises(A20Error):
             stitch_shots([], **self.options())

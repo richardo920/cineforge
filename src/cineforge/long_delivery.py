@@ -92,7 +92,7 @@ def _stitch(shots: Sequence[Path | bytes], root: Path, *, ffmpeg: Path, ffprobe:
             raise A20Error("LONG_DELIVERY_SEGMENT_BYTES")
         path = root / f"segment-{index}.webm"
         path.write_bytes(payload)
-        inspect_s2v_media(path, absolute_deadline=deadline)
+        inspect_s2v_media(path, ffprobe=ffprobe, absolute_deadline=deadline)
         if transform is not None:
             # The hook receives all 77 packed yuv420p frames at native resolution.
             raw = root / "frames.yuv"
@@ -110,7 +110,7 @@ def _stitch(shots: Sequence[Path | bytes], root: Path, *, ffmpeg: Path, ffprobe:
                 "-framerate", "16", "-i", str(raw), "-an", "-c:v", "libvpx-vp9", "-lossless", "1",
                 "-threads", "2", "-speed", "8", str(path)), deadline)
             raw.unlink()
-            inspect_s2v_media(path, absolute_deadline=deadline)
+            inspect_s2v_media(path, ffprobe=ffprobe, absolute_deadline=deadline)
         segments.append(path)
     manifest = root / "concat.txt"
     manifest.write_text("ffconcat version 1.0\n" + "".join(
