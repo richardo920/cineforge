@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Callable, ClassVar, Protocol
 
 from cineforge.audio import AudioTimebase, RevisionPin, _AudioContract
-from cineforge.audio_pcm import PCMError, inspect_pcm16_wav
+from cineforge.audio_pcm import MAX_DURATION_SECONDS, MAX_PCM_BYTES, PCMError, inspect_pcm16_wav
 from cineforge.audio_process import AudioProcessError, run_audio_process
 from cineforge.contracts import Contract, ContractError, _digest, _integer, _tuple, _unique
 from cineforge.json_codec import strict_loads
@@ -95,9 +95,9 @@ class AnalysisSettings(_AudioContract):
         for name, low, high in (("activity_threshold_dbfs", -120, -1),
                                ("clipping_risk_dbfs", -6, 0), ("timeout_seconds", .05, 30)):
             object.__setattr__(self, name, _finite(getattr(self, name), low, high))
-        _integer(self.max_input_bytes, "maximum audio bytes", 44, _MAX_BYTES)
+        _integer(self.max_input_bytes, "maximum audio bytes", 44, MAX_PCM_BYTES)
         _integer(self.max_output_bytes, "maximum audio tool output", 4096, 1024 * 1024)
-        _integer(self.max_duration_seconds, "maximum audio duration", 1, 60)
+        _integer(self.max_duration_seconds, "maximum audio duration", 1, int(MAX_DURATION_SECONDS))
 
 
 @dataclass(frozen=True, slots=True)
@@ -227,7 +227,7 @@ class AudioAnalysisReport(_AudioContract):
         if self.sample_rate not in (16000, 24000, 44100, 48000) or type(self.sample_rate) is not int:
             raise AudioAnalysisError("unsupported analysis sample rate")
         _integer(self.channels, "audio channels", 1, 2)
-        _integer(self.frames, "audio frames", 1, self.sample_rate * 60)
+        _integer(self.frames, "audio frames", 1, self.sample_rate * int(MAX_DURATION_SECONDS))
         if self.frames > self.sample_rate * self.settings.max_duration_seconds:
             raise AudioAnalysisError("audio duration exceeds report bounds")
         self.settings.timebase.check_interval(self.timing.start_ticks, self.timing.duration_ticks)
@@ -447,7 +447,9 @@ def analyze_wav(payload: bytes, pin: RevisionPin, settings: AnalysisSettings,
     deadline = time.monotonic() + settings.timeout_seconds
     try:
         inspected = inspect_pcm16_wav(payload, max_input_bytes=settings.max_input_bytes,
-                                      max_duration_seconds=settings.max_duration_seconds)
+                                      max_duration_seconds=settings.max_duration_seconds,
+                                      long_form=(settings.max_duration_seconds > 60
+                                                 or settings.max_input_bytes > _MAX_BYTES))
     except PCMError:
         raise AudioAnalysisError("unsupported or malformed PCM WAV") from None
     pcm, rate, channels = inspected.pcm, inspected.sample_rate, inspected.channels

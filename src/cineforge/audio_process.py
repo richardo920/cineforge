@@ -9,6 +9,7 @@ import signal
 import subprocess
 import time
 
+from cineforge.audio_pcm import MAX_PCM_BYTES
 from cineforge.interruptions import preserve_interruption, remember_interruption
 
 
@@ -72,7 +73,7 @@ def run_audio_process(command: tuple[str, ...], *, payload: bytes, timeout_secon
     if (not isinstance(command, tuple) or not command
             or any(not isinstance(item, str) or not item or "\x00" in item for item in command)
             or not os.path.isabs(command[0]) or not isinstance(payload, bytes)
-            or len(payload) > 16 * 1024 * 1024
+            or len(payload) > MAX_PCM_BYTES
             or type(timeout_seconds) not in (int, float) or not math.isfinite(timeout_seconds)
             or not 0 < timeout_seconds <= 30 or type(max_output_bytes) is not int
             or not 4096 <= max_output_bytes <= 1024 * 1024):

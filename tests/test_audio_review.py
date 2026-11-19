@@ -13,6 +13,7 @@ from test_speech import EVIDENCE
 
 from cineforge.audio import RevisionPin
 from cineforge.audio_mix import BROADCAST_LINEAR, mix_scene
+from cineforge.audio_pcm import MAX_PCM_BYTES
 from cineforge.audio_review import (
     HUMAN_CHECKLIST,
     TECHNICAL_CHECKLIST,
@@ -20,6 +21,7 @@ from cineforge.audio_review import (
     LanguageClip,
     MediaInput,
     OwnerReview,
+    ReviewAsset,
     ReviewCheck,
     ReviewError,
     ReviewRecipe,
@@ -113,6 +115,12 @@ class AudioReviewTests(unittest.TestCase):
         self.assertEqual(ReviewSnapshot.from_json(snapshot.to_json()), snapshot)
         # These video bytes intentionally are not decoded or certified by the factory.
         self.assertEqual(snapshot.mix_status, "synthetic_fixture_only")
+
+    def test_review_audio_closed_byte_bound(self):
+        asset = ReviewAsset(pin("long-audio"), MAX_PCM_BYTES, "audio/wav")
+        self.assertEqual(asset.size_bytes, MAX_PCM_BYTES)
+        with self.assertRaisesRegex(ReviewError, "review audio exceeds supported byte bound"):
+            replace(asset, size_bytes=MAX_PCM_BYTES + 1)
 
     def test_checksums_verify_supplied_payloads_and_sizes_without_io(self):
         payload = self.inputs["delivered"].payload

@@ -23,7 +23,13 @@ from cineforge.audio_analysis import (
     ToolIdentity,
     analyze_wav,
 )
-from cineforge.audio_pcm import PCM16Wave, PCMError, inspect_pcm16_wav
+from cineforge.audio_pcm import (
+    MAX_DURATION_SECONDS,
+    MAX_PCM_BYTES,
+    PCM16Wave,
+    PCMError,
+    inspect_pcm16_wav,
+)
 from cineforge.characters import CharacterRegistry, RightsBinding
 from cineforge.contracts import Contract, ContractError, ProjectPlan, _digest, _identifier, _integer
 from cineforge.json_codec import canonical_json
@@ -31,7 +37,9 @@ from cineforge.rights import RightsLedger, Use
 from cineforge.speech import SpeechArtifact
 from cineforge.stem_import import ImportedStemArtifact, import_original_stem
 
-_MAX_BYTES = 16 * 1024 * 1024
+_MAX_BYTES = MAX_PCM_BYTES
+_MAX_INPUT_BYTES = 2 * _MAX_BYTES
+_MAX_SOURCES = 40
 
 
 class MixError(ContractError):
@@ -95,7 +103,7 @@ class MixSettings(_AudioContract):
             raise MixError("unsupported mix sample rate")
         _integer(self.channels, "mix channels", 1, 2)
         for name, low, high in (("duck_db", -60, 0), ("duck_threshold_dbfs", -96, -1),
-                               ("timeout_seconds", .1, 30)):
+                               ("timeout_seconds", .1, MAX_DURATION_SECONDS)):
             object.__setattr__(self, name, _finite(getattr(self, name), low, high))
         for name in ("attack_ticks", "hold_ticks", "release_ticks"):
             _integer(getattr(self, name), "duck timing ticks")
@@ -140,7 +148,7 @@ class MixInput(_AudioContract):
         _identifier(self.cue_id, "mix cue ID")
         _instance(self.source, RevisionPin)
         _digest(self.metadata_sha256, "mix source metadata digest")
-        _integer(self.frames, "mix source frames", 1, 60 * 48000)
+        _integer(self.frames, "mix source frames", 1, int(MAX_DURATION_SECONDS) * 48000)
         if self.source_kind not in ("original_import", "synthetic_fixture", "unverified_injected_runtime"):
             raise MixError("unsupported mix source")
 
@@ -214,7 +222,8 @@ class MixedArtifact:
         _instance(self.report, MixReport)
         wave = None
         try:
-            wave = inspect_pcm16_wav(self.payload)
+            wave = inspect_pcm16_wav(self.payload, max_input_bytes=_MAX_BYTES,
+                max_duration_seconds=int(MAX_DURATION_SECONDS), long_form=True)
         except PCMError:
             pass
         if wave is None:
@@ -252,20 +261,20 @@ def _admit(sheet: CueSheet, sources: tuple[SpeechArtifact | ImportedStemArtifact
                         (registry, CharacterRegistry), (ledger, RightsLedger),
                         (picture, RevisionPin), (script, RevisionPin)):
         _instance(value, record_kind)
-    if (type(sources) is not tuple or not 1 <= len(sources) <= 16
+    if (type(sources) is not tuple or not 1 <= len(sources) <= _MAX_SOURCES
             or len(sources) != len(sheet.cues) or script != sheet.script.pin()
             or not sheet.preflight(plan, registry, ledger, current_picture=picture,
                                    use=Use("copy")).allowed
             or {item.stem_id for item in settings.stems} != {item.stem_id for item in sheet.stems}):
         raise MixError("stale or unadmitted soundtrack sources")
-    if sheet.timebase.duration_ticks > sheet.timebase.ticks_per_second * 60:
+    if sheet.timebase.duration_ticks > sheet.timebase.ticks_per_second * MAX_DURATION_SECONDS:
         raise MixError("soundtrack exceeds supported duration")
     total = 0
     for source in sources:
         if type(source) not in (SpeechArtifact, ImportedStemArtifact):
             raise MixError("unsupported soundtrack source record")
         total += len(source.payload)
-    if total > 32 * 1024 * 1024:
+    if total > _MAX_INPUT_BYTES:
         raise MixError("soundtrack input byte bound exceeded")
     pin = RevisionPin(sheet.sheet_id, sheet.revision, sheet.digest())
     cues = {item.cue_id: item for item in sheet.cues}
@@ -280,7 +289,8 @@ def _admit(sheet: CueSheet, sources: tuple[SpeechArtifact | ImportedStemArtifact
             raise MixError("soundtrack character unavailable")
         bindings.update(ref.permission for ref in actor.references)
     for source in sources:
-        wave = inspect_pcm16_wav(source.payload)
+        wave = inspect_pcm16_wav(source.payload, max_input_bytes=_MAX_BYTES,
+            max_duration_seconds=int(MAX_DURATION_SECONDS), long_form=True)
         if isinstance(source, ImportedStemArtifact):
             fresh = import_original_stem(sheet, source.cue.cue_id, source.payload, source.pin,
                 ledger=ledger, original_source_review=source.original_source_review)
@@ -366,7 +376,8 @@ def _render(admitted: tuple[tuple[MixInput, PCM16Wave, int, str], ...], sheet: C
             settings: MixSettings, deadline: float) -> tuple[array[float], float]:
     frames = _frames(sheet.timebase.duration_ticks, settings.sample_rate,
                      sheet.timebase.ticks_per_second)
-    if not 1 <= frames <= settings.sample_rate * 60 or frames * settings.channels * 2 + 44 > _MAX_BYTES:
+    if (not 1 <= frames <= settings.sample_rate * MAX_DURATION_SECONDS
+            or frames * settings.channels * 2 + 44 > _MAX_BYTES):
         raise MixError("soundtrack output bounds exceeded")
     foreground = array("d", [0.0]) * (frames * settings.channels)
     background = array("d", [0.0]) * len(foreground)
@@ -458,7 +469,10 @@ def mix_scene(sheet: CueSheet, sources: tuple[SpeechArtifact | ImportedStemArtif
         payload = _wav(samples, settings.sample_rate, settings.channels, safety, deadline)
         timing = DeclaredTiming(current_picture, 0, sheet.timebase.duration_ticks)
         window = sheet.timebase.ticks_per_second
-        analysis = AnalysisSettings(sheet.timebase, window, timeout_seconds=_remaining(deadline))
+        analysis = AnalysisSettings(sheet.timebase, window, timeout_seconds=_remaining(deadline),
+            max_duration_seconds=(int(MAX_DURATION_SECONDS)
+                if sheet.timebase.duration_ticks > 60 * window else 60),
+            max_input_bytes=max(16 * 1024 * 1024, len(payload)))
         before = analyze_wav(payload, RevisionPin(output_id, output_revision,
                             hashlib.sha256(payload).hexdigest()), analysis, timing, tool=tool)
         if "tool_cleanup_uncertain" in before.issues:
@@ -474,7 +488,10 @@ def mix_scene(sheet: CueSheet, sources: tuple[SpeechArtifact | ImportedStemArtif
         payload = _wav(samples, settings.sample_rate, settings.channels,
                        safety * 10 ** (gain_db / 20), deadline)
         pin = RevisionPin(output_id, output_revision, hashlib.sha256(payload).hexdigest())
-        analysis = AnalysisSettings(sheet.timebase, window, timeout_seconds=_remaining(deadline))
+        analysis = AnalysisSettings(sheet.timebase, window, timeout_seconds=_remaining(deadline),
+            max_duration_seconds=(int(MAX_DURATION_SECONDS)
+                if sheet.timebase.duration_ticks > 60 * window else 60),
+            max_input_bytes=max(16 * 1024 * 1024, len(payload)))
         after = analyze_wav(payload, pin, analysis, timing, tool=tool)
         if "tool_cleanup_uncertain" in after.issues:
             raise MixError("mix audio process cleanup unconfirmed")
