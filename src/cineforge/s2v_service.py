@@ -10,7 +10,7 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeGuard
 
 from cineforge import s2v_profile as profile
 from cineforge.cloud_budget import BudgetApproval, CloudBudgetError
@@ -245,3 +245,8 @@ def prepare_long_session_journal(context: LongSessionServiceContext) -> None:
                 "last_wall": time.time(), "records": {}}))
         elif strict_object(journal.initial).get("approval_sha256") != context.approval.subject_sha256:
             raise CloudBudgetError("existing long-session journal belongs to a different scope")
+
+
+def is_speech_service(value: object) -> TypeGuard[S2VServiceContext | LongSessionServiceContext]:
+    """Closed runtime service variants; subclasses never gain admission."""
+    return type(value) in (S2VServiceContext, LongSessionServiceContext)

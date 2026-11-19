@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import os
 import stat
@@ -75,8 +76,10 @@ class PrivateRunDirectory:
     Same-host POSIX dir_fd/O_NOFOLLOW, hard links, atomic rename and fsync are required.
     """
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, *, resume: bool = False) -> None:
         self.path = Path(path)
+        self._resume = resume
+        self._lock_descriptor = -1
         self._directory = -1
         self._record_inode: int | None = None
         self._record_device: int | None = None
@@ -103,26 +106,41 @@ class PrivateRunDirectory:
                 descriptor = child
             self._outside_git(descriptor)
             info = os.fstat(descriptor)
-            if info.st_uid != os.getuid() or os.listdir(descriptor):
+            existing = os.listdir(descriptor)
+            if info.st_uid != os.getuid() or (existing and not self._resume):
                 raise ArtifactStoreError("run destination must be owned and empty")
             os.fchmod(descriptor, 0o700)
-            lock = os.open(".lock", os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            lock = os.open(".lock", os.O_RDWR | os.O_NOFOLLOW
+                           | (0 if existing else os.O_CREAT | os.O_EXCL),
                            0o600, dir_fd=descriptor)
             try:
+                lock_info = os.fstat(lock)
+                if (not stat.S_ISREG(lock_info.st_mode) or lock_info.st_nlink != 1
+                        or lock_info.st_uid != os.getuid()):
+                    raise ArtifactStoreError("unsafe run lock")
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 os.fsync(lock)
+                self._lock_descriptor = lock
             finally:
-                os.close(lock)
+                if self._lock_descriptor != lock:
+                    os.close(lock)
             os.fsync(descriptor)
-            if set(os.listdir(descriptor)) != {".lock"}:
+            if not existing and set(os.listdir(descriptor)) != {".lock"}:
                 raise ArtifactStoreError("run destination changed during claim")
             self._directory = descriptor
             descriptor = -1
+            if existing:
+                record_info = os.stat("run.json", dir_fd=self._directory, follow_symlinks=False)
+                read_private_input(self.path / "run.json", max_bytes=16 * 1024 * 1024)
+                self._record_device, self._record_inode = record_info.st_dev, record_info.st_ino
+                self._payload_names = {name for name in existing if name.startswith("artifact-")}
         except (OSError, TypeError, ValueError):
             failed = True
         finally:
             if descriptor >= 0:
                 os.close(descriptor)
         if failed:
+            self.__exit__(None, None, None)
             raise ArtifactStoreError("could not claim a private empty destination outside Git")
         return self
 
@@ -136,6 +154,9 @@ class PrivateRunDirectory:
 
     def __exit__(self, kind: type[BaseException] | None, value: BaseException | None,
                  traceback: TracebackType | None) -> None:
+        if self._lock_descriptor >= 0:
+            os.close(self._lock_descriptor)
+            self._lock_descriptor = -1
         if self._directory >= 0:
             os.close(self._directory)
             self._directory = -1
@@ -231,7 +252,7 @@ class PrivateRunDirectory:
     def put_payload(self, payload: bytes, suffix: str) -> str:
         """Persist bounded controller output under its content identity, without overwrite."""
         if (type(payload) is not bytes or not 0 < len(payload) <= 64 * 1024 * 1024
-                or suffix not in ("wav", "mkv", "json")):
+                or suffix not in ("wav", "mkv", "webm", "json")):
             raise ArtifactStoreError("invalid private controller output")
         name = "artifact-" + hashlib.sha256(payload).hexdigest() + "." + suffix
         if name in self._payload_names:

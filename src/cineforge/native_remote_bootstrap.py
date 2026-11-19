@@ -318,10 +318,15 @@ def _nr_dispatch(request: dict[str, Any], deadline: float) -> tuple[dict[str, An
         "source": request["native_source_sha256"],
         "phase_expires_unix": expiry,
     }
+    operation_limit = request.get("native_operation_limit", 3)
+    if type(operation_limit) is not int or not 1 <= operation_limit <= 10001:
+        raise ValueError("invalid bounded native operation capacity")
+    if "native_operation_limit" in request:
+        binding["operation_limit"] = operation_limit
     nr_hash(binding["source"])
     if op == "native_capabilities" and set(request) - {
             "operation", "plan", "profile", "guard_sha256", "native_source_sha256",
-            "native_sent_unix", "native_expires_unix", "allow_live", "timeout_seconds"}:
+            "native_sent_unix", "native_expires_unix", "native_operation_limit", "allow_live", "timeout_seconds"}:
         raise ValueError("fixed native measurements accept no path or command selector")
     if op == "native_capabilities" or op == "native_preflight" and "capabilities_sha256" not in request:
         root = nr_root(session, create=True)  # Existing/uncertain setup cannot be restarted.
@@ -403,7 +408,7 @@ def _nr_dispatch(request: dict[str, Any], deadline: float) -> tuple[dict[str, An
                     if type(size) is not int or not 1 <= size <= NR_BLOB_MAX:
                         raise ValueError("remote speech transfer exceeds bound")
                     # Input capacity is a fixed reviewed one-design/two-utterance recipe.
-                    if role == "input" and len(list(root.glob("*.input.json"))) >= 3:
+                    if role == "input" and len(list(root.glob("*.input.json"))) >= operation_limit:
                         raise ValueError("remote speech attempt capacity exhausted")
                     nr_write(
                         declaration, nr_encode({"token": token, "size_bytes": size, "sha256": sha})

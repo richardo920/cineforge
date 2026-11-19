@@ -589,6 +589,8 @@ class CloudBudgetSession:
                     or "retention_deadline" in record or now >= record["deadline"] - 60):
                 raise CloudBudgetError("retention requires a fresh owned bounded lease")
             acquired = float(record["reserved_at"])
+            if acquired + 14400 <= record["deadline"]:
+                raise CloudBudgetError("long leases must be sized at acquisition; retention refused")
             expiry = min(acquired + 14400, now + intent.spec.retain_window_seconds)
             if not _number(expiry) or expiry > acquired + 14400:
                 raise CloudBudgetError("invalid retention deadline")

@@ -20,6 +20,7 @@ from cineforge.s2v_service import (
     S2VBudgetApproval,
     S2VServiceContext,
     prepare_long_session_journal,
+    prepare_service_journal,
 )
 
 
@@ -149,3 +150,94 @@ class LongSessionBudgetTests(unittest.TestCase):
             self.assertAlmostEqual(sum(r["reservation_usd"] or 0
                 for r in data["records"].values()), .846668)
         self.assertEqual(len(cloud.calls), 2)  # Refusal happens before another quote or POST.
+
+
+    def configured(self, approval):
+        clock = Clock()
+        clock.wall = time.time() + 1
+        cloud = Cloud(clock)
+        cloud.catalog.update(id=approval.gpu_id, dataCenters=[dict(id=approval.region,
+                             availability="HIGH")])
+        worker = replace(spec(), image=approval.image, gpu_id=approval.gpu_id,
+            data_center_id=approval.region, disk_gb=150, min_ram_per_gpu_gb=64,
+            max_hourly_usd=1.25, retain_node=True)
+        return clock, cloud, worker
+
+    def test_attempt_limit_is_journal_wide_across_sessions_not_dollars(self):
+        for limit in (1, 2):
+            with self.subTest(limit=limit):
+                self.path = self.path.parent / ("attempts-" + str(limit))
+                approval = self.approval(max_attempts=limit, lifetime_seconds=300)
+                prepare_long_session_journal(LongSessionServiceContext(approval))
+                clock, cloud, worker = self.configured(approval)
+                for index in range(limit + 1):
+                    with CloudBudgetSession(self.path, approval, cloud,
+                            guard_deployment_configured=True, clock=clock.time,
+                            monotonic=clock.monotonic) as session:
+                        intent = AcquisitionIntent("attempt-" + str(index), worker, "a" * 32,
+                            "fixture-" + str(index), approval.model, 1, 300, 3, 1)
+                        session.event_sink(intent, LeaseSnapshot(intent.key, "reserved"))
+                        if index == limit:
+                            with self.assertRaisesRegex(CloudBudgetError, "durable admission policy"):
+                                session.before_create(intent)
+                        else:
+                            session.before_create(intent)
+                            session.event_sink(intent, LeaseSnapshot(intent.key, "not_created"))
+                data = json.loads((self.path / "budget.json").read_bytes())
+                self.assertEqual(sum(r["authorized"] for r in data["records"].values()), limit)
+                self.assertLess(sum(r["reservation_usd"] or 0 for r in data["records"].values()), 1)
+                self.assertEqual(len(cloud.calls), limit)
+
+    def test_full_lease_reserve_and_retention_refusal_without_mutation(self):
+        approval = self.approval()
+        prepare_long_session_journal(LongSessionServiceContext(approval))
+        clock, cloud, worker = self.configured(approval)
+        with CloudBudgetSession(self.path, approval, cloud, guard_deployment_configured=True,
+                clock=clock.time, monotonic=clock.monotonic) as session:
+            intent = AcquisitionIntent("full", worker, "a" * 32, "fixture-full",
+                approval.model, 17.78, 50400, 3, 1)
+            session.event_sink(intent, LeaseSnapshot(intent.key, "reserved"))
+            session.before_create(intent)
+            session.event_sink(intent, LeaseSnapshot(intent.key, "created", "pod-full", .89))
+            before = (self.path / "budget.json").read_bytes()
+            self.assertEqual(json.loads(before)["records"]["full"]["reservation_usd"], 17.78)
+            with self.assertRaisesRegex(CloudBudgetError, "sized at acquisition"):
+                session.extend_retention("full")
+            self.assertEqual((self.path / "budget.json").read_bytes(), before)
+
+    def test_short_s2v_lease_still_extends_retention(self):
+        approval = S2VBudgetApproval.for_scope(str(self.path), "EU-RO-1", EVIDENCE,
+                                              lifetime_seconds=7200)
+        prepare_service_journal(S2VServiceContext(approval))
+        clock, cloud, worker = self.configured(approval)
+        worker = replace(worker, retain_window_seconds=10000)
+        with CloudBudgetSession(self.path, approval, cloud, guard_deployment_configured=True,
+                clock=clock.time, monotonic=clock.monotonic) as session:
+            intent = AcquisitionIntent("short", worker, "a" * 32, "fixture-short",
+                approval.model, 3, 7200, 3, 1)
+            session.event_sink(intent, LeaseSnapshot(intent.key, "reserved"))
+            session.before_create(intent)
+            session.event_sink(intent, LeaseSnapshot(intent.key, "created", "pod-short", .89))
+            original = session.guard_plan("short").stop_at_unix
+            session.extend_retention("short")
+            self.assertGreater(session.guard_plan("short").stop_at_unix, original)
+
+    def test_initializer_types_and_cross_scope_sha_both_directions(self):
+        for long_first in (True, False):
+            with self.subTest(long_first=long_first):
+                self.path = self.path.parent / ("cross-" + str(long_first))
+                long = LongSessionServiceContext(self.approval())
+                short = S2VServiceContext(S2VBudgetApproval.for_scope(str(self.path),
+                    "EU-RO-1", EVIDENCE))
+                with self.assertRaises(CloudBudgetError):
+                    prepare_service_journal(long)
+                with self.assertRaises(CloudBudgetError):
+                    prepare_long_session_journal(short)
+                first, second = ((prepare_long_session_journal, long), (prepare_service_journal, short))
+                if not long_first:
+                    first, second = second, first
+                first[0](first[1])
+                before = (self.path / "budget.json").read_bytes()
+                with self.assertRaisesRegex(CloudBudgetError, "different scope"):
+                    second[0](second[1])
+                self.assertEqual((self.path / "budget.json").read_bytes(), before)
