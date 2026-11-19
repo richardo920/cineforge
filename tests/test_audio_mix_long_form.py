@@ -84,21 +84,23 @@ def admit(args):
 
 class LongFormMixTests(unittest.TestCase):
     def test_130_second_beds_27_dialogues_and_foley_mix_at_delivery_rate(self):
-        with patch('subprocess.Popen', side_effect=AssertionError('native call')):
-            args = long_scene()
-            admitted, _ = admit(args)
-            self.assertEqual(len(admitted), 30)
-            self.assertEqual(sum(item[3] == 'dialogue' for item in admitted), 27)
-            self.assertEqual([item[1].frames for item in admitted
-                              if item[3] in ('music', 'ambience')], [130 * 24000] * 2)
-            result = mix_scene(**args, preset=BROADCAST_LINEAR, output_id='long-mix',
-                output_revision=1, tool=Meter(), expected_tool=IDENTITY)
-        wave = inspect_pcm16_wav(result.payload, max_input_bytes=MAX_PCM_BYTES,
-            max_duration_seconds=int(MAX_DURATION_SECONDS), long_form=True)
-        self.assertEqual((wave.frames, wave.sample_rate, wave.channels), (130 * 24000, 24000, 2))
-        self.assertEqual(len(result.payload), 130 * 24000 * 2 * 2 + 44)
-        self.assertEqual(result.report.preset_gain_db, 0)
-        self.assertEqual(result.report.safety_gain, 1)
+        for rate in (24000, 48000):
+            with self.subTest(rate=rate):
+                with patch('subprocess.Popen', side_effect=AssertionError('native call')):
+                    args = long_scene(rate=rate)
+                    admitted, _ = admit(args)
+                    self.assertEqual(len(admitted), 30)
+                    self.assertEqual(sum(item[3] == 'dialogue' for item in admitted), 27)
+                    self.assertEqual([item[1].frames for item in admitted
+                                      if item[3] in ('music', 'ambience')], [130 * rate] * 2)
+                    result = mix_scene(**args, preset=BROADCAST_LINEAR, output_id='long-mix',
+                        output_revision=1, tool=Meter(), expected_tool=IDENTITY)
+                wave = inspect_pcm16_wav(result.payload, max_input_bytes=MAX_PCM_BYTES,
+                    max_duration_seconds=int(MAX_DURATION_SECONDS), long_form=True)
+                self.assertEqual((wave.frames, wave.sample_rate, wave.channels), (130 * rate, rate, 2))
+                self.assertEqual(len(result.payload), 130 * rate * 2 * 2 + 44)
+                self.assertEqual(result.report.preset_gain_db, 0)
+                self.assertEqual(result.report.safety_gain, 1)
 
     def test_duration_frame_timeout_and_source_count_boundaries(self):
         args = long_scene(seconds=180, dialogue_count=37, rate=48000)
