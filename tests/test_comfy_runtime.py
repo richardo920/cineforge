@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import base64
 import copy
 import csv
@@ -9,13 +10,14 @@ import hashlib
 import io
 import os
 import stat
+import sys
 import tarfile
 import tempfile
 import time
 import unittest
 import zipfile
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 from cineforge import comfy_runtime_launcher as launcher
@@ -925,6 +927,78 @@ class ComfyNoticeAndExecutionTests(unittest.TestCase):
 
 
 class ComfyPreimportTests(unittest.TestCase):
+    def test_aimdo_init_precedes_downstream_lib_snapshots(self):
+        for reserve_vram in (None, 1.5):
+            for disable_nvml_pressure in (False, True):
+                with self.subTest(reserve_vram=reserve_vram,
+                                  disable_nvml_pressure=disable_nvml_pressure):
+                    control = ModuleType("comfy_aimdo.control")
+                    control.lib = None
+                    sentinel = object()
+                    calls = []
+
+                    def init(_calls=calls, _control=control, _sentinel=sentinel, **kwargs):
+                        _calls.append(kwargs)
+                        _control.lib = _sentinel
+                        return False  # The launcher must not gate startup on this result.
+
+                    control.init = init
+                    aimdo = ModuleType("comfy_aimdo")
+                    aimdo.__path__ = []
+                    aimdo.control = control
+                    cli_args = SimpleNamespace(
+                        args=SimpleNamespace(reserve_vram=reserve_vram,
+                                             disable_nvml_pressure=disable_nvml_pressure),
+                        enables_dynamic_vram=lambda: True,
+                    )
+                    with patch.dict(sys.modules, {
+                        "comfy_aimdo": aimdo, "comfy_aimdo.control": control,
+                        "comfy.cli_args": cli_args,
+                    }):
+                        launcher._init_aimdo()
+                        snapshot = {}
+                        exec("from comfy_aimdo import control\nlib = control.lib", snapshot)
+                    self.assertEqual(calls, [{
+                        "simple_vram_headroom": None if reserve_vram is None else int(reserve_vram * 1024 ** 3),
+                        "nvml_pressure": not disable_nvml_pressure,
+                    }])
+                    self.assertIs(snapshot["lib"], sentinel)
+
+    def test_aimdo_init_skipped_when_dynamic_vram_disabled(self):
+        control = SimpleNamespace(lib=None, init=lambda **kwargs: None)
+        cli_args = SimpleNamespace(
+            args=SimpleNamespace(reserve_vram=None, disable_nvml_pressure=False),
+            enables_dynamic_vram=lambda: False,
+        )
+        with (
+            patch.dict(sys.modules, {
+                "comfy_aimdo": SimpleNamespace(control=control),
+                "comfy_aimdo.control": control, "comfy.cli_args": cli_args,
+            }),
+            patch.object(control, "init") as init,
+        ):
+            launcher._init_aimdo()
+        init.assert_not_called()
+        self.assertIsNone(control.lib)
+
+    def test_launcher_initializes_aimdo_after_args_and_before_install(self):
+        tree = ast.parse(Path(launcher.__file__).read_text())
+        main = next(node for node in tree.body
+                    if isinstance(node, ast.FunctionDef) and node.name == "main")
+        calls = [node for node in ast.walk(main) if isinstance(node, ast.Call)]
+        aimdo_calls = [node for node in calls
+                       if isinstance(node.func, ast.Name) and node.func.id == "_init_aimdo"]
+        install_calls = [node for node in calls
+                         if isinstance(node.func, ast.Name) and node.func.id == "install"]
+        args_calls = [node for node in calls
+                      if isinstance(node.func, ast.Attribute)
+                      and node.func.attr == "enable_args_parsing"]
+        self.assertEqual(len(aimdo_calls), 1)
+        self.assertEqual(len(install_calls), 1)
+        self.assertEqual(len(args_calls), 1)
+        self.assertLess(args_calls[0].lineno, aimdo_calls[0].lineno)
+        self.assertLess(aimdo_calls[0].lineno, install_calls[0].lineno)
+
     def test_probe_main_verifies_runtime_with_actual_native_session(self):
         import sys
 
@@ -945,8 +1019,10 @@ class ComfyPreimportTests(unittest.TestCase):
                 patch.object(worker, "verify_source"),
                 patch.object(launcher, "comfy_worker", return_value=SimpleNamespace(profile_id="fixture")),
                 patch.object(launcher, "_observe", return_value={}),
+                patch.object(launcher, "_init_aimdo") as init_aimdo,
             ):
                 self.assertEqual(launcher.main(), 0)
+            init_aimdo.assert_not_called()
             verify_runtime.assert_called_once_with(
                 declaration, root, deadline, native=firstparty.parent
             )

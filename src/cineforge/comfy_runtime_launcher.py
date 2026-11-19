@@ -225,6 +225,18 @@ def _startup_observer(root: Path, deadline: float) -> None:
     threading.Thread(target=observe, daemon=True).start()
 
 
+def _init_aimdo() -> None:
+    # Match ComfyUI main.py: initialize before comfy/nodes imports snapshot control.lib.
+    control = importlib.import_module("comfy_aimdo.control")
+    cli_args = importlib.import_module("comfy.cli_args")
+    args = cli_args.args
+    if cli_args.enables_dynamic_vram():
+        control.init(
+            simple_vram_headroom=None if args.reserve_vram is None else int(args.reserve_vram * 1024 ** 3),
+            nvml_pressure=not args.disable_nvml_pressure,
+        )
+
+
 def main() -> int:
     # -I -B -S has already suppressed ambient .pth/site hooks and credentials.
     # Validate full staged files before adding any third-party import path.
@@ -262,6 +274,7 @@ def main() -> int:
             "--temp-directory", str(root / "comfy-temp")]
         sys.argv.extend(["--front-end-root", str(root / "comfy-runtime/site/comfyui_frontend_package/static")])
         importlib.import_module("comfy.options").enable_args_parsing()
+        _init_aimdo()
         from cineforge.comfy_model_precision import install
         from cineforge.comfy_runtime_plan import comfy_subject
         native = native_package_root
