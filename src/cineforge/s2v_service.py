@@ -130,3 +130,118 @@ def prepare_service_journal(context: S2VServiceContext) -> None:
                 "last_wall": time.time(), "records": {}}))
         elif strict_object(journal.initial).get("approval_sha256") != context.approval.subject_sha256:
             raise CloudBudgetError("existing M5 journal belongs to a different scope")
+
+
+def _long_scope(approval: LongSessionBudgetApproval) -> dict[str, Any]:
+    return _long_scope_fields(approval.journal_directory, approval.region, approval.operator_receipt,
+        approval.aggregate_usd, approval.lifetime_seconds, approval.hourly_ceiling_usd,
+        approval.phase_id, approval.max_attempts, approval.gpu_id)
+
+
+def _long_scope_fields(directory: str, region: str, receipt: EvidenceRef, aggregate: float,
+                       lifetime: float, hourly: float, phase_id: str, max_attempts: int,
+                       gpu_id: str = profile.GPU_ID) -> dict[str, Any]:
+    fields = _scope_fields(directory, region, receipt, aggregate, lifetime, hourly, gpu_id)
+    fields.update(task_id="G6'", phase_id=phase_id, max_attempts=max_attempts)
+    return fields
+
+
+@dataclass(frozen=True)
+class LongSessionBudgetApproval(BudgetApproval):
+    """Closed long-session scope; static recipe/resources only, not an unknown approved graph."""
+    journal_directory: str
+    operator_receipt: EvidenceRef
+    phase_id: str
+
+    def __post_init__(self) -> None:
+        if (type(self.operator_receipt) is not EvidenceRef
+                or not isinstance(self.journal_directory, str)
+                or not Path(self.journal_directory).is_absolute()
+                or str(Path(self.journal_directory)) != self.journal_directory
+                or ".." in Path(self.journal_directory).parts
+                or not self.journal_directory.isprintable()
+                or any(char in self.journal_directory for char in "\\:%")
+                or type(self.phase_id) is not str or not self.phase_id
+                or not self.phase_id.isprintable()
+                or any(char in self.phase_id for char in "/\\:%")
+                or self.phase_id in (".", "..")
+                or type(self.region) is not str or re.fullmatch(r"[A-Z0-9-]{3,32}", self.region) is None
+                or type(self.aggregate_usd) not in (int, float) or not 0 < self.aggregate_usd <= 35
+                or type(self.lifetime_seconds) not in (int, float)
+                or not 120 < self.lifetime_seconds <= 50400
+                or type(self.hourly_ceiling_usd) not in (int, float)
+                or not 0 < self.hourly_ceiling_usd <= 1.25
+                or self.image != profile.IMAGE or self.gpu_id not in (profile.GPU_ID, profile.L40S_GPU_ID, profile.A40_GPU_ID)
+                or self.min_cuda != "12.8" or type(self.disk_gb) is not int or self.disk_gb != 150
+                or type(self.max_attempts) is not int or not 1 <= self.max_attempts <= 3
+                or type(self.max_concurrent) is not int or self.max_concurrent != 1
+                or self.model != profile.model()
+                or self.model_workflow_sha256 != profile.recipe_sha256(self.gpu_id)
+                or self.subject_sha256 != hashlib.sha256(canonical(_long_scope(self))).hexdigest()):
+            raise CloudBudgetError("invalid closed long-session recipe budget scope")
+
+    @classmethod
+    def for_scope(cls, journal_directory: str, region: str, operator_receipt: EvidenceRef,
+                  *, phase_id: str, aggregate_usd: float = 35, lifetime_seconds: float = 50400,
+                  max_attempts: int = 3, hourly_ceiling_usd: float = 1.25, gpu_id: str = profile.GPU_ID) -> LongSessionBudgetApproval:
+        # Build once from independently selected operator arguments, never creative JSON.
+        if type(operator_receipt) is not EvidenceRef:
+            raise CloudBudgetError("long-session budget requires separately verified operator evidence")
+        digest = None
+        try:
+            digest = hashlib.sha256(canonical(_long_scope_fields(journal_directory, region,
+                operator_receipt, aggregate_usd, lifetime_seconds, hourly_ceiling_usd,
+                phase_id, max_attempts, gpu_id))).hexdigest()
+        except (ValueError, TypeError, OverflowError):
+            pass
+        if digest is None:
+            raise CloudBudgetError("invalid long-session scope declarations")
+        return cls(digest, profile.recipe_sha256(gpu_id), profile.model(), profile.IMAGE, profile.worker(gpu_id).gpu,
+            region, "12.8", aggregate_usd, max_attempts, 1, lifetime_seconds, hourly_ceiling_usd, 150,
+            journal_directory, operator_receipt, phase_id)
+
+    @property
+    def min_ram_per_gpu_gb(self) -> int:
+        return 64
+
+
+@dataclass(frozen=True)
+class LongSessionServiceContext:
+    """Exact nonserialized service context used before any native speech bytes exist."""
+    approval: LongSessionBudgetApproval
+
+    def preflight(self) -> None:
+        if type(self.approval) is not LongSessionBudgetApproval:
+            raise CloudBudgetError("long-session service requires its separately checked budget scope")
+        self.approval.__post_init__()
+
+    @property
+    def model(self) -> ModelSpec:
+        self.preflight()
+        return profile.model()
+
+    @property
+    def declarations(self) -> dict[str, Any]:
+        self.preflight()
+        return profile.service_declarations(self.approval.gpu_id)
+
+    @property
+    def worker_profile(self) -> dict[str, str]:
+        self.preflight()
+        return {"id": profile.worker(self.approval.gpu_id).profile_id, "scope_sha256": self.approval.subject_sha256}
+
+
+def prepare_long_session_journal(context: LongSessionServiceContext) -> None:
+    """Offline initialization only; a retained journal is never reset or refunded."""
+    from cineforge.cloud_journal import CloudJournal
+    from cineforge.workflows import strict_object
+    if type(context) is not LongSessionServiceContext:
+        raise CloudBudgetError("long-session journal requires its checked service scope")
+    context.preflight()
+    with CloudJournal(context.approval.journal_directory) as journal:
+        if journal.initial is None:
+            journal.checkpoint(canonical({"schema_version": 1,
+                "approval_sha256": context.approval.subject_sha256,
+                "last_wall": time.time(), "records": {}}))
+        elif strict_object(journal.initial).get("approval_sha256") != context.approval.subject_sha256:
+            raise CloudBudgetError("existing long-session journal belongs to a different scope")
