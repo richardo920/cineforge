@@ -10,7 +10,7 @@ import hashlib
 from dataclasses import dataclass, field
 
 from cineforge.audio import AudioTimebase, Cue, CueSheet, RevisionPin, Stem
-from cineforge.audio_pcm import PCMError, inspect_pcm16_wav
+from cineforge.audio_pcm import MAX_DURATION_SECONDS, MAX_PCM_BYTES, PCMError, inspect_pcm16_wav
 from cineforge.characters import RightsBinding
 from cineforge.contracts import ContractError, _identifier
 from cineforge.rights import EvidenceRef, RightsLedger, Use
@@ -54,7 +54,7 @@ def import_original_stem(sheet: CueSheet, cue_id: str, payload: bytes, source: R
     expected_kind = "music" if cue.kind == "music" else "asset"
     if (stem is None or stem.kind != cue.kind or cue.source.subject.kind != expected_kind
             or source.sha256 != cue.source.subject.sha256
-            or not isinstance(payload, bytes) or len(payload) > 16 * 1024 * 1024
+            or not isinstance(payload, bytes) or len(payload) > MAX_PCM_BYTES
             or hashlib.sha256(payload).hexdigest() != source.sha256):
         raise StemImportError("stem source or bytes mismatch")
     record = ledger.lookup(cue.source.rights)
@@ -66,7 +66,8 @@ def import_original_stem(sheet: CueSheet, cue_id: str, payload: bytes, source: R
             raise StemImportError("stem source rights failed preflight")
     failed = False
     try:
-        wave = inspect_pcm16_wav(payload)
+        wave = inspect_pcm16_wav(payload, max_input_bytes=MAX_PCM_BYTES,
+            max_duration_seconds=int(MAX_DURATION_SECONDS), long_form=True)
     except PCMError:
         failed = True
     if failed:

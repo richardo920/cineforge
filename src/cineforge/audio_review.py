@@ -11,6 +11,7 @@ from typing import ClassVar, Protocol, Self
 
 from cineforge.audio import CueSheet, MediaDependencies, RevisionPin, VoiceIdentity, _AudioContract
 from cineforge.audio_mix import MixedArtifact
+from cineforge.audio_pcm import MAX_PCM_BYTES
 from cineforge.characters import CharacterPin
 from cineforge.contracts import Contract, ContractError, _digest, _identifier, _integer
 from cineforge.json_codec import canonical_json
@@ -82,7 +83,7 @@ class ReviewAsset(_ReviewContract):
         _integer(self.size_bytes, "review media size", 1, 128 * 1024 * 1024)
         if type(self.media_type) is not str or self.media_type not in _VIDEO | {"audio/wav"}:
             raise ReviewError("unsupported review media format")
-        if self.media_type == "audio/wav" and self.size_bytes > 16 * 1024 * 1024:
+        if self.media_type == "audio/wav" and self.size_bytes > MAX_PCM_BYTES:
             raise ReviewError("review audio exceeds supported byte bound")
 
     def check_bytes(self, payload: bytes) -> None:

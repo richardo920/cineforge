@@ -32,7 +32,7 @@ from cineforge.audio_analysis import (
     ToolIdentity,
     analyze_wav,
 )
-from cineforge.audio_pcm import PCMError, inspect_pcm16_wav
+from cineforge.audio_pcm import MAX_PCM_BYTES, PCMError, inspect_pcm16_wav
 from cineforge.audio_process import AudioProcessError, run_audio_process
 from cineforge.contracts import ContractError
 
@@ -110,6 +110,14 @@ class AudioAnalysisTests(unittest.TestCase):
                       timing=self.timing, tool=FakeTool())
         values.update(overrides)
         return analyze_wav(**values)
+
+    def test_analysis_settings_long_form_closed_bounds(self) -> None:
+        accepted = replace(self.settings, max_input_bytes=MAX_PCM_BYTES,
+                           max_duration_seconds=180)
+        for change in ({"max_input_bytes": MAX_PCM_BYTES + 1},
+                       {"max_duration_seconds": 181}):
+            with self.subTest(change=change), self.assertRaises(ContractError):
+                replace(accepted, **change)
 
     def test_fake_meter_is_explicit_and_energy_is_not_lufs_or_lip_sync(self) -> None:
         report = self.analyze()
@@ -386,6 +394,18 @@ class AudioProcessTests(unittest.TestCase):
         return run_audio_process((sys.executable, "-c", code), payload=payload,
                                  timeout_seconds=timeout, max_output_bytes=maximum)
 
+    def test_payload_closed_bound_reaches_spawn_only_at_or_below_cap(self) -> None:
+        # Transport sanitizes the sentinel exception; the mock proves spawn was reached.
+        with patch.object(audio_process.subprocess, "Popen",
+                          side_effect=RuntimeError("spawn sentinel")) as spawn:
+            with self.assertRaisesRegex(AudioProcessError, "^bounded audio process failed$"):
+                self.run_python("pass", payload=b"x" * MAX_PCM_BYTES)
+            spawn.assert_called_once()
+            spawn.reset_mock()
+            with self.assertRaisesRegex(AudioProcessError, "^invalid audio process bounds$"):
+                self.run_python("pass", payload=b"x" * (MAX_PCM_BYTES + 1))
+            spawn.assert_not_called()
+
     def test_binary_input_and_stderr_bound_no_inherited_ffreport(self) -> None:
         with patch.dict(os.environ, FFREPORT="file=private-canary-report", PRIVATE_CANARY="secret"):
             result = self.run_python("import os,sys; assert 'FFREPORT' not in os.environ; "
@@ -401,7 +421,7 @@ class AudioProcessTests(unittest.TestCase):
                 self.run_python(code, timeout=.1)
             self.assertNotIn("private-tool-canary", str(caught.exception))
         for kwargs in ({"timeout_seconds": True}, {"timeout_seconds": float("nan")},
-                       {"max_output_bytes": True}, {"payload": b"x" * (16 * 1024 * 1024 + 1)}):
+                       {"max_output_bytes": True}, {"payload": b"x" * (MAX_PCM_BYTES + 1)}):
             values = dict(payload=b"", timeout_seconds=1, max_output_bytes=4096)
             values.update(kwargs)
             with self.assertRaises(AudioProcessError):
