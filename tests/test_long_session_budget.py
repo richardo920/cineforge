@@ -48,14 +48,15 @@ class LongSessionBudgetTests(unittest.TestCase):
             self.assertEqual(context.declarations, profile.service_declarations(gpu))
             self.assertEqual(context.worker_profile, dict(id=profile.worker(gpu).profile_id,
                 scope_sha256=context.approval.subject_sha256))
-        for attempts in (1, 2, 3):
+        self.assertEqual(self.approval(aggregate_usd=50).aggregate_usd, 50)
+        for attempts in (1, 2, 3, 4):
             self.assertEqual(self.approval(max_attempts=attempts).max_attempts, attempts)
 
     def test_closed_bounds_and_tampered_scope(self):
-        for changes in (dict(aggregate_usd=35.01), dict(aggregate_usd=0),
+        for changes in (dict(aggregate_usd=50.01), dict(aggregate_usd=0),
                 dict(aggregate_usd=True), dict(aggregate_usd=float("nan")),
                 dict(lifetime_seconds=50401), dict(lifetime_seconds=120),
-                dict(max_attempts=0), dict(max_attempts=4), dict(max_attempts=True),
+                dict(max_attempts=0), dict(max_attempts=5), dict(max_attempts=True),
                 dict(hourly_ceiling_usd=1.26), dict(hourly_ceiling_usd=0),
                 dict(phase_id=""), dict(phase_id="../phase"), dict(phase_id="a\\b"),
                 dict(phase_id="a:b"), dict(phase_id="a%b"), dict(phase_id="a\nb"),

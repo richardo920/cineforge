@@ -166,14 +166,14 @@ class LongSessionBudgetApproval(BudgetApproval):
                 or any(char in self.phase_id for char in "/\\:%")
                 or self.phase_id in (".", "..")
                 or type(self.region) is not str or re.fullmatch(r"[A-Z0-9-]{3,32}", self.region) is None
-                or type(self.aggregate_usd) not in (int, float) or not 0 < self.aggregate_usd <= 35
+                or type(self.aggregate_usd) not in (int, float) or not 0 < self.aggregate_usd <= 50
                 or type(self.lifetime_seconds) not in (int, float)
                 or not 120 < self.lifetime_seconds <= 50400
                 or type(self.hourly_ceiling_usd) not in (int, float)
                 or not 0 < self.hourly_ceiling_usd <= 1.25
                 or self.image != profile.IMAGE or self.gpu_id not in (profile.GPU_ID, profile.L40S_GPU_ID, profile.A40_GPU_ID)
                 or self.min_cuda != "12.8" or type(self.disk_gb) is not int or self.disk_gb != 150
-                or type(self.max_attempts) is not int or not 1 <= self.max_attempts <= 3
+                or type(self.max_attempts) is not int or not 1 <= self.max_attempts <= 4
                 or type(self.max_concurrent) is not int or self.max_concurrent != 1
                 or self.model != profile.model()
                 or self.model_workflow_sha256 != profile.recipe_sha256(self.gpu_id)
