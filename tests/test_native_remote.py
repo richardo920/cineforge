@@ -1022,3 +1022,106 @@ assert not any(n.startswith(('qwen_tts','torch','numpy','transformers')) for n i
                     with self.assertRaises(ValueError):
                         call()
                     self.assertFalse((root / "escape.py").exists())
+
+
+class StagingDiagnosticTests(RemoteFixture):
+    def diagnostic(self, sub_step):
+        self.static_failure(lambda: self.bridge.stage(recipe(), b"x"))
+        diagnostic = self.bridge.last_staging_failure
+        self.assertEqual(diagnostic["entry"], "stage")
+        self.assertEqual(diagnostic["sub_step"], sub_step)
+        self.assertTrue(self.bridge._unresolved)
+        nr_encode(diagnostic)
+        self.assertNotIn("SYNTHETIC-PRIVATE-CANARY", str(diagnostic))
+        return diagnostic
+
+    def test_preflight_validation_retains_only_bounded_keys(self):
+        for extra in (False, True):
+            with self.subTest(extra=extra):
+                self.remote = self.root / ("preflight-" + str(extra))
+                self.bridge = RemoteNativeSpeechRuntime(self.worker, allow_native=True)
+                def mutate(request, reply, *, extra=extra):
+                    if request["operation"] == "native_preflight":
+                        reply = dict(reply, binding_sha256="b" * 64)
+                        if extra:
+                            reply.update({str(i) + "x" * 100: "private" for i in range(40)})
+                        return reply
+                    return reply
+                self.mutate = mutate
+                diagnostic = self.diagnostic("preflight")
+                self.assertEqual(diagnostic["error_type"], "ValueError")
+                self.assertEqual(len(diagnostic["reply_keys"]), 32 if extra else 4)
+                self.assertEqual(diagnostic["reply_keys"], sorted(diagnostic["reply_keys"]))
+                self.assertTrue(all(len(k) <= 64 for k in diagnostic["reply_keys"]))
+                self.assertNotIn("sent_unix", diagnostic)
+                self.assertNotIn("operation", diagnostic)
+
+    def test_upload_chunk_ack_failure_names_operation_without_send_time(self):
+        self.mutate = lambda request, reply: ({} if request["operation"] == "native_chunk" else reply)
+        diagnostic = self.diagnostic("upload_package")
+        self.assertEqual(diagnostic["operation"], "native_chunk")
+        self.assertNotIn("sent_unix", diagnostic)
+
+    def test_setup_no_reply_retains_exact_controller_send_time(self):
+        for raised in (True, False):
+            with self.subTest(raised=raised):
+                self.remote = self.root / ("setup-" + str(raised))
+                self.bridge = RemoteNativeSpeechRuntime(self.worker, allow_native=True)
+                self.lost = "native_setup" if raised else None
+                self.mutate = lambda request, reply, raised=raised: (None
+                    if not raised and request["operation"] == "native_setup" else reply)
+                diagnostic = self.diagnostic("setup")
+                self.assertEqual(diagnostic["operation"], "native_setup")
+                self.assertEqual(diagnostic["error_type"], "TimeoutError" if raised else "NativeSpeechError")
+                self.assertEqual(diagnostic["sent_unix"], self.requests[-1]["native_sent_unix"])
+                self.assertIs(type(diagnostic["sent_unix"]), float)
+
+    def test_fetch_framing_failure_is_distinct_from_dispatch_failure(self):
+        self.mutate = lambda request, reply: (dict(reply, offset=-1)
+            if request["operation"] == "native_fetch" else reply)
+        diagnostic = self.diagnostic("fetch_installed")
+        self.assertNotIn("sent_unix", diagnostic)
+        self.assertNotIn("operation", diagnostic)
+
+    def test_install_record_validation_retains_keys(self):
+        def mutate(request, reply):
+            if request["operation"] == "native_setup":
+                path = self.remote / "installed.json"
+                value = nr_json(path.read_bytes())
+                value["recipe_sha256"] = "b" * 64
+                raw = nr_encode(value)
+                path.write_bytes(raw)
+                return remote._descriptor(raw)
+            return reply
+        self.mutate = mutate
+        diagnostic = self.diagnostic("result_validation")
+        self.assertIn("recipe_sha256", diagnostic["reply_keys"])
+        self.assertEqual(diagnostic["error_type"], "ValueError")
+        self.assertNotIn("operation", diagnostic)
+
+    def test_stage_wrapper_final_admission_is_final_deadline(self):
+        def mutate(request, reply):
+            if request["operation"] == "native_fetch":
+                checks = iter((None, WorkerError("SYNTHETIC-PRIVATE-CANARY")))
+                def check():
+                    error = next(checks)
+                    if error:
+                        raise error
+                self.worker.check = check
+            return reply
+        self.mutate = mutate
+        diagnostic = self.diagnostic("final_deadline")
+        self.assertEqual(diagnostic["error_type"], "WorkerError")
+        self.assertNotIn("operation", diagnostic)
+
+    def test_interrupt_keeps_original_propagation_and_operation(self):
+        def interrupt(request, timeout, **options):
+            raise KeyboardInterrupt("SYNTHETIC-PRIVATE-CANARY")
+        self.worker._request = interrupt
+        with self.assertRaises(KeyboardInterrupt):
+            self.bridge.stage(recipe(), b"x")
+        diagnostic = self.bridge.last_staging_failure
+        self.assertEqual(diagnostic["sub_step"], "preflight")
+        self.assertEqual(diagnostic["operation"], "native_preflight")
+        self.assertEqual(diagnostic["error_type"], "KeyboardInterrupt")
+        self.assertTrue(self.bridge._unresolved)
