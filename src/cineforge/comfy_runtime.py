@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -13,6 +14,31 @@ from cineforge.comfy_runtime_plan import comfy_plan, comfy_subject, comfy_worker
 from cineforge.interruptions import preserve_interruption, remember_interruption
 from cineforge.native_remote_plan import NR_BLOB_MAX, nr_digest, nr_encode, nr_hash, nr_json
 from cineforge.s2v_service import LongSessionServiceContext
+
+
+def _finish_diagnostic(stage: str, reply: Any) -> dict[str, Any]:
+    diagnostic: dict[str, Any] = {"stage": stage}
+    if stage == "receipt_validation":
+        if type(reply) is not dict:
+            diagnostic["receipt_type"] = type(reply).__name__[:128]
+        else:
+            diagnostic["receipt_keys"] = sorted(k[:64] for k in reply if type(k) is str)[:32]
+            receipt: dict[str, Any] = {}
+            for key in ("model_nonce", "request_sha256", "model_sha256", "header_sha256",
+                        "matrices_sha256", "enforcer_sha256", "audit_count", "prompt_id",
+                        "manual_dtype", "effective_dtype", "version", "policy", "patch_uuid",
+                        "step", "matrix_calls", "producer_pid"):
+                if key not in reply:
+                    continue
+                value = reply[key]
+                if type(value) is str:
+                    receipt[key] = value[:256].encode("utf-8", "replace").decode("utf-8")
+                elif (value is None or type(value) is bool
+                      or type(value) is int and value.bit_length() <= 64
+                      or type(value) is float and math.isfinite(value)):
+                    receipt[key] = value
+            diagnostic["receipt"] = receipt
+    return diagnostic
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +139,7 @@ class ClosedComfyRuntime:
         self._precision: dict[str, Any] | None = None
         self._precision_used: set[str] = set()
         self._precision_posted = False
+        self._precision_finish_diagnostic: dict[str, Any] | None = None
 
     def _poison(self) -> None:
         self._unresolved = True
@@ -286,25 +313,45 @@ class ClosedComfyRuntime:
     @preserve_interruption
     def finish_precision(self, worker: Any, selection: Any, prompt_id: str,
                          *, deadline: float) -> dict[str, Any]:
+        self._precision_finish_diagnostic = None
         if self._precision is None or not self._precision_posted:
+            self._precision_finish_diagnostic = {"stage": "intent_guard"}
             raise ValueError("current owned precision intent required")
         request, self._precision = self._precision, None  # Consume before fallible validation/I/O.
+        stage, reply = "entry_admit", None
         try:
             plan = self._admit(worker, deadline)
             worker._require_s2v(selection)
+            stage = "selection_identity"
             if request["selection_sha256"] != selection.approved_subject_sha256:
                 raise ValueError
-            reply = precision_receipt(self._call("native_comfy_precision_finish", deadline,
+            stage = "finish_rpc"
+            reply = self._call("native_comfy_precision_finish", deadline,
                 comfy_subject_sha256=comfy_subject(plan), precision_nonce=request["nonce"],
-                precision_prompt_id=prompt_id), request)
+                precision_prompt_id=prompt_id)
+            stage = "receipt_validation"
+            reply = precision_receipt(reply, request)
+            stage = "prompt_identity"
             if reply["prompt_id"] != prompt_id:
                 raise ValueError
+            stage = "exit_admit"
             self._admit(worker, deadline)
             worker._require_s2v(selection)
+            stage = "deadline"
             if time.monotonic() >= deadline:
                 raise ValueError
             return reply
         except BaseException as interruption_error:
+            # Diagnostics must never replace cancellation or the original failure path.
+            try:
+                diagnostic = _finish_diagnostic(stage, reply)
+                diagnostic["error_type"] = type(interruption_error).__name__[:64]
+                if stage == "prompt_identity" and reply is not None:
+                    diagnostic.update(received_prompt_id=reply["prompt_id"],
+                                      expected_prompt_id=prompt_id)
+                self._precision_finish_diagnostic = diagnostic
+            except BaseException as diagnostic_error:
+                remember_interruption(diagnostic_error)
             remember_interruption(interruption_error)
             self._poison()
             raise ValueError("actual model precision missing, failed or stale; never replay") from None

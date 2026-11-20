@@ -7,17 +7,21 @@ import os
 import shutil
 import tempfile
 import unittest
+import uuid
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
+import test_comfy_runtime as comfy_fixtures
 import test_s2v_stage as stage_fixtures
 from test_cloud_budget import Clock
 from test_comfy_run import IDENTITY, PAYLOAD, WireFixture
 from test_s2v import worker
 
+from cineforge import comfy_precision as precision
 from cineforge import s2v_profile as profile
 from cineforge.comfy_run import execute_comfy
+from cineforge.native_remote_plan import nr_digest
 from cineforge.private_store import PrivateRunDirectory
 from cineforge.s2v import S2VError
 from cineforge.s2v_run import inspect_s2v_media, run_s2v
@@ -39,6 +43,7 @@ class S2VWire(WireFixture):
         self.malformed_combo_audio_options = None
         self.fail_view = False
         self.payload = PAYLOAD
+        self.execution_error = False
 
     def request(self, method, path, body=None, *, timeout_seconds, max_bytes):
         if path.startswith("/object_info/"):
@@ -77,6 +82,13 @@ class S2VWire(WireFixture):
         if path.startswith("/history/"):
             value = json.loads(reply)
             if value:
+                if self.execution_error:
+                    item = value[IDENTITY]
+                    item["status"] = {"status_str": "error", "completed": False,
+                        "messages": [["execution_error", {"node_id": "168",
+                            "exception_type": "SyntheticExecutionError",
+                            "exception_message": "synthetic failure"}]]}
+                    item["node_errors"] = {"168": {"message": "synthetic node error"}}
                 value[IDENTITY]["outputs"]["168"] = value[IDENTITY]["outputs"].pop("47")
                 value[IDENTITY]["prompt"][4] = ["168"]
             return json.dumps(value).encode()
@@ -147,6 +159,203 @@ class S2VRunTests(unittest.TestCase):
             with patch('cineforge.ssh_worker.time.monotonic', options['clock']):
                 return run_s2v(self.selection, self.verification, self.driver, self.output, **options)
         return run_s2v(self.selection, self.verification, self.driver, self.output, **options)
+
+    def test_comfy_execution_details_reach_private_shot_record(self):
+        self.wire.execution_error = True
+        with self.assertRaises(S2VError):
+            self.run_scene()
+        record = json.loads((self.output / "shot" / "run.json").read_text())
+        error = record["known_run"]["error"]
+        self.assertIn("SyntheticExecutionError", error)
+        self.assertIn('"node_id":"168"', error)
+        self.assertIn('"node_errors"', error)
+
+    def precision_runtime(self, mode):
+        runtime, worker, _, _, state, bridge = comfy_fixtures.ComfyControllerTests().fixture()
+        request = dict(version=1, policy=precision.POLICY, nonce="a" * 32,
+            selection_sha256=self.selection.approved_subject_sha256,
+            deadline=9999999999.0, worker_id="worker", session_id="session", profile_id="profile")
+        for key in ("nonce_graph_sha256", "comfy_sha256", "runtime_sha256", "source_sha256",
+                    "package_sha256", "enforcer_sha256", "binding_sha256"):
+            request[key] = "a" * 64
+        runtime._precision = request
+        runtime._precision_posted = True
+        runtime._expires_unix = bridge._expires_unix
+        receipt = dict(version=1, policy=precision.POLICY, request_sha256=nr_digest(request),
+            model_sha256=precision.MODEL_SHA256, header_sha256=precision.HEADER_SHA256,
+            matrices_sha256=precision.MATRICES_SHA256, enforcer_sha256=request["enforcer_sha256"],
+            model_nonce="b" * 32, patch_uuid=str(uuid.uuid4()), audit_count=467,
+            manual_dtype="bf16", effective_dtype="bf16", step=1, matrix_calls=467,
+            producer_pid=123, prompt_id=IDENTITY)
+        if mode == "receipt_validation":
+            receipt.update(audit_count=466, header_sha256="c" * 64)
+        if mode == "unsafe_receipt":
+            receipt.update(audit_count=float("nan"), model_sha256="x" * 10000,
+                model_nonce="\ud800", header_sha256=["not scalar"], effective_dtype=2**1000)
+        if mode == "nonobject_receipt":
+            receipt = []
+        if mode == "admit":
+            state["revoked"] = True
+        def rpc(operation, **kwargs):
+            self.assertEqual(operation, "native_comfy_precision_finish")
+            if mode == "finish_rpc":
+                raise TimeoutError("synthetic RPC failure")
+            if mode == "interrupt":
+                raise KeyboardInterrupt
+            return receipt
+        bridge._call = rpc
+        closed = self.driver._closed_comfy
+        def finish(driver, selection, prompt_id, **kwargs):
+            try:
+                return runtime.finish_precision(worker, selection, prompt_id, **kwargs)
+            finally:
+                closed._precision_finish_diagnostic = runtime._precision_finish_diagnostic
+        closed.finish_precision = finish
+        return runtime, bridge, receipt
+
+    def test_precision_finish_rpc_failure_is_checkpointed(self):
+        runtime, bridge, _ = self.precision_runtime("finish_rpc")
+        with self.assertRaises(S2VError):
+            self.run_scene()
+        record = json.loads((self.output / "run.json").read_text())
+        self.assertEqual(record["precision_finish_failure"], {"stage": "finish_rpc", "error_type": "TimeoutError"})
+        self.assertEqual(record["outcome"], "incomplete")
+        self.assertIsNone(runtime._precision)
+        self.assertTrue(runtime._unresolved and bridge._unresolved)
+
+    def test_precision_receipt_failure_retains_received_fields(self):
+        _, _, receipt = self.precision_runtime("receipt_validation")
+        receipt["extra_key"] = "synthetic"
+        receipt["manual_dtype"] = None
+        del receipt["effective_dtype"]
+        with self.assertRaises(S2VError):
+            self.run_scene()
+        diagnostic = json.loads((self.output / "run.json").read_text())["precision_finish_failure"]
+        self.assertEqual(diagnostic["stage"], "receipt_validation")
+        self.assertEqual(diagnostic["receipt"]["audit_count"], 466)
+        self.assertEqual(diagnostic["receipt"]["header_sha256"], "c" * 64)
+        self.assertEqual(diagnostic["receipt_keys"], sorted(receipt))
+        self.assertIsNone(diagnostic["receipt"]["manual_dtype"])
+        self.assertNotIn("effective_dtype", diagnostic["receipt"])
+        for key in ("version", "policy", "patch_uuid", "step", "matrix_calls", "producer_pid"):
+            self.assertEqual(diagnostic["receipt"][key], receipt[key])
+        for key, value in diagnostic["receipt"].items():
+            self.assertEqual(value, receipt[key])
+
+    def test_precision_receipt_diagnostic_is_bounded_and_canonical_safe(self):
+        self.precision_runtime("unsafe_receipt")
+        with self.assertRaises(S2VError):
+            self.run_scene()
+        diagnostic = json.loads((self.output / "run.json").read_text())["precision_finish_failure"]
+        self.assertEqual(diagnostic["stage"], "receipt_validation")
+        self.assertEqual(len(diagnostic["receipt"]["model_sha256"]), 256)
+        self.assertNotIn("audit_count", diagnostic["receipt"])
+        self.assertNotIn("header_sha256", diagnostic["receipt"])
+        self.assertNotIn("effective_dtype", diagnostic["receipt"])
+
+    def test_precision_nonobject_receipt_records_type(self):
+        self.precision_runtime("nonobject_receipt")
+        with self.assertRaises(S2VError):
+            self.run_scene()
+        diagnostic = json.loads((self.output / "run.json").read_text())["precision_finish_failure"]
+        self.assertEqual(diagnostic, {"stage": "receipt_validation",
+                                      "receipt_type": "list", "error_type": "ValueError"})
+
+    def test_diagnostic_capture_failure_cannot_replace_rpc_interrupt(self):
+        runtime, bridge, _ = self.precision_runtime("interrupt")
+        with patch("cineforge.comfy_runtime._finish_diagnostic", side_effect=RuntimeError):
+            with self.assertRaises(KeyboardInterrupt):
+                self.run_scene()
+        self.assertTrue(runtime._unresolved and bridge._unresolved)
+
+    def test_interrupt_during_diagnostic_capture_is_preserved(self):
+        runtime, bridge, _ = self.precision_runtime("finish_rpc")
+        with patch("cineforge.comfy_runtime._finish_diagnostic", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                self.run_scene()
+        self.assertTrue(runtime._unresolved and bridge._unresolved)
+
+    def test_precision_internal_admit_failure_is_checkpointed(self):
+        self.precision_runtime("admit")
+        with self.assertRaises(S2VError):
+            self.run_scene()
+        record = json.loads((self.output / "run.json").read_text())
+        self.assertEqual(record["precision_finish_failure"], {"stage": "entry_admit", "error_type": "ValueError"})
+
+    def test_precision_prefinish_admit_failure_is_checkpointed(self):
+        original = self.driver.verify_comfy_current
+        def verify(**kwargs):
+            path = self.output / "run.json"
+            if path.exists() and "manifest" in json.loads(path.read_text()):
+                raise ValueError("synthetic revoked admission")
+            return original(**kwargs)
+        self.driver.verify_comfy_current = verify
+        with self.assertRaises(S2VError):
+            self.run_scene()
+        record = json.loads((self.output / "run.json").read_text())
+        self.assertEqual(record["precision_finish_failure"], {"stage": "pre_finish_admit"})
+
+    def test_precision_intent_guard_failure_is_checkpointed(self):
+        runtime, _, _ = self.precision_runtime("success")
+        runtime._precision_posted = False
+        with self.assertRaises(S2VError):
+            self.run_scene()
+        record = json.loads((self.output / "run.json").read_text())
+        self.assertEqual(record["precision_finish_failure"], {"stage": "intent_guard"})
+
+    def test_precision_job_identity_failure_is_checkpointed(self):
+        def execute(*args, **kwargs):
+            return replace(execute_comfy(*args, **kwargs), shot_runs=(), artifacts=())
+        with self.assertRaises(S2VError):
+            self.run_scene(execute=execute)
+        record = json.loads((self.output / "run.json").read_text())
+        self.assertEqual(record["precision_finish_failure"], {"stage": "job_identity"})
+
+    def test_precision_prompt_identity_failure_is_checkpointed(self):
+        _, _, receipt = self.precision_runtime("success")
+        received = str(uuid.uuid4())
+        receipt["prompt_id"] = received
+        with self.assertRaises(S2VError):
+            self.run_scene()
+        record = json.loads((self.output / "run.json").read_text())
+        self.assertEqual(record["precision_finish_failure"], {
+            "stage": "prompt_identity", "error_type": "ValueError",
+            "received_prompt_id": received, "expected_prompt_id": IDENTITY})
+
+    def test_precision_deadline_failure_is_checkpointed(self):
+        runtime, _, _ = self.precision_runtime("success")
+        original = runtime._admit
+        calls = []
+        def admit(worker, deadline):
+            plan = original(worker, deadline)
+            calls.append(deadline)
+            if len(calls) == 2:
+                expired.return_value = deadline
+            return plan
+        with patch.object(runtime, "_admit", side_effect=admit), \
+                patch("cineforge.comfy_runtime.time.monotonic", return_value=100) as expired:
+            with self.assertRaises(S2VError):
+                self.run_scene()
+        record = json.loads((self.output / "run.json").read_text())
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(record["precision_finish_failure"], {
+            "stage": "deadline", "error_type": "ValueError"})
+
+    def test_real_precision_success_has_no_failure_key(self):
+        self.precision_runtime("success")
+        result = self.run_scene()
+        self.assertNotIn("precision_finish_failure", result)
+        durable = json.loads((self.output / "run.json").read_text())
+        self.assertNotIn("precision_finish_failure", durable)
+        self.assertEqual(result["model_precision"]["audit_count"], 467)
+
+    def test_precision_rpc_interrupt_still_propagates_and_checkpoints(self):
+        runtime, bridge, _ = self.precision_runtime("interrupt")
+        with self.assertRaises(KeyboardInterrupt):
+            self.run_scene()
+        record = json.loads((self.output / "run.json").read_text())
+        self.assertEqual(record["precision_finish_failure"], {"stage": "finish_rpc", "error_type": "KeyboardInterrupt"})
+        self.assertTrue(runtime._unresolved and bridge._unresolved)
 
     def test_explicit_probe_flows_through_run_and_technical_result_with_deadline(self):
         binary = self.fixture.root / "explicit-ffprobe"

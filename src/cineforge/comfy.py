@@ -40,6 +40,60 @@ from cineforge.providers import (
 )
 from cineforge.workflows import WorkflowTemplate, canonical, strict_object
 
+
+def _execution_error(item: dict[str, Any], status: dict[str, Any]) -> str:
+    """Bound server-controlled evidence without changing the ShotRun contract."""
+    details: dict[str, Any] = {}
+    messages = status.get("messages")
+    errors = []
+    if type(messages) is list:
+        for message in messages[:256]:
+            if (type(message) is list and len(message) == 2
+                    and message[0] == "execution_error" and type(message[1]) is dict):
+                entry: dict[str, Any] = {}
+                for key in ("node_id", "node_type", "exception_type", "exception_message"):
+                    value = message[1].get(key)
+                    if type(value) is str:
+                        entry[key] = value[:512 if key == "exception_message" else 128].encode(
+                            "utf-8", "replace").decode("utf-8")
+                    elif type(value) is int and value.bit_length() <= 64:
+                        entry[key] = value
+                errors.append(entry)
+                if len(errors) == 4:
+                    break
+    if errors:
+        details["execution_errors"] = errors
+
+    def bounded(value: Any, depth: int = 0) -> Any:
+        if type(value) is str:
+            return value[:256].encode("utf-8", "replace").decode("utf-8")
+        if value is None or type(value) is bool:
+            return value
+        if type(value) is int and value.bit_length() <= 64:
+            return value
+        if type(value) is float and math.isfinite(value):
+            return value
+        if depth < 4:
+            if type(value) is dict:
+                result = {}
+                for key in value:
+                    if type(key) is str:
+                        name = key[:128].encode("utf-8", "replace").decode("utf-8")
+                        result[name] = bounded(value[key], depth + 1)
+                    if len(result) == 4:
+                        break
+                return result
+            if type(value) is list:
+                return [bounded(v, depth + 1) for v in value[:4]]
+        return None
+
+    for name, source in (("node_errors", item), ("status_node_errors", status)):
+        if "node_errors" in source:
+            details[name] = bounded(source["node_errors"])
+    prefix = "ComfyUI execution failed"
+    return prefix + (": " + canonical(details).decode("utf-8")[:8192] if details else "")
+
+
 TERMINAL = (RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELLED)
 SUPPORTED_SERVER_REVISION = "6d352802d8f8b9133f664a1757d6c6d26390c335"  # pragma: allowlist secret
 
@@ -261,7 +315,7 @@ class ComfyExecutionProvider:
                                  for m in messages))
             job.run = replace(job.run, status=RunStatus.CANCELLED if cancelled else RunStatus.FAILED,
                               finished_at=self._now(), error=None if cancelled else
-                              "ComfyUI execution failed")
+                              _execution_error(item, status))
         else:
             if not status["completed"]:
                 raise ProviderError("incomplete ComfyUI success history")
