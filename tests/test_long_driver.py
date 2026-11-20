@@ -1,6 +1,8 @@
 """Offline segment execution, durable resume and failure cleanup contracts."""
 import hashlib
 import json
+import os
+import sys
 import tempfile
 import unittest
 from contextlib import ExitStack
@@ -26,6 +28,7 @@ from cineforge.runpod import (
     RunpodPodSpec,
 )
 from cineforge.s2v_profile import IMAGE, L40S_GPU_ID
+from cineforge.s2v_run import inspect_s2v_media
 from cineforge.s2v_service import (
     LongSessionBudgetApproval,
     LongSessionServiceContext,
@@ -98,6 +101,64 @@ class LongHarness(Harness):
 
 
 class LongDriverTests(unittest.TestCase):
+    def test_explicit_probe_binding_verifies_without_ambient_path(self):
+        with tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
+            h = LongHarness(Path(tmp).resolve(), stack, lines=["Approved English."])
+            binary = Path(tmp).resolve() / "ffprobe"
+            metadata = {"streams": [{"codec_type": "video", "codec_name": "vp9",
+                "pix_fmt": "yuv420p", "width": 832, "height": 480, "nb_read_frames": "77",
+                "avg_frame_rate": "16/1"}], "format": {"duration": "4.813"}}
+            binary.write_text(f"#!{sys.executable}\nprint({json.dumps(metadata)!r})\n")
+            binary.chmod(0o700)
+            h.bindings = replace(h.bindings, ffprobe=binary)
+            candidates = []
+            def shot(*args, **kwargs):
+                result = h.s2v(*args, **kwargs)
+                artifact, = result["manifest"]["artifacts"]
+                candidates.append(inspect_s2v_media(Path(args[3]) / "shot" / artifact["uri"],
+                    ffprobe=kwargs["ffprobe"], absolute_deadline=kwargs["absolute_deadline"]))
+                return result
+            with patch.object(driver, "run_s2v", side_effect=shot) as run, \
+                    patch.dict(os.environ, {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}), \
+                    patch("cineforge.s2v_run.shutil.which", return_value=None) as which:
+                record = h.run()
+            self.assertEqual(record["outcome"], "complete", record)
+            self.assertEqual(record["segments"][0]["status"], "verified")
+            self.assertEqual(run.call_args.kwargs["ffprobe"], binary)
+            self.assertEqual(candidates, [{"media_type": "video/webm", "codec": "vp9",
+                "pixel_format": "yuv420p", "width": 832, "height": 480, "decoded_frames": 77,
+                "fps": 16.0, "duration_seconds": 4.813}])
+            which.assert_not_called()
+
+    def test_default_probe_binding_is_none(self):
+        with tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
+            h = LongHarness(Path(tmp).resolve(), stack)
+            with patch.object(driver, "run_s2v", side_effect=h.s2v) as run, \
+                    patch.object(driver, "run_process") as probe:
+                self.assertEqual(h.run()["outcome"], "complete")
+            self.assertTrue(all(call.kwargs["ffprobe"] is None for call in run.call_args_list))
+            probe.assert_not_called()
+
+    def test_invalid_explicit_probe_rejected_before_reservation_or_acquisition(self):
+        for kind in ("relative", "missing", "directory", "not-executable", "broken"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
+                h = LongHarness(Path(tmp).resolve(), stack)
+                binary = Path(tmp).resolve() / "ffprobe"
+                if kind == "relative":
+                    binary = Path("ffprobe")
+                elif kind == "directory":
+                    binary.mkdir()
+                elif kind in ("not-executable", "broken"):
+                    binary.write_text("#!/bin/sh\nexit 1\n")
+                    if kind == "broken":
+                        binary.chmod(0o700)
+                h.bindings = replace(h.bindings, ffprobe=binary)
+                with self.assertRaisesRegex(A20Error, "^LONG_FFPROBE_UNAVAILABLE:"):
+                    h.run()
+                h.patches["RunpodPodProvisioner"].assert_not_called()
+                h.patches["CloudBudgetSession"].assert_not_called()
+                self.assertFalse(h.output.exists())
+
     def test_planned_segments_sizes_lease(self):
         for planned, seconds in ((3, 6900), (1, 3900), (2, 5400), (100, 6900)):
             with self.subTest(planned=planned), tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
