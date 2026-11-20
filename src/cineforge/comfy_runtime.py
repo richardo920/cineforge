@@ -22,11 +22,15 @@ def _finish_diagnostic(stage: str, reply: Any) -> dict[str, Any]:
         if type(reply) is not dict:
             diagnostic["receipt_type"] = type(reply).__name__[:128]
         else:
+            diagnostic["receipt_keys"] = sorted(k[:64] for k in reply if type(k) is str)[:32]
             receipt: dict[str, Any] = {}
             for key in ("model_nonce", "request_sha256", "model_sha256", "header_sha256",
                         "matrices_sha256", "enforcer_sha256", "audit_count", "prompt_id",
-                        "manual_dtype", "effective_dtype"):
-                value = reply.get(key)
+                        "manual_dtype", "effective_dtype", "version", "policy", "patch_uuid",
+                        "step", "matrix_calls", "producer_pid"):
+                if key not in reply:
+                    continue
+                value = reply[key]
                 if type(value) is str:
                     receipt[key] = value[:256].encode("utf-8", "replace").decode("utf-8")
                 elif (value is None or type(value) is bool
@@ -311,12 +315,14 @@ class ClosedComfyRuntime:
                          *, deadline: float) -> dict[str, Any]:
         self._precision_finish_diagnostic = None
         if self._precision is None or not self._precision_posted:
+            self._precision_finish_diagnostic = {"stage": "intent_guard"}
             raise ValueError("current owned precision intent required")
         request, self._precision = self._precision, None  # Consume before fallible validation/I/O.
-        stage, reply = "admit", None
+        stage, reply = "entry_admit", None
         try:
             plan = self._admit(worker, deadline)
             worker._require_s2v(selection)
+            stage = "selection_identity"
             if request["selection_sha256"] != selection.approved_subject_sha256:
                 raise ValueError
             stage = "finish_rpc"
@@ -328,7 +334,7 @@ class ClosedComfyRuntime:
             stage = "prompt_identity"
             if reply["prompt_id"] != prompt_id:
                 raise ValueError
-            stage = "admit"
+            stage = "exit_admit"
             self._admit(worker, deadline)
             worker._require_s2v(selection)
             stage = "deadline"
@@ -338,7 +344,12 @@ class ClosedComfyRuntime:
         except BaseException as interruption_error:
             # Diagnostics must never replace cancellation or the original failure path.
             try:
-                self._precision_finish_diagnostic = _finish_diagnostic(stage, reply)
+                diagnostic = _finish_diagnostic(stage, reply)
+                diagnostic["error_type"] = type(interruption_error).__name__[:64]
+                if stage == "prompt_identity" and reply is not None:
+                    diagnostic.update(received_prompt_id=reply["prompt_id"],
+                                      expected_prompt_id=prompt_id)
+                self._precision_finish_diagnostic = diagnostic
             except BaseException as diagnostic_error:
                 remember_interruption(diagnostic_error)
             remember_interruption(interruption_error)

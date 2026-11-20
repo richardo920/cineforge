@@ -218,19 +218,27 @@ class S2VRunTests(unittest.TestCase):
         with self.assertRaises(S2VError):
             self.run_scene()
         record = json.loads((self.output / "run.json").read_text())
-        self.assertEqual(record["precision_finish_failure"], {"stage": "finish_rpc"})
+        self.assertEqual(record["precision_finish_failure"], {"stage": "finish_rpc", "error_type": "TimeoutError"})
         self.assertEqual(record["outcome"], "incomplete")
         self.assertIsNone(runtime._precision)
         self.assertTrue(runtime._unresolved and bridge._unresolved)
 
     def test_precision_receipt_failure_retains_received_fields(self):
         _, _, receipt = self.precision_runtime("receipt_validation")
+        receipt["extra_key"] = "synthetic"
+        receipt["manual_dtype"] = None
+        del receipt["effective_dtype"]
         with self.assertRaises(S2VError):
             self.run_scene()
         diagnostic = json.loads((self.output / "run.json").read_text())["precision_finish_failure"]
         self.assertEqual(diagnostic["stage"], "receipt_validation")
         self.assertEqual(diagnostic["receipt"]["audit_count"], 466)
         self.assertEqual(diagnostic["receipt"]["header_sha256"], "c" * 64)
+        self.assertEqual(diagnostic["receipt_keys"], sorted(receipt))
+        self.assertIsNone(diagnostic["receipt"]["manual_dtype"])
+        self.assertNotIn("effective_dtype", diagnostic["receipt"])
+        for key in ("version", "policy", "patch_uuid", "step", "matrix_calls", "producer_pid"):
+            self.assertEqual(diagnostic["receipt"][key], receipt[key])
         for key, value in diagnostic["receipt"].items():
             self.assertEqual(value, receipt[key])
 
@@ -250,7 +258,8 @@ class S2VRunTests(unittest.TestCase):
         with self.assertRaises(S2VError):
             self.run_scene()
         diagnostic = json.loads((self.output / "run.json").read_text())["precision_finish_failure"]
-        self.assertEqual(diagnostic, {"stage": "receipt_validation", "receipt_type": "list"})
+        self.assertEqual(diagnostic, {"stage": "receipt_validation",
+                                      "receipt_type": "list", "error_type": "ValueError"})
 
     def test_diagnostic_capture_failure_cannot_replace_rpc_interrupt(self):
         runtime, bridge, _ = self.precision_runtime("interrupt")
@@ -271,7 +280,7 @@ class S2VRunTests(unittest.TestCase):
         with self.assertRaises(S2VError):
             self.run_scene()
         record = json.loads((self.output / "run.json").read_text())
-        self.assertEqual(record["precision_finish_failure"], {"stage": "admit"})
+        self.assertEqual(record["precision_finish_failure"], {"stage": "entry_admit", "error_type": "ValueError"})
 
     def test_precision_prefinish_admit_failure_is_checkpointed(self):
         original = self.driver.verify_comfy_current
@@ -284,7 +293,53 @@ class S2VRunTests(unittest.TestCase):
         with self.assertRaises(S2VError):
             self.run_scene()
         record = json.loads((self.output / "run.json").read_text())
-        self.assertEqual(record["precision_finish_failure"], {"stage": "admit"})
+        self.assertEqual(record["precision_finish_failure"], {"stage": "pre_finish_admit"})
+
+    def test_precision_intent_guard_failure_is_checkpointed(self):
+        runtime, _, _ = self.precision_runtime("success")
+        runtime._precision_posted = False
+        with self.assertRaises(S2VError):
+            self.run_scene()
+        record = json.loads((self.output / "run.json").read_text())
+        self.assertEqual(record["precision_finish_failure"], {"stage": "intent_guard"})
+
+    def test_precision_job_identity_failure_is_checkpointed(self):
+        def execute(*args, **kwargs):
+            return replace(execute_comfy(*args, **kwargs), shot_runs=(), artifacts=())
+        with self.assertRaises(S2VError):
+            self.run_scene(execute=execute)
+        record = json.loads((self.output / "run.json").read_text())
+        self.assertEqual(record["precision_finish_failure"], {"stage": "job_identity"})
+
+    def test_precision_prompt_identity_failure_is_checkpointed(self):
+        _, _, receipt = self.precision_runtime("success")
+        received = str(uuid.uuid4())
+        receipt["prompt_id"] = received
+        with self.assertRaises(S2VError):
+            self.run_scene()
+        record = json.loads((self.output / "run.json").read_text())
+        self.assertEqual(record["precision_finish_failure"], {
+            "stage": "prompt_identity", "error_type": "ValueError",
+            "received_prompt_id": received, "expected_prompt_id": IDENTITY})
+
+    def test_precision_deadline_failure_is_checkpointed(self):
+        runtime, _, _ = self.precision_runtime("success")
+        original = runtime._admit
+        calls = []
+        def admit(worker, deadline):
+            plan = original(worker, deadline)
+            calls.append(deadline)
+            if len(calls) == 2:
+                expired.return_value = deadline
+            return plan
+        with patch.object(runtime, "_admit", side_effect=admit), \
+                patch("cineforge.comfy_runtime.time.monotonic", return_value=100) as expired:
+            with self.assertRaises(S2VError):
+                self.run_scene()
+        record = json.loads((self.output / "run.json").read_text())
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(record["precision_finish_failure"], {
+            "stage": "deadline", "error_type": "ValueError"})
 
     def test_real_precision_success_has_no_failure_key(self):
         self.precision_runtime("success")
@@ -299,7 +354,7 @@ class S2VRunTests(unittest.TestCase):
         with self.assertRaises(KeyboardInterrupt):
             self.run_scene()
         record = json.loads((self.output / "run.json").read_text())
-        self.assertEqual(record["precision_finish_failure"], {"stage": "finish_rpc"})
+        self.assertEqual(record["precision_finish_failure"], {"stage": "finish_rpc", "error_type": "KeyboardInterrupt"})
         self.assertTrue(runtime._unresolved and bridge._unresolved)
 
     def test_explicit_probe_flows_through_run_and_technical_result_with_deadline(self):
