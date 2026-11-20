@@ -5,6 +5,7 @@ output directory; the shared private store refuses to adopt it.
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import math
@@ -214,10 +215,16 @@ def run_long_session(b: LongSessionBindings, frozen: FrozenInputs, output: Path,
             if time.monotonic() >= absolute_deadline:
                 raise _DeadlineStopped("LONG_ABSOLUTE_DEADLINE")
 
+        bridge: RemoteNativeSpeechRuntime | None = None
+
         def failure(error: BaseException) -> None:
             remember_interruption(error)
             record["failures"].append({"index": index, "stage": stage,
                 "error_type": type(error).__name__, "message": str(error)})
+            if stage == "stage" and bridge is not None:
+                diagnostic = getattr(bridge, "last_staging_failure", None)
+                if type(diagnostic) is dict:
+                    record["failures"][-1]["staging_failure"] = copy.deepcopy(diagnostic)
             record["outcome"] = ("deadline_stopped" if stage != "release" and (
                 isinstance(error, _DeadlineStopped) or time.monotonic() >= absolute_deadline)
                 else "failed")

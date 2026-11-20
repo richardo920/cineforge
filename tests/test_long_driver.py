@@ -11,7 +11,9 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import Mock, patch
 
+import test_native_capabilities as native_capability_tests
 from test_a20_driver import AdmissionCatalog, Harness
+from test_native_remote import recipe
 from test_speech import CanonicalVoiceBinding, fixture, wav_bytes
 
 from cineforge import long_driver as driver
@@ -453,3 +455,46 @@ class LongAdmissionTests(unittest.TestCase):
                 record = strict_object(journal.initial)["records"][intent.key]
                 self.assertTrue(record["authorized"])
                 self.assertEqual(record["reservation_usd"], 2.434167)
+
+
+class StagingFailureRecordTests(unittest.TestCase):
+    def test_stage_record_copies_diagnostic_and_handles_missing_bridge(self):
+        for entry in ("stage", "measure_capabilities", "constructor"):
+            with self.subTest(entry=entry), tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
+                h = LongHarness(Path(tmp).resolve(), stack)
+                remote = native_capability_tests.CapabilityChannelTests("runTest")
+                remote.setUp()
+                stack.callback(remote.doCleanups)
+                remote.lost = "native_setup" if entry == "stage" else "native_capabilities"
+                h.bindings.sox_wheel.write_bytes(b"x")
+                h.bindings = replace(h.bindings, recipe=recipe())
+                factory = h.patches["RemoteNativeSpeechRuntime"]
+                factory.return_value = remote.bridge
+                if entry == "constructor":
+                    factory.side_effect = RuntimeError("failure")
+                record = h.run()
+                failure = record["failures"][0]
+                self.assertEqual(failure["stage"], "stage")
+                if entry == "constructor":
+                    self.assertNotIn("staging_failure", failure)
+                else:
+                    diagnostic = remote.bridge.last_staging_failure
+                    self.assertEqual(diagnostic["entry"], entry)
+                    self.assertEqual(diagnostic["sub_step"], "setup" if entry == "stage" else "call")
+                    self.assertEqual(failure["staging_failure"], diagnostic)
+                    original = diagnostic["sub_step"]
+                    diagnostic["sub_step"] = "changed"
+                    self.assertEqual(failure["staging_failure"]["sub_step"], original)
+                saved = json.loads((h.output / "run.json").read_text())
+                self.assertEqual(saved["failures"], record["failures"])
+
+    def test_success_and_other_stage_failures_gain_no_diagnostic(self):
+        for failed in (False, True):
+            with self.subTest(failed=failed), tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
+                h = LongHarness(Path(tmp).resolve(), stack)
+                h.bridge.last_staging_failure = {"entry": "stage", "sub_step": "setup"}
+                if failed:
+                    h.fail_segment = 0
+                record = h.run()
+                self.assertEqual(record["outcome"], "failed" if failed else "complete")
+                self.assertNotIn('"staging_failure"', json.dumps(record))

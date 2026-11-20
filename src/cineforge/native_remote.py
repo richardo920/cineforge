@@ -127,13 +127,52 @@ class RemoteNativeSpeechRuntime:
         self._attempts = 0
         self._used: set[str] = set()
         self._proofs: dict[tuple[str, str, str], RemoteNativeProof] = {}
+        self.last_staging_failure: dict[str, Any] | None = None
+        self._last_call_failure: dict[str, Any] | None = None
         self.last_attempt: str | None = None
+
+    def _capture_staging_failure(self, entry: str, sub_step: str, error: BaseException,
+                                 *, reply: Any = None, validation: bool = False) -> None:
+        # Failure-only, memory-only evidence: never retain exception messages or values.
+        try:
+            diagnostic: dict[str, Any] = {"entry": entry, "sub_step": sub_step,
+                          "error_type": type(error).__name__}
+            if self._last_call_failure is not None:
+                diagnostic.update(self._last_call_failure)
+            if validation:
+                if type(reply) is dict:
+                    diagnostic["reply_keys"] = sorted(
+                        k[:64].encode("utf-8", "replace").decode("utf-8")
+                        for k in reply if type(k) is str)[:32]
+                else:
+                    diagnostic["reply_type"] = type(reply).__name__[:128]
+            self.last_staging_failure = diagnostic
+        except BaseException as diagnostic_error:
+            remember_interruption(diagnostic_error)
+
+    def _capture_call_failure(self, operation: str, error: BaseException | None = None,
+                              sent_unix: float | None = None, *, reply_received: bool) -> None:
+        try:
+            diagnostic: dict[str, Any] = {"operation": operation,
+                "reply_received": reply_received,
+                "error_type": "NativeSpeechError" if error is None else type(error).__name__}
+            if sent_unix is not None:
+                diagnostic["sent_unix"] = sent_unix
+            self._last_call_failure = diagnostic
+        except BaseException as diagnostic_error:
+            remember_interruption(diagnostic_error)
 
     @preserve_interruption
     def _call(self, operation: str, *, controller_deadline: float | None = None,
               **fields: Any) -> dict[str, Any]:
-        self._bound_worker()
+        self._last_call_failure = None
+        try:
+            self._bound_worker()
+        except BaseException as error:
+            RemoteNativeSpeechRuntime._capture_call_failure(self, operation, error, reply_received=False)
+            raise
         worker = self._worker
+        sent_unix = None
         failed = False
         result = None
         try:
@@ -149,12 +188,13 @@ class RemoteNativeSpeechRuntime:
                 raise ValueError
             if type(worker.selection) is LongSessionServiceContext:
                 fields["native_operation_limit"] = self._max_operations
+            sent_unix = time.time()
             result = worker.native_request(
                 dict(
                     fields,
                     operation=operation,
                     native_source_sha256=self._binding["source"],
-                    native_sent_unix=time.time(),
+                    native_sent_unix=sent_unix,
                     native_expires_unix=self._expires_unix,
                 ),
                 absolute_deadline=cap,
@@ -163,8 +203,14 @@ class RemoteNativeSpeechRuntime:
                 raise ValueError
         except BaseException as interruption_error:
             remember_interruption(interruption_error)
+            RemoteNativeSpeechRuntime._capture_call_failure(self, operation, interruption_error,
+                                       sent_unix if result is None else None,
+                                       reply_received=result is not None)
             failed = True
         if failed or result is None:
+            if not failed:
+                RemoteNativeSpeechRuntime._capture_call_failure(self, operation, sent_unix=sent_unix,
+                                                               reply_received=False)
             self._unresolved = True
             raise NativeSpeechError(
                 "remote native operation incomplete or unconfirmed", cleanup_uncertain=True
@@ -232,6 +278,9 @@ class RemoteNativeSpeechRuntime:
             raise NativeSpeechError("native capability deadline exhausted")
         if not self._lock.acquire(blocking=False):
             raise NativeSpeechError("concurrent remote native work refused")
+        self.last_staging_failure = None
+        self._last_call_failure = None
+        sub_step = "initialize"
         result = None
         try:
             if self._capabilities_attempted or self._staging_attempted or self._unresolved:
@@ -239,11 +288,15 @@ class RemoteNativeSpeechRuntime:
             self._capabilities_attempted = True
             package, _ = native_package()
             self._initialize(package, deadline)
+            sub_step = "call"
             result = self._call("native_capabilities")
+            sub_step = "validate"
             self._validate_capabilities(result)
             result = copy.deepcopy(result)
         except BaseException as interruption_error:
             remember_interruption(interruption_error)
+            RemoteNativeSpeechRuntime._capture_staging_failure(self, "measure_capabilities", sub_step, interruption_error,
+                                          reply=result, validation=sub_step == "validate")
             self._unresolved = True
             result = None
         finally:
@@ -262,6 +315,7 @@ class RemoteNativeSpeechRuntime:
                     raise ValueError
             except BaseException as interruption_error:
                 remember_interruption(interruption_error)
+                RemoteNativeSpeechRuntime._capture_staging_failure(self, "measure_capabilities", "final_admission", interruption_error)
                 self._unresolved = True
                 result = None
         if result is None:
@@ -315,6 +369,7 @@ class RemoteNativeSpeechRuntime:
         def call(operation: str, **fields: Any) -> None:
             reply = self._call(operation, **common, **fields)
             if reply != {"status": operation, "token": token}:
+                RemoteNativeSpeechRuntime._capture_call_failure(self, operation, reply_received=True)
                 self._unresolved = True
                 raise NativeSpeechError("remote native transfer acknowledgement differs")
 
@@ -358,6 +413,8 @@ class RemoteNativeSpeechRuntime:
     def stage(self, recipe: dict[str, Any], built_sox_wheel: bytes) -> dict[str, Any]:
         if not self._lock.acquire(blocking=False):
             raise NativeSpeechError("concurrent remote native work refused")
+        self.last_staging_failure = None
+        self._last_call_failure = None
         result = None
         try:
             result = self._stage(recipe, built_sox_wheel)
@@ -371,6 +428,7 @@ class RemoteNativeSpeechRuntime:
                 raise ValueError
         except BaseException as interruption_error:
             remember_interruption(interruption_error)
+            RemoteNativeSpeechRuntime._capture_staging_failure(self, "stage", "final_admission", interruption_error)
             self._unresolved = True
             failed = True
         if failed or result is None:
@@ -400,20 +458,33 @@ class RemoteNativeSpeechRuntime:
             raise NativeSpeechError("fixed first party native package unavailable") from None
         self._initialize(package, started_deadline)
         self._staging_attempted = True
+        sub_step = "preflight"
+        preflight = result = None
+        validation = False
         try:
             fields: dict[str, Any] = ({} if self._capabilities_sha256 is None
                                      else {"capabilities_sha256": self._capabilities_sha256})
             preflight = self._call("native_preflight", **fields)
+            validation = True
             if (
                 set(preflight) != {"interpreter", "seccomp", "abi", "binding_sha256"}
                 or preflight["binding_sha256"] != nr_digest(self._binding)
                 or preflight["abi"] != "cpython311-linux-x86_64-glibc2.28"
             ):
                 raise ValueError
+            validation = False
+            sub_step = "upload_package"
             self._upload("package", package)
+            sub_step = "upload_recipe"
             self._upload("recipe", nr_encode(recipe))
+            sub_step = "upload_sox"
             self._upload("sox", built_sox_wheel)
-            result = nr_json(self._fetch("installed", self._call("native_setup")))
+            sub_step = "setup"
+            descriptor = self._call("native_setup")
+            sub_step = "fetch_installed"
+            result = nr_json(self._fetch("installed", descriptor))
+            sub_step = "result_validation"
+            validation = True
             if (
                 set(result)
                 != {"interpreter", "seccomp", "runtime", "sdk", "base", "design", "recipe_sha256"}
@@ -422,14 +493,18 @@ class RemoteNativeSpeechRuntime:
                 or result["recipe_sha256"] != recipe["reviewed_subject_sha256"]
             ):
                 raise ValueError
+            validation = False
             self._installed = copy.deepcopy(result)
             self._recipe = recipe["reviewed_subject_sha256"]
+            sub_step = "final_deadline"
             if self._deadline is None or time.monotonic() >= self._deadline:
                 raise ValueError
             return copy.deepcopy(result)
         except BaseException as interruption_error:
             remember_interruption(interruption_error)
             self._unresolved = True
+            RemoteNativeSpeechRuntime._capture_staging_failure(self, "stage", sub_step, interruption_error,
+                reply=preflight if sub_step == "preflight" else result, validation=validation)
             raise NativeSpeechError(
                 "remote native staging incomplete or unconfirmed", cleanup_uncertain=True
             ) from None

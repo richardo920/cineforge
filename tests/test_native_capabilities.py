@@ -440,3 +440,57 @@ class CapabilityChannelTests(RemoteFixture):
             self.static_failure(lambda: self.bridge.stage(recipe(), b"x"))
             self.assertEqual(len(self.requests), before)
         self.assertFalse((self.remote / "package.blob").exists())
+
+    def test_measure_dispatch_failure_retains_operation_and_send_time(self):
+        self.lost = "native_capabilities"
+        self.static_failure(self.bridge.measure_capabilities)
+        diagnostic = self.bridge.last_staging_failure
+        self.assertEqual(diagnostic["entry"], "measure_capabilities")
+        self.assertEqual(diagnostic["sub_step"], "call")
+        self.assertEqual(diagnostic["operation"], "native_capabilities")
+        self.assertEqual(diagnostic["sent_unix"], self.requests[-1]["native_sent_unix"])
+
+    def test_measure_validation_failure_and_non_dict_reply(self):
+        for reply in ({"unexpected": "private"}, ["private"]):
+            with self.subTest(reply=reply):
+                self.remote = self.root / ("invalid-" + type(reply).__name__)
+                self.bridge = RemoteNativeSpeechRuntime(self.worker, allow_native=True)
+                self.mutate = lambda request, result, reply=reply: reply
+                self.static_failure(self.bridge.measure_capabilities)
+                diagnostic = self.bridge.last_staging_failure
+                self.assertEqual(diagnostic["sub_step"], "validate")
+                self.assertEqual(diagnostic["error_type"], "ValueError")
+                if type(reply) is dict:
+                    self.assertEqual(diagnostic["reply_keys"], ["unexpected"])
+                else:
+                    self.assertEqual(diagnostic["reply_type"], "list")
+                self.assertNotIn("sent_unix", diagnostic)
+                self.assertNotIn("operation", diagnostic)
+
+    def test_measure_initialization_failure(self):
+        self.worker.check = lambda: (_ for _ in ()).throw(ValueError("private"))
+        self.static_failure(self.bridge.measure_capabilities)
+        self.assertEqual(self.bridge.last_staging_failure,
+            {"entry": "measure_capabilities", "sub_step": "initialize", "error_type": "ValueError"})
+        self.assertEqual(self.requests, [])
+
+    def test_measure_post_call_admission_failure(self):
+        def mutate(request, reply):
+            checks = iter((None, ValueError("private")))
+            def check():
+                error = next(checks)
+                if error:
+                    raise error
+            self.worker.check = check
+            return reply
+        self.mutate = mutate
+        self.static_failure(self.bridge.measure_capabilities)
+        self.assertEqual(self.bridge.last_staging_failure,
+            {"entry": "measure_capabilities", "sub_step": "final_admission", "error_type": "ValueError"})
+
+    def test_successful_measure_and_stage_leave_no_diagnostic(self):
+        self.bridge.measure_capabilities()
+        self.assertIsNone(self.bridge.last_staging_failure)
+        self.bridge.stage(recipe(), b"x")
+        self.assertIsNone(self.bridge.last_staging_failure)
+        self.assertIsNone(self.bridge._last_call_failure)
