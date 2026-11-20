@@ -1061,6 +1061,17 @@ class StagingDiagnosticTests(RemoteFixture):
         diagnostic = self.diagnostic("upload_package")
         self.assertEqual(diagnostic["operation"], "native_chunk")
         self.assertNotIn("sent_unix", diagnostic)
+        self.assertIs(diagnostic["reply_received"], True)
+
+    def test_bound_worker_refusal_records_no_reply_or_send_time(self):
+        with patch.object(RemoteNativeSpeechRuntime, "_bound_worker",
+                          side_effect=NativeSpeechError("SYNTHETIC-PRIVATE-CANARY")):
+            diagnostic = self.diagnostic("preflight")
+        self.assertEqual(diagnostic["operation"], "native_preflight")
+        self.assertEqual(diagnostic["error_type"], "NativeSpeechError")
+        self.assertIs(diagnostic["reply_received"], False)
+        self.assertNotIn("sent_unix", diagnostic)
+        self.assertEqual(self.requests, [])
 
     def test_setup_no_reply_retains_exact_controller_send_time(self):
         for raised in (True, False):
@@ -1075,6 +1086,7 @@ class StagingDiagnosticTests(RemoteFixture):
                 self.assertEqual(diagnostic["error_type"], "TimeoutError" if raised else "NativeSpeechError")
                 self.assertEqual(diagnostic["sent_unix"], self.requests[-1]["native_sent_unix"])
                 self.assertIs(type(diagnostic["sent_unix"]), float)
+                self.assertIs(diagnostic["reply_received"], False)
 
     def test_fetch_framing_failure_is_distinct_from_dispatch_failure(self):
         self.mutate = lambda request, reply: (dict(reply, offset=-1)
@@ -1099,7 +1111,7 @@ class StagingDiagnosticTests(RemoteFixture):
         self.assertEqual(diagnostic["error_type"], "ValueError")
         self.assertNotIn("operation", diagnostic)
 
-    def test_stage_wrapper_final_admission_is_final_deadline(self):
+    def test_stage_wrapper_final_admission_is_final_admission(self):
         def mutate(request, reply):
             if request["operation"] == "native_fetch":
                 checks = iter((None, WorkerError("SYNTHETIC-PRIVATE-CANARY")))
@@ -1110,7 +1122,7 @@ class StagingDiagnosticTests(RemoteFixture):
                 self.worker.check = check
             return reply
         self.mutate = mutate
-        diagnostic = self.diagnostic("final_deadline")
+        diagnostic = self.diagnostic("final_admission")
         self.assertEqual(diagnostic["error_type"], "WorkerError")
         self.assertNotIn("operation", diagnostic)
 

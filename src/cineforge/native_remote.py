@@ -151,9 +151,10 @@ class RemoteNativeSpeechRuntime:
             remember_interruption(diagnostic_error)
 
     def _capture_call_failure(self, operation: str, error: BaseException | None = None,
-                              sent_unix: float | None = None) -> None:
+                              sent_unix: float | None = None, *, reply_received: bool) -> None:
         try:
             diagnostic: dict[str, Any] = {"operation": operation,
+                "reply_received": reply_received,
                 "error_type": "NativeSpeechError" if error is None else type(error).__name__}
             if sent_unix is not None:
                 diagnostic["sent_unix"] = sent_unix
@@ -168,7 +169,7 @@ class RemoteNativeSpeechRuntime:
         try:
             self._bound_worker()
         except BaseException as error:
-            RemoteNativeSpeechRuntime._capture_call_failure(self, operation, error)
+            RemoteNativeSpeechRuntime._capture_call_failure(self, operation, error, reply_received=False)
             raise
         worker = self._worker
         sent_unix = None
@@ -203,11 +204,13 @@ class RemoteNativeSpeechRuntime:
         except BaseException as interruption_error:
             remember_interruption(interruption_error)
             RemoteNativeSpeechRuntime._capture_call_failure(self, operation, interruption_error,
-                                       sent_unix if result is None else None)
+                                       sent_unix if result is None else None,
+                                       reply_received=result is not None)
             failed = True
         if failed or result is None:
             if not failed:
-                RemoteNativeSpeechRuntime._capture_call_failure(self, operation, sent_unix=sent_unix)
+                RemoteNativeSpeechRuntime._capture_call_failure(self, operation, sent_unix=sent_unix,
+                                                               reply_received=False)
             self._unresolved = True
             raise NativeSpeechError(
                 "remote native operation incomplete or unconfirmed", cleanup_uncertain=True
@@ -366,7 +369,7 @@ class RemoteNativeSpeechRuntime:
         def call(operation: str, **fields: Any) -> None:
             reply = self._call(operation, **common, **fields)
             if reply != {"status": operation, "token": token}:
-                RemoteNativeSpeechRuntime._capture_call_failure(self, operation)
+                RemoteNativeSpeechRuntime._capture_call_failure(self, operation, reply_received=True)
                 self._unresolved = True
                 raise NativeSpeechError("remote native transfer acknowledgement differs")
 
@@ -425,7 +428,7 @@ class RemoteNativeSpeechRuntime:
                 raise ValueError
         except BaseException as interruption_error:
             remember_interruption(interruption_error)
-            RemoteNativeSpeechRuntime._capture_staging_failure(self, "stage", "final_deadline", interruption_error)
+            RemoteNativeSpeechRuntime._capture_staging_failure(self, "stage", "final_admission", interruption_error)
             self._unresolved = True
             failed = True
         if failed or result is None:
