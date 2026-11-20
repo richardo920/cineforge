@@ -58,6 +58,8 @@ class ServerFixture:
         self.graph = None
         self.error = None
         self.raw = None
+        self.messages = []
+        self.node_errors = None
         self.descriptor = {"filename": "synthetic.bin", "subfolder": "scene-1", "type": "output"}
 
     def request(self, method, path, body=None, *, timeout_seconds, max_bytes):
@@ -89,9 +91,12 @@ class ServerFixture:
                     "status": {"status_str": "success" if self.mode == "success" else "error",
                                "completed": self.mode == "success",
                                "messages": [["execution_interrupted", {}]]
-                               if self.mode == "cancelled" else []},
+                               if self.mode == "cancelled" else self.messages},
                     "outputs": {"3": {"images": [self.descriptor]}},
                 }}
+            if value and self.node_errors is not None:
+                value[IDENTITY]["node_errors"] = self.node_errors
+                value[IDENTITY]["status"]["node_errors"] = self.node_errors
         elif path.startswith("/view?"):
             return b"synthetic bytes, no media"
         else:
@@ -139,6 +144,35 @@ class ComfyProviderTests(unittest.TestCase):
 
     def submit(self):
         return self.provider.submit(self.request, "synthetic-key")
+
+    def test_execution_error_details_and_node_errors_survive_shot_serialization(self):
+        run = self.submit()
+        self.server.mode = "error"
+        self.server.messages = [["execution_error", dict(node_id="47", node_type="Sampler",
+            exception_type="OutOfMemoryError", exception_message="synthetic detail")]]
+        self.server.node_errors = {"47": {"errors": ["synthetic node error"]}}
+        failed = self.provider.status(run.job_id)
+        self.assertEqual(failed.status, RunStatus.FAILED)
+        error = failed.to_dict()["error"]
+        self.assertTrue(error.startswith("ComfyUI execution failed"))
+        detail = json.loads(error.split(": ", 1)[1])
+        self.assertEqual(detail["execution_errors"][0]["node_id"], "47")
+        self.assertEqual(detail["execution_errors"][0]["exception_type"], "OutOfMemoryError")
+        self.assertIn("47", detail["node_errors"])
+        self.assertIn("47", detail["status_node_errors"])
+
+    def test_execution_error_server_payload_is_bounded(self):
+        run = self.submit()
+        self.server.mode = "error"
+        self.server.messages = [["execution_error", dict(node_id="n" * 10000,
+            node_type="t" * 10000, exception_type="e" * 10000,
+            exception_message="x" * 10000)]] * 8
+        self.server.node_errors = {str(i): {"huge": ["y" * 10000] * 10} for i in range(4)}
+        failed = self.provider.status(run.job_id)
+        self.assertLessEqual(len(failed.error), len("ComfyUI execution failed: ") + 8192)
+        self.assertNotIn("x" * 513, failed.error)
+        self.assertNotIn("y" * 257, failed.error)
+        self.assertLessEqual(failed.error.count('"exception_type"'), 4)
 
     def test_lifecycle_result_integrity_and_terminal_stability(self):
         self.assertIsInstance(self.provider, ExecutionProvider)
@@ -210,7 +244,10 @@ class ComfyProviderTests(unittest.TestCase):
                 provider = ComfyExecutionProvider(self.server, self.template)
                 run = provider.submit(self.request, mode)
                 self.server.mode = mode
-                self.assertEqual(provider.status(run.job_id).status, expected)
+                observed = provider.status(run.job_id)
+                self.assertEqual(observed.status, expected)
+                self.assertEqual(observed.error,
+                                 None if mode == "cancelled" else "ComfyUI execution failed")
                 with self.assertRaises(ResultNotReadyError):
                     provider.result(run.job_id)
 

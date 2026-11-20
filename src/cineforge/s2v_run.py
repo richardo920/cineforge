@@ -273,11 +273,22 @@ def run_s2v(selection: S2VSelection, verification: WorkerVerification, driver: S
                 # Preserve paid output identity before fallible technical inspection.
                 record.update(outcome="generated", manifest=manifest.to_dict())
                 checkpoint(store)
+                record["precision_finish_failure"] = {"stage": "admit"}
                 _admit(selection, verification, driver, deadline, clock)
                 if len(manifest.shot_runs) != 1:
                     raise ValueError("exact precision job identity required")
-                record["model_precision"] = driver._closed_comfy.finish_precision(
-                    driver, selection, manifest.shot_runs[0].job_id, deadline=deadline)
+                try:
+                    record["model_precision"] = driver._closed_comfy.finish_precision(
+                        driver, selection, manifest.shot_runs[0].job_id, deadline=deadline)
+                except BaseException:
+                    try:
+                        diagnostic = driver._closed_comfy._precision_finish_diagnostic
+                        if diagnostic is not None:
+                            record["precision_finish_failure"] = diagnostic
+                    except BaseException as diagnostic_error:
+                        remember_interruption(diagnostic_error)
+                    raise
+                record.pop("precision_finish_failure", None)
                 checkpoint(store)
                 _admit(selection, verification, driver, deadline, clock)
                 measured = technical_result(selection, manifest, directory / "shot", inspect_media,
