@@ -102,6 +102,7 @@ def inspect_s2v_media(path: Path, *, ffprobe: Path | None = None,
 def technical_result(selection: S2VSelection, manifest: RunManifest, directory: Path,
                      inspect_media: Callable[[Path], dict[str, Any]] = inspect_s2v_media,
                      *, absolute_deadline: float | None = None,
+                     ffprobe: Path | None = None,
                      clock: Callable[[], float] = time.monotonic) -> dict[str, Any]:
     """Actual decoded output plus paired speech timing, not semantic or visible-sync review."""
     result = None
@@ -125,7 +126,7 @@ def technical_result(selection: S2VSelection, manifest: RunManifest, directory: 
                 or hashlib.sha256(before).hexdigest() != artifact.sha256):
             raise ValueError
         check()
-        media = (inspect_s2v_media(path, absolute_deadline=absolute_deadline, clock=clock)
+        media = (inspect_s2v_media(path, ffprobe=ffprobe, absolute_deadline=absolute_deadline, clock=clock)
                  if inspect_media is inspect_s2v_media else inspect_media(path))
         check()
         expected = {"media_type": "video/webm", "codec": "vp9", "pixel_format": "yuv420p",
@@ -197,6 +198,7 @@ def run_s2v(selection: S2VSelection, verification: WorkerVerification, driver: S
             output_dir: str | Path, *, allow_live: bool = False,
             execute: Callable[..., RunManifest] = execute_comfy,
             inspect_media: Callable[[Path], dict[str, Any]] = inspect_s2v_media,
+            ffprobe: Path | None = None,
             absolute_deadline: float | None = None,
             clock: Callable[[], float] = time.monotonic) -> dict[str, Any]:
     """No retries. Caller keeps outer budget/guard/enforcer and guaranteed lease cleanup.
@@ -279,7 +281,7 @@ def run_s2v(selection: S2VSelection, verification: WorkerVerification, driver: S
                 checkpoint(store)
                 _admit(selection, verification, driver, deadline, clock)
                 measured = technical_result(selection, manifest, directory / "shot", inspect_media,
-                                            absolute_deadline=deadline, clock=clock)
+                                            absolute_deadline=deadline, clock=clock, ffprobe=ffprobe)
                 _admit(selection, verification, driver, deadline, clock)
                 # A durable candidate is historical evidence, not a finalized run.
                 # In particular, closing this directory can still fail or be late.

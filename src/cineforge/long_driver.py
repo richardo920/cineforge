@@ -36,7 +36,7 @@ from cineforge.s2v import VerifiedS2V, select_s2v
 from cineforge.s2v_run import ATTEMPT_CAP_SECONDS, run_s2v
 from cineforge.s2v_service import LongSessionServiceContext, prepare_long_session_journal
 from cineforge.speech import QwenBaseSpeechAdapter, SpeechArtifact
-from cineforge.ssh_worker import SSHWorker
+from cineforge.ssh_worker import SSHWorker, run_process
 from cineforge.workflows import canonical, strict_object
 
 # Recovery planning allowances: shot work per segment, one-time staging/design,
@@ -89,6 +89,7 @@ class LongSessionBindings:
     segment: Callable[[int, bytes], LanguageInputs]
     s2v_gate: Callable[[LanguageInputs, SpeechArtifact, RemoteNativeSpeechRuntime], VerifiedS2V]
     checkpoint: Callable[[str, dict[str, Any]], None]
+    ffprobe: Path | None = None
 
 
 class _DeadlineStopped(A20Error):
@@ -129,6 +130,14 @@ def run_long_session(b: LongSessionBindings, frozen: FrozenInputs, output: Path,
         raise A20Error("LONG_PLANNED_SEGMENTS")
     if not math.isfinite(absolute_deadline):
         raise A20Error("LONG_ORIGINAL_CAP")
+    if b.ffprobe is not None:
+        try:
+            if not b.ffprobe.is_absolute() or not b.ffprobe.is_file():
+                raise ValueError
+            run_process([str(b.ffprobe), "-version"], timeout=10, max_output=65536,
+                        absolute_deadline=absolute_deadline)
+        except Exception as error:
+            raise A20Error("LONG_FFPROBE_UNAVAILABLE: explicit ffprobe must be an absolute, working file") from error
     frozen.check()
     if type(frozen.creative) is not LongCreativeInputs or type(b.service) is not LongSessionServiceContext:
         raise A20Error("LONG_SCOPE_OR_CREATIVE_INPUT")
@@ -331,7 +340,7 @@ def run_long_session(b: LongSessionBindings, frozen: FrozenInputs, output: Path,
                                 started = time.monotonic()
                                 shot_dir = output / attempt / f"segment-{index}"
                                 result = run_s2v(bound, verification, worker, shot_dir,
-                                    allow_live=allow_live, absolute_deadline=cap)
+                                    allow_live=allow_live, absolute_deadline=cap, ffprobe=b.ffprobe)
                                 elapsed = time.monotonic() - started
                                 stage = "verify"
                                 guard()

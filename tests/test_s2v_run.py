@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import copy
 import json
+import os
+import shutil
+import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -19,6 +22,7 @@ from cineforge.private_store import PrivateRunDirectory
 from cineforge.s2v import S2VError
 from cineforge.s2v_run import inspect_s2v_media, run_s2v
 from cineforge.ssh_worker import SupervisedComfyTransport
+from cineforge.ssh_worker import run_process as local_process
 
 
 def media(_):
@@ -80,6 +84,23 @@ class S2VWire(WireFixture):
 
 
 class S2VInspectionBoundaryTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "local ffmpeg required")
+    def test_explicit_probe_inspects_real_vp9_without_path_lookup(self):
+        ffmpeg, ffprobe = Path(shutil.which("ffmpeg")), Path(shutil.which("ffprobe"))
+        with tempfile.TemporaryDirectory() as tmp:
+            clip = Path(tmp) / "clip.webm"
+            local_process([str(ffmpeg), "-v", "error", "-nostdin", "-n", "-f", "lavfi", "-i",
+                "color=black:s=832x480:r=16", "-frames:v", "77", "-c:v", "libvpx-vp9",
+                "-lossless", "1", "-speed", "8", "-threads", "2", str(clip)], timeout=30)
+            with patch.dict(os.environ, {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}), \
+                    patch("cineforge.s2v_run.shutil.which", return_value=None) as which:
+                result = inspect_s2v_media(clip, ffprobe=ffprobe)
+                which.assert_not_called()
+                self.assertEqual(result, dict(media(clip), duration_seconds=4.813))
+                with self.assertRaises(S2VError):
+                    inspect_s2v_media(clip)
+                which.assert_called_once_with("ffprobe")
+
     def test_direct_inspector_rejects_metadata_returned_after_actual_probe_finally(self):
         now, events = [100.0], []
         payload = json.dumps({"streams": [{"codec_type": "video", "codec_name": "vp9",
@@ -126,6 +147,25 @@ class S2VRunTests(unittest.TestCase):
             with patch('cineforge.ssh_worker.time.monotonic', options['clock']):
                 return run_s2v(self.selection, self.verification, self.driver, self.output, **options)
         return run_s2v(self.selection, self.verification, self.driver, self.output, **options)
+
+    def test_explicit_probe_flows_through_run_and_technical_result_with_deadline(self):
+        binary = self.fixture.root / "explicit-ffprobe"
+        payload = json.dumps({"streams": [{"codec_type": "video", "codec_name": "vp9",
+            "pix_fmt": "yuv420p", "width": 832, "height": 480, "nb_read_frames": "77",
+            "avg_frame_rate": "16/1"}], "format": {"duration": "4.813"}}).encode()
+        with patch("cineforge.s2v_run.shutil.which", return_value=None) as which, \
+                patch("cineforge.s2v_run.run_process", return_value=payload) as probe:
+            result = self.run_scene(inspect_media=inspect_s2v_media, ffprobe=binary)
+        which.assert_not_called()
+        self.assertEqual(probe.call_args.args[0][0], str(binary))
+        self.assertLessEqual(probe.call_args.kwargs["absolute_deadline"], result["controller_deadline"])
+        self.assertEqual(result["technical_result"]["video"], dict(media(None), duration_seconds=4.813))
+
+    def test_default_probe_still_uses_path_lookup(self):
+        with patch("cineforge.s2v_run.shutil.which", return_value=None) as which:
+            with self.assertRaises(S2VError):
+                self.run_scene(inspect_media=inspect_s2v_media)
+        which.assert_called_once_with("ffprobe")
 
     def test_success_pins_actual_fixture_bytes_and_all_lineage_without_human_authority(self):
         result = self.run_scene()
