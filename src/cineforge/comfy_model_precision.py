@@ -76,21 +76,21 @@ class ModelGuard:
         self.before_model = self._before_model
         self.model_handle: Any = None
 
-    def _time(self) -> None:
+    def _time(self, *, adopted: bool = True) -> None:
         nr_check(self.deadline)
-        if self.request is not None:
+        if adopted and self.request is not None:
             nr_check(self.request["deadline"])
         if self.failed:
             raise ValueError("model precision request failed; never replay")
 
     def _current(self) -> dict[str, Any]:
-        self._time()
+        self._time(adopted=False)
         request = active_request(self.root, self.deadline, self.max_requests)
         if any(request[key] != value for key, value in self.expected.items()):
             raise ValueError("precision request differs from actual sealed producer")
         if (self.root / "comfy-precision" / (request["nonce"] + ".failed")).exists():
             raise ValueError("model precision request is unresolved")
-        self._time()
+        self._time(adopted=False)
         return request
 
     def _context(self, request: dict[str, Any], roles: tuple[str, ...]) -> str:
@@ -108,11 +108,11 @@ class ModelGuard:
             raise ValueError("precision loader has a different graph role")
         return str(self._current()["nonce"])
 
-    def _reachable(self) -> list[tuple[str, Any]]:
+    def _reachable(self, *, adopted: bool = True) -> list[tuple[str, Any]]:
         """Bound the actual current hierarchy, not only retired observer references."""
         result = []
         for index, (name, module) in enumerate(self.base.model.diffusion_model.named_modules()):
-            self._time()
+            self._time(adopted=adopted)
             if index >= 8192 or type(name) is not str or len(name) > 512:
                 raise ValueError("selected model hierarchy exceeds fixed audit bounds")
             if getattr(module, "quant_format", None) is not None:
@@ -160,10 +160,10 @@ class ModelGuard:
     def _one(values: Any, expected: Any) -> bool:
         return type(values) is list and len(values) == 1 and values[0] is expected
 
-    def _validate(self, patcher: Any) -> None:
-        self._time()
+    def _validate(self, patcher: Any, *, adopted: bool = True) -> None:
+        self._time(adopted=adopted)
         self.backend_check()
-        self._time()
+        self._time(adopted=adopted)
         if self.dynamic_prompt is not None:
             prompt = self.dynamic_prompt
             request = self._current()
@@ -207,16 +207,16 @@ class ModelGuard:
             raise ValueError("actual model matrix coverage changed")
         # Last currentness checkout follows all validation callbacks. A replacement
         # with the same name/shape still must carry this instance's exact observers.
-        reachable = self._reachable()
+        reachable = self._reachable(adopted=adopted)
         expected = {name: module for name, module, _, _ in self.modules}
         if (len(reachable) != COUNT or len({name for name, _ in reachable}) != COUNT
                 or any(expected.get(name) is not module for name, module in reachable)):
             raise ValueError("actual reachable quantized modules changed after attachment")
-        self._time()
+        self._time(adopted=adopted)
 
     def _audit(self, patcher: Any) -> None:
         request = self._current()
-        self._validate(patcher)
+        self._validate(patcher, adopted=(request["nonce"] == self.nonce))
         prompt_id = self._context(request, ("161", "152"))
         if self.nonce == request["nonce"]:
             return
@@ -286,8 +286,8 @@ class ModelGuard:
             except BaseException:
                 pass
 
-    def _arm(self) -> None:
-        self._time()
+    def _arm(self, *, adopted: bool = True) -> None:
+        self._time(adopted=adopted)
         if self.armed:
             return
         self._arm_model()
@@ -302,11 +302,13 @@ class ModelGuard:
                 raise
             self.modules[index] = (name, module, pre, post)
         self.armed = True
-        self._time()
+        self._time(adopted=adopted)
 
     def _on_load(self, patcher: Any, *_args: Any) -> None:
         try:
-            self._arm()
+            request = self._current()
+            adopting = request["nonce"] != self.nonce
+            self._arm(adopted=not adopting)
             self._audit(patcher)
         except BaseException:
             self._fail()
@@ -496,7 +498,8 @@ def install(root: Path, deadline: float, expected: dict[str, Any], *, max_reques
                 except BaseException:
                     guard._fail()
                     raise
-            guard._time()
+            guard._time(adopted=False)
+            nr_check(request["deadline"])
             return (guard.base.clone(),)
 
     _INSTALLED = (CineforgeBF16UNETLoader, {n: CineforgeBF16UNETLoader.__dict__[n]
