@@ -129,6 +129,7 @@ class RemoteNativeSpeechRuntime:
         self._proofs: dict[tuple[str, str, str], RemoteNativeProof] = {}
         self.last_staging_failure: dict[str, Any] | None = None
         self.last_speech_failure: dict[str, Any] | None = None
+        self.last_select_failure: dict[str, Any] | None = None
         self._last_call_failure: dict[str, Any] | None = None
         self.last_attempt: str | None = None
 
@@ -167,6 +168,25 @@ class RemoteNativeSpeechRuntime:
                 else:
                     diagnostic["reply_type"] = type(reply).__name__[:128]
             self.last_speech_failure = diagnostic
+        except BaseException as diagnostic_error:
+            remember_interruption(diagnostic_error)
+
+    def _capture_select_failure(self, entry: str, sub_step: str, error: BaseException | None,
+                                 *, reply: Any = None, validation: bool = False) -> None:
+        # Failure-only, memory-only evidence: never retain exception messages or values.
+        try:
+            diagnostic: dict[str, Any] = {"entry": entry, "sub_step": sub_step,
+                          "error_type": "NativeSpeechError" if error is None else type(error).__name__}
+            if self._last_call_failure is not None:
+                diagnostic.update(self._last_call_failure)
+            if validation:
+                if type(reply) is dict:
+                    diagnostic["reply_keys"] = sorted(
+                        k[:64].encode("utf-8", "replace").decode("utf-8")
+                        for k in reply if type(k) is str)[:32]
+                else:
+                    diagnostic["reply_type"] = type(reply).__name__[:128]
+            self.last_select_failure = diagnostic
         except BaseException as diagnostic_error:
             remember_interruption(diagnostic_error)
 
@@ -539,6 +559,8 @@ class RemoteNativeSpeechRuntime:
 
     @preserve_interruption
     def _select(self, selection: NativeSpeechSelection) -> None:
+        self.last_select_failure = None
+        self._last_call_failure = None
         if (
             type(selection) is not NativeSpeechSelection
             or self._installed is None
@@ -562,14 +584,24 @@ class RemoteNativeSpeechRuntime:
             or selection.hardware.operator_worker_id != self._binding["worker"]
         ):
             raise NativeSpeechError("native selection differs from owned worker")
+        reply = None
+        validation = False
         try:
+            sub_step = "upload"
             self._upload("selection", nr_encode(value))
-            if self._call("native_select") != {"selection_sha256": selection.subject_sha256()}:
+            sub_step = "native_select"
+            reply = self._call("native_select")
+            sub_step = "reply_validation"
+            validation = True
+            if reply != {"selection_sha256": selection.subject_sha256()}:
                 raise ValueError
+            validation = False
             self._selection = selection
         except BaseException as interruption_error:
             remember_interruption(interruption_error)
             self._unresolved = True
+            RemoteNativeSpeechRuntime._capture_select_failure(self, "select", sub_step, interruption_error,
+                reply=reply if sub_step == "reply_validation" else None, validation=validation)
             raise NativeSpeechError(
                 "remote native selection incomplete or unconfirmed", cleanup_uncertain=True
             ) from None
