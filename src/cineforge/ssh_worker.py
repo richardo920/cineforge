@@ -336,6 +336,20 @@ class SSHWorker:
             raise WorkerError("worker setup response rejected")
         return reply
 
+    def ping(self, timeout_seconds: float) -> bool:
+        if (type(timeout_seconds) not in (int, float) or not math.isfinite(timeout_seconds)
+                or timeout_seconds <= 0):
+            raise WorkerError("invalid ping timeout")
+        try:
+            return self._request({"operation": "ping"}, timeout_seconds, supervise=False) == {
+                "status": "ssh_ready"
+            }
+        except (Exception, KeyboardInterrupt) as interruption_error:
+            remember_interruption(interruption_error)
+            if isinstance(interruption_error, KeyboardInterrupt):
+                raise
+            return False
+
     @preserve_interruption
     def probe(self, snapshot: LeaseSnapshot, timeout: float) -> WorkerObservation | None:
         if self.plan is not None:

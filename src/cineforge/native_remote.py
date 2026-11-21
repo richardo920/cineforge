@@ -128,6 +128,7 @@ class RemoteNativeSpeechRuntime:
         self._used: set[str] = set()
         self._proofs: dict[tuple[str, str, str], RemoteNativeProof] = {}
         self.last_staging_failure: dict[str, Any] | None = None
+        self.last_speech_failure: dict[str, Any] | None = None
         self._last_call_failure: dict[str, Any] | None = None
         self.last_attempt: str | None = None
 
@@ -147,6 +148,25 @@ class RemoteNativeSpeechRuntime:
                 else:
                     diagnostic["reply_type"] = type(reply).__name__[:128]
             self.last_staging_failure = diagnostic
+        except BaseException as diagnostic_error:
+            remember_interruption(diagnostic_error)
+
+    def _capture_speech_failure(self, entry: str, sub_step: str, error: BaseException | None,
+                                 *, reply: Any = None, validation: bool = False) -> None:
+        # Failure-only, memory-only evidence: never retain exception messages or values.
+        try:
+            diagnostic: dict[str, Any] = {"entry": entry, "sub_step": sub_step,
+                          "error_type": "NativeSpeechError" if error is None else type(error).__name__}
+            if self._last_call_failure is not None:
+                diagnostic.update(self._last_call_failure)
+            if validation:
+                if type(reply) is dict:
+                    diagnostic["reply_keys"] = sorted(
+                        k[:64].encode("utf-8", "replace").decode("utf-8")
+                        for k in reply if type(k) is str)[:32]
+                else:
+                    diagnostic["reply_type"] = type(reply).__name__[:128]
+            self.last_speech_failure = diagnostic
         except BaseException as diagnostic_error:
             remember_interruption(diagnostic_error)
 
@@ -580,28 +600,51 @@ class RemoteNativeSpeechRuntime:
         finally:
             self._lock.release()
 
+    def speech_health_check(self, timeout_seconds: float = 30.0) -> bool:
+        self.last_speech_failure = None
+        if self._binding is None or self._unresolved or self._deadline is None:
+            self._capture_speech_failure("health_check", "binding", None)
+            return False
+        remaining = self._deadline - time.monotonic()
+        if remaining <= 0:
+            self._capture_speech_failure("health_check", "binding", None)
+            return False
+        if not self._worker.ping(min(timeout_seconds, remaining)):
+            self._capture_speech_failure("health_check", "ping", None)
+            return False
+        return True
+
     @preserve_interruption
     def _invoke_owned(
         self, request: QwenBaseRequest | OriginalVoiceDesign, reference: bytes
     ) -> bytes:
-        if (
-            self._selection is None
-            or self._binding is None
-            or self._recipe is None
-            or self._attempts >= self._max_operations
-        ):
-            raise NativeSpeechError("remote native runtime unavailable or capacity exhausted")
-        operation = "base" if type(request) is QwenBaseRequest else "design"
-        use = "design" if operation == "design" else "base-" + request.language
-        if self._long_session and operation == "base":
-            use += "-" + str(self._attempts)
-        if use in self._used:
-            raise NativeSpeechError("reviewed native operation already consumed")
+        self.last_speech_failure = None
+        self._last_call_failure = None
+        sub_step = "preflight"
+        try:
+            if (
+                self._selection is None
+                or self._binding is None
+                or self._recipe is None
+                or self._attempts >= self._max_operations
+            ):
+                raise NativeSpeechError("remote native runtime unavailable or capacity exhausted")
+            operation = "base" if type(request) is QwenBaseRequest else "design"
+            use = "design" if operation == "design" else "base-" + request.language
+            if self._long_session and operation == "base":
+                use += "-" + str(self._attempts)
+            if use in self._used:
+                raise NativeSpeechError("reviewed native operation already consumed")
+        except BaseException as interruption_error:
+            self._capture_speech_failure("invoke", sub_step, interruption_error)
+            raise
         self._used.add(use)
         self._attempts += 1
         token = uuid.uuid4().hex
         self.last_attempt = token
         declaration = request.to_dict() if isinstance(request, QwenBaseRequest) else asdict(request)
+        header = None
+        sub_step = "upload_input"
         try:
             self._upload(
                 "input",
@@ -610,7 +653,11 @@ class RemoteNativeSpeechRuntime:
                 ),
                 token=token,
             )
-            header, payload = unpack(self._fetch(token, self._call("native_invoke", token=token)))
+            sub_step = "dispatch"
+            descriptor = self._call("native_invoke", token=token)
+            sub_step = "fetch_result"
+            header, payload = unpack(self._fetch(token, descriptor))
+            sub_step = "header_validation"
             if (
                 set(header)
                 != {
@@ -630,6 +677,7 @@ class RemoteNativeSpeechRuntime:
                 or header["reference"] != hashlib.sha256(reference).hexdigest()
             ):
                 raise ValueError
+            sub_step = "receipt_validation"
             receipt = header["receipt"]
             if (
                 type(receipt) is not dict
@@ -660,6 +708,7 @@ class RemoteNativeSpeechRuntime:
             # Use only the pure declaration validator; never populate local Native proofs.
             validator = NativeSpeechRuntime(self._selection, allow_native=True, seed=self._seed)
             validator._validate_receipt(wire, payload, identity, operation, digest(declaration))
+            sub_step = "content_tree_validation"
             expected_trees = {
                 "sdk_content_sha256": SDK_FILES,
                 "runtime_content_sha256": self._selection.runtime.files,
@@ -668,6 +717,7 @@ class RemoteNativeSpeechRuntime:
             for name, pins in expected_trees.items():
                 if wire[name] != digest(sorted((p[0], p[3]) for p in pins)):
                     raise ValueError
+            sub_step = "payload_validation"
             if isinstance(request, QwenBaseRequest):
                 from cineforge.audio_pcm import inspect_pcm16_wav
 
@@ -696,6 +746,7 @@ class RemoteNativeSpeechRuntime:
                 receipt["owned_child_status"],
                 receipt_raw,
             )
+            sub_step = "final_deadline"
             if self._deadline is None or time.monotonic() >= self._deadline:
                 raise ValueError
             self._proofs[(operation, proof.request_sha256, proof.payload_sha256)] = proof
@@ -703,6 +754,8 @@ class RemoteNativeSpeechRuntime:
         except BaseException as interruption_error:
             remember_interruption(interruption_error)
             self._unresolved = True
+            self._capture_speech_failure("invoke", sub_step, interruption_error,
+                                         reply=header, validation=sub_step == "header_validation")
             raise NativeSpeechError(
                 "remote native attempt incomplete or unconfirmed", cleanup_uncertain=True
             ) from None

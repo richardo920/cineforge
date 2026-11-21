@@ -166,7 +166,7 @@ class LongSessionBudgetApproval(BudgetApproval):
                 or any(char in self.phase_id for char in "/\\:%")
                 or self.phase_id in (".", "..")
                 or type(self.region) is not str or re.fullmatch(r"[A-Z0-9-]{3,32}", self.region) is None
-                or type(self.aggregate_usd) not in (int, float) or not 0 < self.aggregate_usd <= 50
+                or type(self.aggregate_usd) not in (int, float) or not 0 < self.aggregate_usd <= 65
                 or type(self.lifetime_seconds) not in (int, float)
                 or not 120 < self.lifetime_seconds <= 50400
                 or type(self.hourly_ceiling_usd) not in (int, float)

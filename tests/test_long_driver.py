@@ -498,3 +498,42 @@ class StagingFailureRecordTests(unittest.TestCase):
                 record = h.run()
                 self.assertEqual(record["outcome"], "failed" if failed else "complete")
                 self.assertNotIn('"staging_failure"', json.dumps(record))
+
+
+class SpeechFailureRecordTests(unittest.TestCase):
+    def test_speech_failure_record_deep_copies_diagnostic(self):
+        for entry in ("invoke", "health_check"):
+            with self.subTest(entry=entry), tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
+                h = LongHarness(Path(tmp).resolve(), stack)
+                diagnostic = dict(entry=entry, sub_step="dispatch" if entry == "invoke" else "ping",
+                                  error_type="NativeSpeechError", reply_keys=["binding"])
+                h.bridge.last_speech_failure = diagnostic
+                if entry == "invoke":
+                    h.adapter.synthesize.side_effect = RuntimeError("failed")
+                else:
+                    h.bridge.speech_health_check.return_value = False
+                record = h.run()
+                failure = record["failures"][0]
+                self.assertEqual(failure["stage"], "speech")
+                self.assertEqual(failure["speech_failure"], diagnostic)
+                diagnostic["reply_keys"].append("changed")
+                self.assertEqual(failure["speech_failure"]["reply_keys"], ["binding"])
+                if entry == "health_check":
+                    self.assertEqual(failure["message"], "LONG_SPEECH_HEALTH_CHECK")
+                    h.adapter.synthesize.assert_not_called()
+                    self.assertEqual(h.generated, [])
+                saved = json.loads((h.output / "run.json").read_text())
+                self.assertEqual(saved["failures"], record["failures"])
+
+    def test_success_and_other_stage_failures_gain_no_speech_diagnostic(self):
+        for failed in (False, True):
+            with self.subTest(failed=failed), tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
+                h = LongHarness(Path(tmp).resolve(), stack)
+                h.bridge.last_speech_failure = dict(entry="invoke", sub_step="dispatch")
+                if failed:
+                    h.fail_segment = 0
+                record = h.run()
+                self.assertEqual(record["outcome"], "failed" if failed else "complete")
+                self.assertNotIn('"speech_failure"', json.dumps(record))
+                if not failed:
+                    self.assertEqual(h.bridge.speech_health_check.call_count, 3)
