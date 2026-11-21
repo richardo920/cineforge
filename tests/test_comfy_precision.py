@@ -853,7 +853,7 @@ class PrecisionLoaderFactoryTests(unittest.TestCase):
         self.f.now = 191.0
         return guard
 
-    def test_stale_adopted_deadline_allows_active_fingerprint_and_clone(self):
+    def test_stale_adopted_deadline_allows_full_active_segment(self):
         guard = self.next_request_after_expired_adoption()
         adopted = guard.request
         self.assertEqual(guard.fingerprint("161"), self.request["nonce"])
@@ -868,6 +868,20 @@ class PrecisionLoaderFactoryTests(unittest.TestCase):
         self.assertIs(guard.request, adopted)
         with self.assertRaisesRegex(ValueError, "remote speech deadline exhausted"):
             guard._time()
+        clone.object_patches["model_sampling"] = object()
+        clone.model.model_sampling = clone.object_patches["model_sampling"]
+        clone.model.manual_cast_dtype = "bf16"
+        clone.model.current_patcher = clone
+        self.f.ctx.node_id = "152"
+        self.f.guard, self.f.patcher, self.f.base = guard, clone, clone
+        guard.on_pre_run(clone)
+        self.assertEqual(guard.nonce, self.request["nonce"])
+        self.assertIsNot(guard.request, adopted)
+        self.f.apply()
+        guard.on_cleanup(clone)
+        self.assertEqual(self.f.casts, 934)
+        self.assertTrue((self.f.root / "comfy-precision" / (guard.nonce + ".closed.json")).exists())
+        self.assertFalse(list((self.f.root / "comfy-precision").glob("*.failed")))
 
     def test_expired_active_deadline_rejects_fingerprint_and_clone(self):
         guard = self.next_request_after_expired_adoption()
