@@ -78,6 +78,24 @@ class SSHTests(unittest.TestCase):
         return SSHWorker(spec(), selection(), self.budget, self.transport, self.key,
                          self.root / "state", **options)
 
+    def test_ping_validates_timeout_and_uses_fresh_unsupervised_requests(self):
+        worker = self.worker(allow_live=True)
+        self.addCleanup(worker.close)
+        with patch.object(worker, "_request", return_value={}) as request:
+            for timeout in (0, -1, True, None, "1", float("nan"), float("inf")):
+                with self.subTest(timeout=timeout), self.assertRaises(WorkerError):
+                    worker.ping(timeout)
+            request.assert_not_called()
+            self.assertTrue(worker.ping(1))
+            self.assertTrue(worker.ping(2.5))
+            self.assertEqual(request.call_count, 2)
+            request.assert_called_with({"operation": "ping"}, 2.5, supervise=False)
+        with patch.object(worker, "_request", side_effect=WorkerError("private")):
+            self.assertFalse(worker.ping(1))
+        with patch.object(worker, "_request", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                worker.ping(1)
+
     def test_explicit_opt_in_and_host_port_user_foreign_metadata_rejection(self):
         with self.assertRaises(WorkerError):
             self.worker()

@@ -1137,3 +1137,109 @@ class StagingDiagnosticTests(RemoteFixture):
         self.assertEqual(diagnostic["operation"], "native_preflight")
         self.assertEqual(diagnostic["error_type"], "KeyboardInterrupt")
         self.assertTrue(self.bridge._unresolved)
+
+
+class SpeechDiagnosticTests(RemoteFixture):
+    def diagnostic(self, sub_step):
+        self.static_failure(lambda: self.bridge.preview(self.design))
+        diagnostic = self.bridge.last_speech_failure
+        self.assertEqual(diagnostic["entry"], "invoke")
+        self.assertEqual(diagnostic["sub_step"], sub_step)
+        self.assertIn("error_type", diagnostic)
+        self.assertNotIn("SYNTHETIC-PRIVATE-CANARY", str(diagnostic))
+        self.assertTrue(self.bridge._unresolved)
+        nr_encode(diagnostic)
+        return diagnostic
+
+    def test_speech_dispatch_failure_retains_call_metadata(self):
+        self.prepare()
+        original = self.worker.native_request
+        for fault in ("raise", "no_reply"):
+            def request(fields, *, fault=fault, **kwargs):
+                if fields["operation"] == "native_invoke":
+                    if fault == "raise":
+                        raise TimeoutError("SYNTHETIC-PRIVATE-CANARY")
+                    return None
+                return original(fields, **kwargs)
+            # Each case owns a fresh bridge and remote session.
+            if fault == "no_reply":
+                self.remote = self.root / "no-reply"
+                self.bridge = RemoteNativeSpeechRuntime(self.worker, allow_native=True)
+                self.prepare()
+            with self.subTest(fault=fault), patch.object(self.worker, "native_request", request):
+                diagnostic = self.diagnostic("dispatch")
+                self.assertEqual(diagnostic["operation"], "native_invoke")
+                self.assertFalse(diagnostic["reply_received"])
+
+    def test_speech_upload_failure_retains_sub_step(self):
+        self.prepare()
+        with patch.object(self.bridge, "_upload", side_effect=OSError("SYNTHETIC-PRIVATE-CANARY")):
+            self.assertEqual(self.diagnostic("upload_input")["error_type"], "OSError")
+
+    def test_speech_header_validation_retains_bounded_keys_only(self):
+        self.prepare()
+        def tamper(request, reply):
+            if request["operation"] == "native_invoke":
+                path = self.remote / (request["token"] + ".result")
+                header, payload = unpack(bootstrap.nr_read(path))
+                header["binding"] = "SYNTHETIC-PRIVATE-CANARY"
+                header.update({str(i) + "x" * 100: "SYNTHETIC-PRIVATE-CANARY" for i in range(40)})
+                raw = pack(header, payload)
+                path.write_bytes(raw)
+                return remote._descriptor(raw)
+            return reply
+        self.mutate = tamper
+        diagnostic = self.diagnostic("header_validation")
+        self.assertEqual(len(diagnostic["reply_keys"]), 32)
+        self.assertTrue(all(len(k) <= 64 for k in diagnostic["reply_keys"]))
+        self.assertEqual(diagnostic["reply_keys"], sorted(diagnostic["reply_keys"]))
+
+    def test_speech_preflight_preserves_error_and_success_clears_failure(self):
+        with self.assertRaisesRegex(NativeSpeechError, "runtime unavailable or capacity exhausted") as caught:
+            self.bridge.preview(self.design)
+        self.assertFalse(caught.exception.cleanup_uncertain)
+        self.assertEqual(self.bridge.last_speech_failure,
+            dict(entry="invoke", sub_step="preflight", error_type="NativeSpeechError"))
+        self.assertFalse(self.bridge._unresolved)
+        self.prepare()
+        self.bridge._last_call_failure = {"operation": "stale"}
+        payload = self.bridge.preview(self.design)
+        self.assertIsNone(self.bridge.last_speech_failure)
+        self.assertIsNone(self.bridge._last_call_failure)
+        self.assertEqual(self.bridge.proof_for(self.design, payload).payload_sha256,
+                         hashlib.sha256(payload).hexdigest())
+
+    def test_speech_health_check_dead_channel_does_not_consume_or_poison(self):
+        self.prepare()
+        attempts, used, calls = self.bridge._attempts, set(self.bridge._used), len(self.requests)
+        for fault in (False, WorkerError("SYNTHETIC-PRIVATE-CANARY")):
+            with self.subTest(fault=type(fault).__name__):
+                if fault is False:
+                    probe = patch.object(self.worker, "ping", return_value=False)
+                else:
+                    probe = patch.object(self.worker, "_request", side_effect=fault)
+                with probe:
+                    self.assertFalse(self.bridge.speech_health_check())
+                self.assertEqual(self.bridge.last_speech_failure,
+                    dict(entry="health_check", sub_step="ping", error_type="NativeSpeechError"))
+                self.assertFalse(self.bridge._unresolved)
+                self.assertEqual((self.bridge._attempts, self.bridge._used), (attempts, used))
+                self.assertEqual(len(self.requests), calls)
+        with patch.object(self.worker, "_request", return_value={}) as ping:
+            self.assertTrue(self.bridge.speech_health_check(2))
+            ping.assert_called_once_with({"operation": "ping"}, 2, supervise=False)
+        self.assertIsNone(self.bridge.last_speech_failure)
+        self.bridge.preview(self.design)
+        self.assertIsNone(self.bridge.last_speech_failure)
+
+    def test_speech_health_check_requires_live_binding(self):
+        self.assertFalse(self.bridge.speech_health_check())
+        self.assertEqual(self.bridge.last_speech_failure,
+            dict(entry="health_check", sub_step="binding", error_type="NativeSpeechError"))
+        self.prepare()
+        for field, value in (("_binding", None), ("_deadline", None), ("_unresolved", True)):
+            with self.subTest(field=field), patch.object(self.bridge, field, value), patch.object(
+                    self.worker, "ping") as ping:
+                self.assertFalse(self.bridge.speech_health_check())
+                ping.assert_not_called()
+                self.assertEqual(self.bridge.last_speech_failure["sub_step"], "binding")
