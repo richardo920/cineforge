@@ -53,7 +53,10 @@ class NativeInvoker(Protocol):
 class WorkerError(ValueError):
     """Only fixed local diagnostics; never expose SSH/remote/API exception strings."""
 
+    cause_diagnostic: dict[str, Any] | None = None
 
+
+SUPERVISION_FAILURE_MESSAGE = "worker supervision or lease deadline failed"
 MAX_CONTROL_NAMESPACES = 8
 # Approved lifetime ceiling; mirrors cineforge.native_remote.MAX_NATIVE_TIMEOUT_SECONDS.
 # Kept local to avoid an import cycle: native_remote imports SSHWorker.
@@ -106,6 +109,18 @@ def ssh_environment() -> dict[str, str]:
             "LANG": "C", "LC_ALL": "C"}
 
 
+def _bounded_cause_diagnostic(error: BaseException) -> dict[str, Any]:
+    diagnostic: dict[str, Any] = {"cause_type": type(error).__name__}
+    if isinstance(error, worker_bootstrap.BootstrapError):
+        if type(error.reason) is str:
+            diagnostic["reason"] = error.reason
+        if type(error.returncode) is int:
+            diagnostic["returncode"] = error.returncode
+    elif type(error) is WorkerError and str(error) == SUPERVISION_FAILURE_MESSAGE:
+        diagnostic["supervision_message"] = SUPERVISION_FAILURE_MESSAGE
+    return diagnostic
+
+
 @preserve_interruption
 def run_process(command: list[str], *, timeout: float, payload: bytes = b"",
                 check: Callable[[], None] = lambda: None, max_output: int = 65536,
@@ -114,6 +129,7 @@ def run_process(command: list[str], *, timeout: float, payload: bytes = b"",
     """No shell; bounded request/response, killed process group on timeout/interruption."""
     failed = False
     answer = None
+    cause_diagnostic = None
     bounds: dict[str, Any] = {} if absolute_deadline is None else {"absolute_deadline": absolute_deadline}
     try:
         answer = worker_bootstrap.bounded_process(command, timeout=timeout, payload=payload,
@@ -124,9 +140,13 @@ def run_process(command: list[str], *, timeout: float, payload: bytes = b"",
         raise
     except (Exception, KeyboardInterrupt) as interruption_error:
         remember_interruption(interruption_error)
+        cause_diagnostic = _bounded_cause_diagnostic(interruption_error)
         failed = True
     if failed or answer is None:
-        raise WorkerError("bounded SSH process failed")
+        error = WorkerError("bounded SSH process failed")
+        if cause_diagnostic is not None:
+            error.cause_diagnostic = cause_diagnostic
+        raise error
     return answer
 
 
@@ -524,7 +544,7 @@ class SSHWorker:
                 self._close_tunnel()
             except WorkerError:
                 pass
-            raise WorkerError("worker supervision or lease deadline failed")
+            raise WorkerError(SUPERVISION_FAILURE_MESSAGE)
 
     def set_enforcer(self, enforce: Callable[[], tuple[str, ...]]) -> None:
         if self._enforce is not None or not callable(enforce):

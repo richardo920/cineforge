@@ -506,7 +506,9 @@ class SpeechFailureRecordTests(unittest.TestCase):
             with self.subTest(entry=entry), tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
                 h = LongHarness(Path(tmp).resolve(), stack)
                 diagnostic = dict(entry=entry, sub_step="dispatch" if entry == "invoke" else "ping",
-                                  error_type="NativeSpeechError", reply_keys=["binding"])
+                                  error_type="NativeSpeechError", reply_keys=["binding"],
+                                  cause_type="BootstrapError", reason="process_failed", returncode=1,
+                                  supervision_message="worker supervision or lease deadline failed")
                 h.bridge.last_speech_failure = diagnostic
                 if entry == "invoke":
                     h.adapter.synthesize.side_effect = RuntimeError("failed")
@@ -517,6 +519,8 @@ class SpeechFailureRecordTests(unittest.TestCase):
                 self.assertEqual(failure["stage"], "speech")
                 self.assertEqual(failure["speech_failure"], diagnostic)
                 diagnostic["reply_keys"].append("changed")
+                diagnostic["returncode"] = 99
+                self.assertEqual(failure["speech_failure"]["returncode"], 1)
                 self.assertEqual(failure["speech_failure"]["reply_keys"], ["binding"])
                 if entry == "health_check":
                     self.assertEqual(failure["message"], "LONG_SPEECH_HEALTH_CHECK")

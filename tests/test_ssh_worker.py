@@ -377,6 +377,30 @@ class SSHTests(unittest.TestCase):
             run_process([sys.executable, "-c", "print('done')"], timeout=2,
                         check=lambda: (_ for _ in ()).throw(KeyboardInterrupt()))
 
+    def test_bounded_process_failure_retains_closed_cause_diagnostic(self):
+        cases = (
+            ("import sys;sys.exit(3)", 2, None,
+             {"cause_type": "BootstrapError", "reason": "process_failed", "returncode": 3}),
+            ("import time;time.sleep(30)", .1, None,
+             {"cause_type": "BootstrapError", "reason": "timeout"}),
+            ("print('done')", 2, WorkerError("worker supervision or lease deadline failed"),
+             {"cause_type": "WorkerError",
+              "supervision_message": "worker supervision or lease deadline failed"}),
+            ("print('done')", 2, ValueError("SYNTHETIC-PRIVATE-CANARY"),
+             {"cause_type": "ValueError"}),
+        )
+        self.assertIsNone(WorkerError("x").cause_diagnostic)
+        for code, timeout, error, expected in cases:
+            def check(error=error):
+                if error is not None:
+                    raise error
+            with self.subTest(expected=expected), self.assertRaises(WorkerError) as caught:
+                run_process([sys.executable, "-c", code], timeout=timeout, check=check)
+            self.assertIs(type(caught.exception), WorkerError)
+            self.assertEqual(str(caught.exception), "bounded SSH process failed")
+            self.assertEqual(caught.exception.cause_diagnostic, expected)
+            self.assertNotIn("SYNTHETIC-PRIVATE-CANARY", str(caught.exception.cause_diagnostic))
+
     def test_exited_parent_detached_descendant_and_backpressure_cannot_hold_ssh_deadline(self):
         exercise_descendant_pipe(self, self.root, "cineforge.ssh_worker", "run_process")
 
