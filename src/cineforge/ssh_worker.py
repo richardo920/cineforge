@@ -198,6 +198,7 @@ class SSHWorker:
         self._comfy_selection: S2VSelection | None = None
         self.runtime_evidence: dict[str, Any] | None = None
         self.setup_failure: dict[str, Any] | None = None
+        self.last_verify_failure: dict[str, Any] | None = None
         self._reference_staged = False
 
     def __enter__(self) -> SSHWorker:
@@ -1123,6 +1124,7 @@ class SSHWorker:
 
     @preserve_interruption
     def verify_comfy_current(self, *, absolute_deadline: float | None = None) -> None:
+        self.last_verify_failure = None
         if not is_speech_service(self.selection):
             return
         if type(self._closed_comfy) is not ClosedComfyRuntime or self._comfy_selection is None:
@@ -1140,7 +1142,8 @@ class SSHWorker:
             deadline = candidate
         except (Exception, KeyboardInterrupt) as interruption_error:
             remember_interruption(interruption_error)
-            pass
+            self.last_verify_failure = {"phase": "deadline",
+                                        "error_type": type(interruption_error).__name__}
         if deadline is None:
             raise WorkerError("invalid or expired current Comfy verification deadline")
         valid = False
@@ -1150,7 +1153,8 @@ class SSHWorker:
             valid = True
         except (Exception, KeyboardInterrupt) as interruption_error:
             remember_interruption(interruption_error)
-            pass
+            self.last_verify_failure = {"phase": "verify",
+                                        "error_type": type(interruption_error).__name__}
         if not valid:
             raise WorkerError("current Comfy verification incomplete or past original deadline")
 

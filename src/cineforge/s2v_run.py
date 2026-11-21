@@ -177,20 +177,36 @@ def _window(driver: SSHWorker, deadline: float, clock: Callable[[], float]) -> N
 
 
 def _admit(selection: S2VSelection, verification: WorkerVerification, driver: SSHWorker,
-           deadline: float, clock: Callable[[], float]) -> None:
-    _window(driver, deadline, clock)
-    if (type(selection) is not S2VSelection or type(verification) is not WorkerVerification
-            or not is_speech_service(driver.selection)
-            or driver.selection != selection.gate.service or driver.plan is None
-            or driver.s2v_verification != verification
-            or driver.plan.pod_id != verification.record["worker_id"]
-            or driver.runtime_evidence is None):
-        raise S2VError("S2V execution requires its exact prepared guarded worker")
-    validate_s2v_runtime(driver.runtime_evidence, profile_id=driver.selection.worker_profile["id"])
-    selection.require_execution_worker(verification)
-    driver.check()
-    driver.verify_comfy_current(absolute_deadline=deadline)
-    _window(driver, deadline, clock)
+           deadline: float, clock: Callable[[], float],
+           diagnostic: dict[str, Any] | None = None) -> None:
+    try:
+        if diagnostic is not None:
+            diagnostic["step"] = "window"
+        _window(driver, deadline, clock)
+        if diagnostic is not None:
+            diagnostic["step"] = "identity"
+        if (type(selection) is not S2VSelection or type(verification) is not WorkerVerification
+                or not is_speech_service(driver.selection)
+                or driver.selection != selection.gate.service or driver.plan is None
+                or driver.s2v_verification != verification
+                or driver.plan.pod_id != verification.record["worker_id"]
+                or driver.runtime_evidence is None):
+            raise S2VError("S2V execution requires its exact prepared guarded worker")
+        validate_s2v_runtime(driver.runtime_evidence, profile_id=driver.selection.worker_profile["id"])
+        selection.require_execution_worker(verification)
+        if diagnostic is not None:
+            diagnostic["step"] = "check"
+        driver.check()
+        if diagnostic is not None:
+            diagnostic["step"] = "verify_current"
+        driver.verify_comfy_current(absolute_deadline=deadline)
+        if diagnostic is not None:
+            diagnostic["step"] = "window"
+        _window(driver, deadline, clock)
+    except BaseException as exc:
+        if diagnostic is not None:
+            diagnostic["error_type"] = type(exc).__name__
+        raise
 
 
 @preserve_interruption
@@ -273,10 +289,26 @@ def run_s2v(selection: S2VSelection, verification: WorkerVerification, driver: S
                 # Preserve paid output identity before fallible technical inspection.
                 record.update(outcome="generated", manifest=manifest.to_dict())
                 checkpoint(store)
-                record["precision_finish_failure"] = {"stage": "pre_finish_admit"}
-                _admit(selection, verification, driver, deadline, clock)
+                pre_finish_failure: dict[str, Any] = {"stage": "pre_finish_admit"}
+                record["precision_finish_failure"] = pre_finish_failure
+                admit_diagnostic: dict[str, Any] = {}
+                try:
+                    _admit(selection, verification, driver, deadline, clock, admit_diagnostic)
+                except BaseException:
+                    try:
+                        pre_finish_failure.update(admit_diagnostic)
+                        if admit_diagnostic.get("step") == "verify_current":
+                            verify_failure = driver.last_verify_failure
+                            if (type(verify_failure) is dict
+                                    and type(verify_failure.get("phase")) is str
+                                    and verify_failure["phase"] in ("deadline", "verify")):
+                                pre_finish_failure["verify_phase"] = verify_failure["phase"]
+                    except BaseException as diagnostic_error:
+                        remember_interruption(diagnostic_error)
+                    raise
                 record["precision_finish_failure"] = {"stage": "job_identity"}
                 if len(manifest.shot_runs) != 1:
+                    record["precision_finish_failure"] = {"stage": "job_identity", "error_type": "ValueError"}
                     raise ValueError("exact precision job identity required")
                 record["precision_finish_failure"] = {"stage": "finish_precision"}
                 try:
