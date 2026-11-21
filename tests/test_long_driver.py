@@ -537,3 +537,32 @@ class SpeechFailureRecordTests(unittest.TestCase):
                 self.assertNotIn('"speech_failure"', json.dumps(record))
                 if not failed:
                     self.assertEqual(h.bridge.speech_health_check.call_count, 3)
+
+
+class SelectFailureRecordTests(unittest.TestCase):
+    def test_select_failure_record_deep_copies_diagnostic(self):
+        with tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
+            h = LongHarness(Path(tmp).resolve(), stack)
+            diagnostic = dict(entry="select", sub_step="reply_validation",
+                              error_type="ValueError", reply_keys=["selection_sha256"])
+            h.bridge.last_select_failure = diagnostic
+            h.bridge.select.side_effect = RuntimeError("failed")
+            record = h.run()
+            failure = record["failures"][0]
+            self.assertEqual(failure["stage"], "select")
+            self.assertEqual(failure["select_failure"], diagnostic)
+            diagnostic["reply_keys"].append("changed")
+            self.assertEqual(failure["select_failure"]["reply_keys"], ["selection_sha256"])
+            saved = json.loads((h.output / "run.json").read_text())
+            self.assertEqual(saved["failures"], record["failures"])
+
+    def test_success_and_other_stage_failures_gain_no_select_diagnostic(self):
+        for failed in (False, True):
+            with self.subTest(failed=failed), tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
+                h = LongHarness(Path(tmp).resolve(), stack)
+                h.bridge.last_select_failure = dict(entry="select", sub_step="native_select")
+                if failed:
+                    h.fail_segment = 0
+                record = h.run()
+                self.assertEqual(record["outcome"], "failed" if failed else "complete")
+                self.assertNotIn('"select_failure"', json.dumps(record))

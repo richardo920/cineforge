@@ -229,6 +229,10 @@ def run_long_session(b: LongSessionBindings, frozen: FrozenInputs, output: Path,
                 diagnostic = getattr(bridge, "last_speech_failure", None)
                 if type(diagnostic) is dict:
                     record["failures"][-1]["speech_failure"] = copy.deepcopy(diagnostic)
+            if stage == "select" and bridge is not None:
+                diagnostic = getattr(bridge, "last_select_failure", None)
+                if type(diagnostic) is dict:
+                    record["failures"][-1]["select_failure"] = copy.deepcopy(diagnostic)
             record["outcome"] = ("deadline_stopped" if stage != "release" and (
                 isinstance(error, _DeadlineStopped) or time.monotonic() >= absolute_deadline)
                 else "failed")

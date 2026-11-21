@@ -1139,6 +1139,147 @@ class StagingDiagnosticTests(RemoteFixture):
         self.assertTrue(self.bridge._unresolved)
 
 
+class SelectDiagnosticTests(RemoteFixture):
+    def diagnostic(self, sub_step):
+        with self.assertRaisesRegex(NativeSpeechError,
+                "^remote native selection incomplete or unconfirmed$") as caught:
+            self.bridge.select(self.selected)
+        self.assertTrue(caught.exception.cleanup_uncertain)
+        self.assertNotIn("SYNTHETIC-PRIVATE-CANARY",
+                         "".join(traceback.format_exception(caught.exception)))
+        diagnostic = self.bridge.last_select_failure
+        self.assertEqual(diagnostic["entry"], "select")
+        self.assertEqual(diagnostic["sub_step"], sub_step)
+        self.assertTrue(self.bridge._unresolved)
+        self.assertIsNone(self.bridge._selection)
+        self.assertLessEqual(set(diagnostic), {"entry", "sub_step", "error_type", "operation",
+            "reply_received", "sent_unix", "reply_keys", "reply_type"})
+        nr_encode(diagnostic)
+        self.assertNotIn("SYNTHETIC-PRIVATE-CANARY", str(diagnostic))
+        return diagnostic
+
+    def test_upload_ack_failure_names_operation(self):
+        self.bridge.stage(recipe(), b"x")
+        self.mutate = lambda request, reply: ({}
+            if request["operation"] == "native_chunk" and request["role"] == "selection"
+            else reply)
+        diagnostic = self.diagnostic("upload")
+        self.assertEqual(diagnostic["operation"], "native_chunk")
+        self.assertIs(diagnostic["reply_received"], True)
+        self.assertNotIn("sent_unix", diagnostic)
+        self.assertNotIn("native_select", [request["operation"] for request in self.requests])
+
+    def test_native_select_no_reply_retains_exact_send_time(self):
+        for raised in (True, False):
+            with self.subTest(raised=raised):
+                self.remote = self.root / ("select-" + str(raised))
+                self.bridge = RemoteNativeSpeechRuntime(self.worker, allow_native=True)
+                self.bridge.stage(recipe(), b"x")
+                self.requests.clear()
+                self.lost = "native_select" if raised else None
+                self.mutate = lambda request, reply, raised=raised: (None
+                    if not raised and request["operation"] == "native_select" else reply)
+                diagnostic = self.diagnostic("native_select")
+                self.assertEqual(diagnostic["operation"], "native_select")
+                self.assertEqual(diagnostic["error_type"],
+                                 "TimeoutError" if raised else "NativeSpeechError")
+                self.assertIs(diagnostic["reply_received"], False)
+                self.assertEqual(diagnostic["sent_unix"], self.requests[-1]["native_sent_unix"])
+                self.assertIs(type(diagnostic["sent_unix"]), float)
+                self.assertTrue((self.remote / "selection-consumed").exists())
+                self.assertEqual(sum(r["operation"] == "native_select" for r in self.requests), 1)
+
+    def test_reply_validation_retains_only_keys_or_type(self):
+        wrong_hash = "b" * 64
+        for reply in ({"selection_sha256": wrong_hash}, ["SYNTHETIC-PRIVATE-CANARY"]):
+            with self.subTest(reply_type=type(reply).__name__):
+                self.remote = self.root / type(reply).__name__
+                self.bridge = RemoteNativeSpeechRuntime(self.worker, allow_native=True)
+                self.bridge.stage(recipe(), b"x")
+                self.mutate = lambda request, original, reply=reply: (reply
+                    if request["operation"] == "native_select" else original)
+                diagnostic = self.diagnostic("reply_validation")
+                self.assertEqual(diagnostic, dict(entry="select", sub_step="reply_validation",
+                    error_type="ValueError", **({"reply_keys": ["selection_sha256"]}
+                        if type(reply) is dict else {"reply_type": "list"})))
+                self.assertNotIn(wrong_hash, str(diagnostic))
+                self.assertNotIn(self.selected.subject_sha256(), str(diagnostic))
+
+    def test_reply_validation_bounds_keys(self):
+        self.bridge.stage(recipe(), b"x")
+        self.mutate = lambda request, reply: ({str(i) + "x" * 100: "SYNTHETIC-PRIVATE-CANARY"
+            for i in range(40)} if request["operation"] == "native_select" else reply)
+        diagnostic = self.diagnostic("reply_validation")
+        self.assertEqual(len(diagnostic["reply_keys"]), 32)
+        self.assertEqual(diagnostic["reply_keys"], sorted(diagnostic["reply_keys"]))
+        self.assertTrue(all(len(k) <= 64 for k in diagnostic["reply_keys"]))
+
+    def test_installation_precheck_has_no_diagnostic(self):
+        self.bridge.stage(recipe(), b"x")
+        bad = replace(self.selected.runtime, root="/untrusted")
+        subject = native_subject(self.selected.interpreter, self.selected.seccomp, bad,
+            self.selected.sdk, self.selected.base, self.selected.design, self.selected.hardware)
+        changed = replace(self.selected, runtime=bad, reviewed_subject_sha256=subject)
+        calls = len(self.requests)
+        with self.assertRaisesRegex(NativeSpeechError,
+                "native selection differs from actual remote installation"):
+            self.bridge.select(changed)
+        self.assertIsNone(self.bridge.last_select_failure)
+        self.assertFalse(self.bridge._unresolved)
+        self.assertEqual(len(self.requests), calls)
+
+    def test_success_and_second_selection_clear_stale_diagnostics(self):
+        self.bridge.stage(recipe(), b"x")
+        self.bridge.last_select_failure = {"entry": "stale"}
+        self.bridge._last_call_failure = {"operation": "stale"}
+        self.bridge.select(self.selected)
+        self.assertIsNone(self.bridge.last_select_failure)
+        self.assertIsNone(self.bridge._last_call_failure)
+        self.assertIs(self.bridge._selection, self.selected)
+        self.assertFalse(self.bridge._unresolved)
+        self.bridge.last_select_failure = {"entry": "stale"}
+        self.bridge._last_call_failure = {"operation": "stale"}
+        calls = len(self.requests)
+        with self.assertRaisesRegex(NativeSpeechError,
+                "separately reviewed installed native selection required"):
+            self.bridge.select(self.selected)
+        self.assertIsNone(self.bridge.last_select_failure)
+        self.assertIsNone(self.bridge._last_call_failure)
+        self.assertEqual(len(self.requests), calls)
+        self.assertIs(self.bridge._selection, self.selected)
+
+    def test_failed_handshake_then_precheck_does_not_inherit_diagnostic(self):
+        self.bridge.stage(recipe(), b"x")
+        self.lost = "native_select"
+        self.diagnostic("native_select")
+        calls = len(self.requests)
+        with self.assertRaisesRegex(NativeSpeechError,
+                "separately reviewed installed native selection required"):
+            self.bridge.select(None)
+        self.assertIsNone(self.bridge.last_select_failure)
+        self.assertIsNone(self.bridge._last_call_failure)
+        self.assertEqual(len(self.requests), calls)
+        self.assertTrue(self.bridge._unresolved)
+
+    def test_interrupt_keeps_original_propagation_and_operation(self):
+        self.bridge.stage(recipe(), b"x")
+        def interrupt(request, reply):
+            if request["operation"] == "native_select":
+                raise KeyboardInterrupt("SYNTHETIC-PRIVATE-CANARY")
+            return reply
+        self.mutate = interrupt
+        with self.assertRaises(KeyboardInterrupt):
+            self.bridge.select(self.selected)
+        diagnostic = self.bridge.last_select_failure
+        self.assertEqual(diagnostic["entry"], "select")
+        self.assertEqual(diagnostic["sub_step"], "native_select")
+        self.assertEqual(diagnostic["operation"], "native_select")
+        self.assertEqual(diagnostic["error_type"], "KeyboardInterrupt")
+        self.assertTrue(self.bridge._unresolved)
+        self.assertNotIn("SYNTHETIC-PRIVATE-CANARY", str(diagnostic))
+        nr_encode(diagnostic)
+
+
 class SpeechDiagnosticTests(RemoteFixture):
     def diagnostic(self, sub_step):
         self.static_failure(lambda: self.bridge.preview(self.design))
