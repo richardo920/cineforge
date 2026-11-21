@@ -76,21 +76,22 @@ class ModelGuard:
         self.before_model = self._before_model
         self.model_handle: Any = None
 
-    def _time(self) -> None:
+    def _time(self, *, adopted: bool = True) -> None:
         nr_check(self.deadline)
-        if self.request is not None:
+        if adopted and self.request is not None:
             nr_check(self.request["deadline"])
         if self.failed:
             raise ValueError("model precision request failed; never replay")
 
     def _current(self) -> dict[str, Any]:
-        self._time()
+        self._time(adopted=False)
         request = active_request(self.root, self.deadline, self.max_requests)
         if any(request[key] != value for key, value in self.expected.items()):
             raise ValueError("precision request differs from actual sealed producer")
         if (self.root / "comfy-precision" / (request["nonce"] + ".failed")).exists():
             raise ValueError("model precision request is unresolved")
-        self._time()
+        self._time(adopted=False)
+        nr_check(request["deadline"])
         return request
 
     def _context(self, request: dict[str, Any], roles: tuple[str, ...]) -> str:
@@ -496,7 +497,8 @@ def install(root: Path, deadline: float, expected: dict[str, Any], *, max_reques
                 except BaseException:
                     guard._fail()
                     raise
-            guard._time()
+            guard._time(adopted=False)
+            nr_check(request["deadline"])
             return (guard.base.clone(),)
 
     _INSTALLED = (CineforgeBF16UNETLoader, {n: CineforgeBF16UNETLoader.__dict__[n]

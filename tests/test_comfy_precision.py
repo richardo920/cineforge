@@ -833,6 +833,80 @@ class PrecisionLoaderFactoryTests(unittest.TestCase):
             self.cls.IS_CHANGED(policy.MODEL_NAME, "default", {}, "foreign", None)
         self.assertEqual(self.loads, 0)
 
+    def next_request_after_expired_adoption(self):
+        patcher = self.load()
+        patcher.object_patches["model_sampling"] = object()
+        patcher.model.model_sampling = patcher.object_patches["model_sampling"]
+        patcher.model.manual_cast_dtype = "bf16"
+        patcher.model.current_patcher = patcher
+        self.f.ctx.node_id = "152"
+        guard = patcher.get_callbacks("pre", policy.POLICY)[0].__self__
+        guard.on_pre_run(patcher)
+        self.f.guard, self.f.patcher, self.f.base = guard, patcher, patcher
+        self.f.apply()
+        guard.on_cleanup(patcher)
+        self.f.save(self.request["nonce"] + ".finished", {"historical": True})
+        self.request = dict(self.request, nonce=uuid.uuid4().hex, deadline=195.0)
+        self.f.save(self.request["nonce"] + ".request.json", self.request)
+        self.f.ctx.node_id = "161"
+        self.f.ctx.prompt_id = str(uuid.uuid4())
+        self.f.now = 191.0
+        return guard
+
+    def test_stale_adopted_deadline_allows_active_fingerprint_and_clone(self):
+        guard = self.next_request_after_expired_adoption()
+        adopted = guard.request
+        self.assertEqual(guard.fingerprint("161"), self.request["nonce"])
+        self.assertEqual(
+            self.cls.IS_CHANGED(policy.MODEL_NAME, "default", {}, "161", None),
+            self.request["nonce"],
+        )
+        clone = self.load()
+        self.assertIsNot(clone, guard.base)
+        self.assertIs(clone.model, guard.base.model)
+        self.assertEqual(self.loads, 1)
+        self.assertIs(guard.request, adopted)
+        with self.assertRaisesRegex(ValueError, "remote speech deadline exhausted"):
+            guard._time()
+
+    def test_expired_active_deadline_rejects_fingerprint_and_clone(self):
+        guard = self.next_request_after_expired_adoption()
+        self.request["deadline"] = 190.0
+        self.f.save(self.request["nonce"] + ".request.json", self.request)
+        for call in (guard._current, lambda: guard.fingerprint("161"), self.load):
+            with self.subTest(call=call):
+                with self.assertRaisesRegex(ValueError, "remote speech deadline exhausted"):
+                    call()
+
+    def test_expired_server_deadline_rejects_active_fingerprint_and_clone(self):
+        guard = self.next_request_after_expired_adoption()
+        guard.deadline = 190.0
+        for call in (guard._current, lambda: guard.fingerprint("161"), self.load):
+            with self.subTest(call=call):
+                with self.assertRaisesRegex(ValueError, "remote speech deadline exhausted"):
+                    call()
+
+    def test_failed_guard_rejects_active_fingerprint_and_clone(self):
+        guard = self.next_request_after_expired_adoption()
+        guard.failed = True
+        for call in (guard._current, lambda: guard.fingerprint("161"), self.load):
+            with self.subTest(call=call):
+                with self.assertRaisesRegex(ValueError, "model precision request failed; never replay"):
+                    call()
+
+    def test_active_deadline_expiring_during_graph_check_rejects_clone(self):
+        self.next_request_after_expired_adoption()
+        dynamic = self.dynamic(self.graph)
+
+        def expire():
+            self.f.now = 196.0
+            return self.graph
+
+        dynamic.get_original_prompt = expire
+        with self.assertRaisesRegex(ValueError, "remote speech deadline exhausted"):
+            self.load(dynamic=dynamic)
+        self.assertEqual(self.loads, 1)
+
     def test_actual_factory_two_language_cache_uses_one_load_and_fresh_audit_context(self):
         model, patch_uuid = None, None
         for index in range(2):
