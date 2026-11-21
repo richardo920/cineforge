@@ -381,6 +381,9 @@ class SSHTests(unittest.TestCase):
         cases = (
             ("import sys;sys.exit(3)", 2, None,
              {"cause_type": "BootstrapError", "reason": "process_failed", "returncode": 3}),
+            ("import os, signal; os.kill(os.getpid(), signal.SIGKILL)", 2, None,
+             {"cause_type": "BootstrapError", "reason": "process_failed",
+              "returncode": -signal.SIGKILL}),
             ("import time;time.sleep(30)", .1, None,
              {"cause_type": "BootstrapError", "reason": "timeout"}),
             ("print('done')", 2, WorkerError("worker supervision or lease deadline failed"),

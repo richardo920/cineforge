@@ -496,6 +496,8 @@ class BootstrapTests(unittest.TestCase):
         self.assertIsNone(default.returncode)
         cases = (
             ("import sys;sys.exit(3)", 2, 65536, "process_failed", 3),
+            ("import os, signal; os.kill(os.getpid(), signal.SIGKILL)", 2, 65536,
+             "process_failed", -signal.SIGKILL),
             ("import time;time.sleep(30)", .1, 65536, "timeout", None),
             ("print('x'*100000)", 2, 100, "unknown", None),
         )

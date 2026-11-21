@@ -1318,6 +1318,8 @@ class SpeechDiagnosticTests(RemoteFixture):
         cases = (
             ({"cause_type": "BootstrapError", "reason": "process_failed", "returncode": 1},
              {"cause_type": "BootstrapError", "reason": "process_failed", "returncode": 1}),
+            ({"cause_type": "BootstrapError", "reason": "process_failed", "returncode": True},
+             {"cause_type": "BootstrapError", "reason": "process_failed"}),
             ({"cause_type": "WorkerError",
               "supervision_message": "worker supervision or lease deadline failed"},
              {"cause_type": "WorkerError",
