@@ -54,9 +54,11 @@ M4_FILES = {path: (size, digest) for path, size, digest in I2V_WORKER.files}
 class BootstrapError(ValueError):
     """Static worker diagnostic, without subprocess, URL or environment content."""
 
-    def __init__(self, message: str, *, reason: str = "unknown") -> None:
+    def __init__(self, message: str, *, reason: str = "unknown",
+                 returncode: int | None = None) -> None:
         super().__init__(message)
         self.reason = reason
+        self.returncode = returncode
 
 
 SETUP_REASONS = {
@@ -254,7 +256,8 @@ def bounded_process(command: list[str], *, timeout: float, cwd: Path | None = No
                 diagnostic = setup_failure_envelope(bytes(output))
                 if diagnostic is not None:
                     raise SetupFailure(diagnostic)
-            raise BootstrapError("worker process did not complete", reason="process_failed")
+            raise BootstrapError("worker process did not complete", reason="process_failed",
+                                 returncode=process.returncode)
         if check is not None:
             check()
         if time.monotonic() >= deadline:

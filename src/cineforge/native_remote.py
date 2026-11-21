@@ -198,6 +198,13 @@ class RemoteNativeSpeechRuntime:
                 "error_type": "NativeSpeechError" if error is None else type(error).__name__}
             if sent_unix is not None:
                 diagnostic["sent_unix"] = sent_unix
+            cause = getattr(error, "cause_diagnostic", None)
+            if type(cause) is dict:
+                for key in ("cause_type", "reason", "supervision_message"):
+                    if type(cause.get(key)) is str:
+                        diagnostic[key] = cause[key]
+                if type(cause.get("returncode")) is int:
+                    diagnostic["returncode"] = cause["returncode"]
             self._last_call_failure = diagnostic
         except BaseException as diagnostic_error:
             remember_interruption(diagnostic_error)

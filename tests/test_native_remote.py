@@ -1311,6 +1311,44 @@ class SpeechDiagnosticTests(RemoteFixture):
                 diagnostic = self.diagnostic("dispatch")
                 self.assertEqual(diagnostic["operation"], "native_invoke")
                 self.assertFalse(diagnostic["reply_received"])
+                self.assertEqual(set(diagnostic),
+                    {"entry", "sub_step", "error_type", "operation", "reply_received", "sent_unix"})
+
+    def test_speech_dispatch_retains_bounded_cause(self):
+        cases = (
+            ({"cause_type": "BootstrapError", "reason": "process_failed", "returncode": 1},
+             {"cause_type": "BootstrapError", "reason": "process_failed", "returncode": 1}),
+            ({"cause_type": "BootstrapError", "reason": "process_failed", "returncode": True},
+             {"cause_type": "BootstrapError", "reason": "process_failed"}),
+            ({"cause_type": "WorkerError",
+              "supervision_message": "worker supervision or lease deadline failed"},
+             {"cause_type": "WorkerError",
+              "supervision_message": "worker supervision or lease deadline failed"}),
+            ({"cause_type": "BootstrapError", "reason": "process_failed", "returncode": "1",
+              "message": "SYNTHETIC-PRIVATE-CANARY", "extra": 1},
+             {"cause_type": "BootstrapError", "reason": "process_failed"}),
+        )
+        for index, (cause, expected) in enumerate(cases):
+            self.remote = self.root / f"cause-{index}"
+            self.bridge = RemoteNativeSpeechRuntime(self.worker, allow_native=True)
+            self.prepare()
+            original = self.worker.native_request
+            error = WorkerError("bounded SSH process failed")
+            error.cause_diagnostic = cause
+            def request(fields, *, error=error, original=original, **kwargs):
+                if fields["operation"] == "native_invoke":
+                    raise error
+                return original(fields, **kwargs)
+            with self.subTest(cause=cause), patch.object(self.worker, "native_request", request):
+                diagnostic = self.diagnostic("dispatch")
+                self.assertEqual(diagnostic["error_type"], "WorkerError")
+                self.assertEqual(diagnostic["operation"], "native_invoke")
+                self.assertFalse(diagnostic["reply_received"])
+                self.assertEqual(set(diagnostic),
+                    {"entry", "sub_step", "error_type", "operation", "reply_received", "sent_unix"}
+                    | set(expected))
+                for key, value in expected.items():
+                    self.assertEqual(diagnostic[key], value)
 
     def test_speech_upload_failure_retains_sub_step(self):
         self.prepare()
