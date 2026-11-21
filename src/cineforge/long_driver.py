@@ -225,6 +225,10 @@ def run_long_session(b: LongSessionBindings, frozen: FrozenInputs, output: Path,
                 diagnostic = getattr(bridge, "last_staging_failure", None)
                 if type(diagnostic) is dict:
                     record["failures"][-1]["staging_failure"] = copy.deepcopy(diagnostic)
+            if stage == "speech" and bridge is not None:
+                diagnostic = getattr(bridge, "last_speech_failure", None)
+                if type(diagnostic) is dict:
+                    record["failures"][-1]["speech_failure"] = copy.deepcopy(diagnostic)
             record["outcome"] = ("deadline_stopped" if stage != "release" and (
                 isinstance(error, _DeadlineStopped) or time.monotonic() >= absolute_deadline)
                 else "failed")
@@ -318,6 +322,8 @@ def run_long_session(b: LongSessionBindings, frozen: FrozenInputs, output: Path,
                                 voices = voice_hash
                                 record["canonical_voices_sha256"] = voices
                                 guard()
+                                if not bridge.speech_health_check():
+                                    raise A20Error("LONG_SPEECH_HEALTH_CHECK")
                                 speech = QwenBaseSpeechAdapter(context.voices, runtime=bridge).synthesize(
                                     context.sheet, context.utterance_id, context.reference, reference,
                                     plan=context.plan, registry=context.registry, ledger=context.ledger,
