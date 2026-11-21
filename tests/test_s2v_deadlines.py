@@ -137,6 +137,30 @@ class PairedDeadlineTests(unittest.TestCase):
         with (patch.object(self.driver._closed_comfy, 'verify', late), self.assertRaises(WorkerError)):
             self.driver.verify_comfy_current(absolute_deadline=105.0)
         self.assertEqual(self.f.requests, [])
+        self.assertEqual(self.driver.last_verify_failure,
+                         {"phase": "verify", "error_type": "TransportError"})
+
+    def test_currentness_deadline_failure_retains_only_phase_and_exception_class(self):
+        with (patch.object(self.driver.budget, 'remaining_seconds', return_value=120),
+              patch.object(self.driver._closed_comfy, 'verify') as verify,
+              self.assertRaisesRegex(WorkerError, "invalid or expired current Comfy verification deadline")):
+            self.driver.verify_comfy_current(absolute_deadline=105.0)
+        verify.assert_not_called()
+        self.assertEqual(self.driver.last_verify_failure,
+                         {"phase": "deadline", "error_type": "ValueError"})
+
+    def test_currentness_verify_failure_retains_only_phase_and_exception_class(self):
+        with (patch.object(self.driver._closed_comfy, 'verify',
+                           side_effect=TimeoutError("CANARY private worker reply")),
+              self.assertRaisesRegex(WorkerError, "current Comfy verification incomplete or past original deadline")):
+            self.driver.verify_comfy_current(absolute_deadline=105.0)
+        self.assertEqual(self.driver.last_verify_failure,
+                         {"phase": "verify", "error_type": "TimeoutError"})
+
+    def test_currentness_success_clears_previous_failure(self):
+        self.driver.last_verify_failure = {"phase": "verify", "error_type": "TimeoutError"}
+        self.driver.verify_comfy_current(absolute_deadline=105.0)
+        self.assertIsNone(self.driver.last_verify_failure)
 
     def test_entry_expiry_and_invalid_caps_make_no_admission_or_wire_calls(self):
         with patch.object(self.driver, '_require_s2v') as admission:

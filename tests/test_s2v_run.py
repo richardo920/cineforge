@@ -21,10 +21,12 @@ from test_s2v import worker
 from cineforge import comfy_precision as precision
 from cineforge import s2v_profile as profile
 from cineforge.comfy_run import execute_comfy
+from cineforge.comfy_transport import TransportError
+from cineforge.contracts import RunManifest, RunStatus, ShotRun
 from cineforge.native_remote_plan import nr_digest
 from cineforge.private_store import PrivateRunDirectory
 from cineforge.s2v import S2VError
-from cineforge.s2v_run import inspect_s2v_media, run_s2v
+from cineforge.s2v_run import _admit, inspect_s2v_media, run_s2v
 from cineforge.ssh_worker import SupervisedComfyTransport
 from cineforge.ssh_worker import run_process as local_process
 
@@ -282,18 +284,123 @@ class S2VRunTests(unittest.TestCase):
         record = json.loads((self.output / "run.json").read_text())
         self.assertEqual(record["precision_finish_failure"], {"stage": "entry_admit", "error_type": "ValueError"})
 
-    def test_precision_prefinish_admit_failure_is_checkpointed(self):
+    def fake_manifest(self, *args, **kwargs):
+        plan = self.selection.plan()
+        shot = plan.shots[0]
+        return RunManifest("synthetic-admit", plan, shot_runs=(ShotRun(
+            shot.shot_id, shot.revision, 1, "synthetic", IDENTITY, "synthetic",
+            RunStatus.QUEUED),))
+
+    def test_admit_diagnostic_steps_and_original_exceptions(self):
+        for step in ("window", "identity", "check", "verify_current"):
+            with self.subTest(step=step):
+                diagnostic = {}
+                error = RuntimeError("CANARY private failure")
+                target = {"window": "cineforge.s2v_run._window",
+                          "identity": "cineforge.s2v_run.validate_s2v_runtime",
+                          "check": None, "verify_current": None}[step]
+                injection = (patch(target, side_effect=error) if target else
+                             patch.object(self.driver, "check" if step == "check" else
+                                          "verify_comfy_current", side_effect=error))
+                with injection, self.assertRaises(RuntimeError) as caught:
+                    _admit(self.selection, self.verification, self.driver,
+                           9999999999.0, lambda: 100, diagnostic)
+                self.assertIs(caught.exception, error)
+                self.assertEqual(diagnostic, {"step": step, "error_type": "RuntimeError"})
+
+    def test_admit_window_budget_and_expiry_diagnostics(self):
+        for remaining, deadline, error_type in ((120, 200, S2VError),
+                                                (600, 100, TransportError)):
+            diagnostic = {}
+            with (patch.object(self.driver.budget, "remaining_seconds", return_value=remaining),
+                  self.assertRaises(error_type)):
+                _admit(self.selection, self.verification, self.driver,
+                       deadline, lambda: 100, diagnostic)
+            self.assertEqual(diagnostic, {"step": "window", "error_type": error_type.__name__})
+
+    def test_admit_identity_mismatch_diagnostic(self):
+        diagnostic = {}
+        with patch.object(self.driver, "_prepared_s2v", None), self.assertRaises(S2VError):
+            _admit(self.selection, self.verification, self.driver,
+                   9999999999.0, lambda: 100, diagnostic)
+        self.assertEqual(diagnostic, {"step": "identity", "error_type": "S2VError"})
+
+    def test_admit_trailing_window_diagnostic(self):
+        diagnostic = {}
+        def verify(**kwargs):
+            remaining.return_value = 120
+        with (patch.object(self.driver.budget, "remaining_seconds", return_value=600) as remaining,
+              patch.object(self.driver, "verify_comfy_current", side_effect=verify),
+              self.assertRaises(S2VError)):
+            _admit(self.selection, self.verification, self.driver,
+                   9999999999.0, lambda: 100, diagnostic)
+        self.assertEqual(diagnostic, {"step": "window", "error_type": "S2VError"})
+
+    def test_admit_success_has_no_error_type(self):
+        diagnostic = {}
+        _admit(self.selection, self.verification, self.driver,
+               9999999999.0, lambda: 100, diagnostic)
+        self.assertEqual(diagnostic, {"step": "window"})
+
+    def prefinish_failure(self, phase=None, *, admission_error=None, expected_error=S2VError):
+        if admission_error is None:
+            admission_error = ValueError("CANARY synthetic revoked admission")
         original = self.driver.verify_comfy_current
         def verify(**kwargs):
             path = self.output / "run.json"
             if path.exists() and "manifest" in json.loads(path.read_text()):
-                raise ValueError("synthetic revoked admission")
+                if phase is not None:
+                    self.driver.last_verify_failure = {"phase": phase, "error_type": "TimeoutError",
+                                                       "private": "CANARY"}
+                raise admission_error
             return original(**kwargs)
         self.driver.verify_comfy_current = verify
-        with self.assertRaises(S2VError):
-            self.run_scene()
-        record = json.loads((self.output / "run.json").read_text())
-        self.assertEqual(record["precision_finish_failure"], {"stage": "pre_finish_admit"})
+        with self.assertRaises(expected_error):
+            self.run_scene(execute=self.fake_manifest)
+        return json.loads((self.output / "run.json").read_text())
+
+    def test_precision_prefinish_admit_failure_is_checkpointed(self):
+        record = self.prefinish_failure()
+        self.assertEqual(record["precision_finish_failure"], {
+            "stage": "pre_finish_admit", "step": "verify_current", "error_type": "ValueError"})
+        self.assertNotIn("CANARY", json.dumps(record))
+
+    def test_precision_prefinish_verify_phase_is_checkpointed(self):
+        record = self.prefinish_failure("verify")
+        self.assertEqual(record["precision_finish_failure"], {
+            "stage": "pre_finish_admit", "step": "verify_current", "error_type": "ValueError",
+            "verify_phase": "verify"})
+        self.assertNotIn("CANARY", json.dumps(record))
+
+    def test_precision_prefinish_deadline_phase_is_checkpointed(self):
+        record = self.prefinish_failure("deadline")
+        self.assertEqual(record["precision_finish_failure"], {
+            "stage": "pre_finish_admit", "step": "verify_current", "error_type": "ValueError",
+            "verify_phase": "deadline"})
+
+    def test_precision_prefinish_untrusted_phase_is_not_checkpointed(self):
+        record = self.prefinish_failure("CANARY")
+        self.assertEqual(record["precision_finish_failure"], {
+            "stage": "pre_finish_admit", "step": "verify_current", "error_type": "ValueError"})
+
+    def test_prefinish_diagnostic_copy_failure_preserves_admission_interrupt(self):
+        def unavailable(_):
+            raise RuntimeError("CANARY diagnostic copy failure")
+        with patch.object(type(self.driver), "last_verify_failure",
+                          property(unavailable, lambda *args: None), create=True):
+            record = self.prefinish_failure(admission_error=KeyboardInterrupt(),
+                                            expected_error=KeyboardInterrupt)
+        self.assertEqual(record["precision_finish_failure"], {
+            "stage": "pre_finish_admit", "step": "verify_current", "error_type": "KeyboardInterrupt"})
+
+    def test_prefinish_diagnostic_copy_interrupt_is_preserved(self):
+        def interrupted(_):
+            raise KeyboardInterrupt
+        with patch.object(type(self.driver), "last_verify_failure",
+                          property(interrupted, lambda *args: None), create=True):
+            record = self.prefinish_failure(expected_error=KeyboardInterrupt)
+        self.assertEqual(record["precision_finish_failure"], {
+            "stage": "pre_finish_admit", "step": "verify_current", "error_type": "ValueError"})
 
     def test_precision_intent_guard_failure_is_checkpointed(self):
         runtime, _, _ = self.precision_runtime("success")
@@ -305,11 +412,11 @@ class S2VRunTests(unittest.TestCase):
 
     def test_precision_job_identity_failure_is_checkpointed(self):
         def execute(*args, **kwargs):
-            return replace(execute_comfy(*args, **kwargs), shot_runs=(), artifacts=())
+            return replace(self.fake_manifest(*args, **kwargs), shot_runs=(), artifacts=())
         with self.assertRaises(S2VError):
             self.run_scene(execute=execute)
         record = json.loads((self.output / "run.json").read_text())
-        self.assertEqual(record["precision_finish_failure"], {"stage": "job_identity"})
+        self.assertEqual(record["precision_finish_failure"], {"stage": "job_identity", "error_type": "ValueError"})
 
     def test_precision_prompt_identity_failure_is_checkpointed(self):
         _, _, receipt = self.precision_runtime("success")
