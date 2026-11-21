@@ -1194,6 +1194,54 @@ class SpeechDiagnosticTests(RemoteFixture):
         self.assertTrue(all(len(k) <= 64 for k in diagnostic["reply_keys"]))
         self.assertEqual(diagnostic["reply_keys"], sorted(diagnostic["reply_keys"]))
 
+    def test_speech_synthesize_short_session_receipt_validation_attribution(self):
+        self.prepare()
+        def tamper(request, reply):
+            if request["operation"] == "native_invoke":
+                path = self.remote / (request["token"] + ".result")
+                header, payload = unpack(bootstrap.nr_read(path))
+                header["receipt"]["seed"] += 1
+                raw = pack(header, payload)
+                path.write_bytes(raw)
+                return remote._descriptor(raw)
+            return reply
+        self.mutate = tamper
+        # This fixture uses short-session base-English, without an attempts suffix.
+        with self.assertRaisesRegex(NativeSpeechError,
+                "remote native attempt incomplete or unconfirmed") as caught:
+            self.bridge.synthesize(self.request, self.reference)
+        self.assertTrue(caught.exception.cleanup_uncertain)
+        self.assertEqual(self.bridge.last_speech_failure["entry"], "invoke")
+        self.assertEqual(self.bridge.last_speech_failure["sub_step"], "receipt_validation")
+        self.assertEqual(self.child_count, 1)
+        self.assertIn("base-English", self.bridge._used)
+
+    def test_speech_content_tree_validation_attribution(self):
+        self.prepare()
+        def tamper(request, reply):
+            if request["operation"] == "native_invoke":
+                path = self.remote / (request["token"] + ".result")
+                header, payload = unpack(bootstrap.nr_read(path))
+                header["receipt"]["sdk_content_sha256"] = "a" * 64
+                raw = pack(header, payload)
+                path.write_bytes(raw)
+                return remote._descriptor(raw)
+            return reply
+        self.mutate = tamper
+        self.diagnostic("content_tree_validation")
+        self.assertEqual(self.child_count, 1)
+
+    def test_speech_fetch_failure_attribution_after_dispatch(self):
+        self.prepare()
+        self.lost = "native_fetch"
+        self.requests.clear()
+        diagnostic = self.diagnostic("fetch_result")
+        self.assertEqual(diagnostic["operation"], "native_fetch")
+        self.assertFalse(diagnostic["reply_received"])
+        self.assertEqual(self.child_count, 1)
+        operations = [request["operation"] for request in self.requests]
+        self.assertLess(operations.index("native_invoke"), operations.index("native_fetch"))
+
     def test_speech_preflight_preserves_error_and_success_clears_failure(self):
         with self.assertRaisesRegex(NativeSpeechError, "runtime unavailable or capacity exhausted") as caught:
             self.bridge.preview(self.design)
@@ -1225,7 +1273,7 @@ class SpeechDiagnosticTests(RemoteFixture):
                 self.assertFalse(self.bridge._unresolved)
                 self.assertEqual((self.bridge._attempts, self.bridge._used), (attempts, used))
                 self.assertEqual(len(self.requests), calls)
-        with patch.object(self.worker, "_request", return_value={}) as ping:
+        with patch.object(self.worker, "_request", return_value={"status": "ssh_ready"}) as ping:
             self.assertTrue(self.bridge.speech_health_check(2))
             ping.assert_called_once_with({"operation": "ping"}, 2, supervise=False)
         self.assertIsNone(self.bridge.last_speech_failure)
@@ -1243,3 +1291,22 @@ class SpeechDiagnosticTests(RemoteFixture):
                 self.assertFalse(self.bridge.speech_health_check())
                 ping.assert_not_called()
                 self.assertEqual(self.bridge.last_speech_failure["sub_step"], "binding")
+
+    def test_speech_health_check_expired_deadline_never_pings(self):
+        self.prepare()
+        with patch.object(self.bridge, "_deadline", time.monotonic() - 1), patch.object(
+                self.worker, "ping") as ping:
+            self.assertFalse(self.bridge.speech_health_check())
+            ping.assert_not_called()
+        self.assertEqual(self.bridge.last_speech_failure,
+            dict(entry="health_check", sub_step="binding", error_type="NativeSpeechError"))
+        self.assertFalse(self.bridge._unresolved)
+
+    def test_speech_health_check_caps_ping_to_remaining_deadline(self):
+        self.prepare()
+        with patch.object(self.bridge, "_deadline", 102), patch(
+                "cineforge.native_remote.time.monotonic", return_value=100), patch.object(
+                self.worker, "ping", return_value=True) as ping:
+            self.assertTrue(self.bridge.speech_health_check(30))
+            ping.assert_called_once_with(2)
+        self.assertIsNone(self.bridge.last_speech_failure)

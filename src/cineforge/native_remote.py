@@ -605,7 +605,11 @@ class RemoteNativeSpeechRuntime:
         if self._binding is None or self._unresolved or self._deadline is None:
             self._capture_speech_failure("health_check", "binding", None)
             return False
-        if not self._worker.ping(timeout_seconds):
+        remaining = self._deadline - time.monotonic()
+        if remaining <= 0:
+            self._capture_speech_failure("health_check", "binding", None)
+            return False
+        if not self._worker.ping(min(timeout_seconds, remaining)):
             self._capture_speech_failure("health_check", "ping", None)
             return False
         return True
@@ -703,8 +707,8 @@ class RemoteNativeSpeechRuntime:
             )
             # Use only the pure declaration validator; never populate local Native proofs.
             validator = NativeSpeechRuntime(self._selection, allow_native=True, seed=self._seed)
-            sub_step = "content_tree_validation"
             validator._validate_receipt(wire, payload, identity, operation, digest(declaration))
+            sub_step = "content_tree_validation"
             expected_trees = {
                 "sdk_content_sha256": SDK_FILES,
                 "runtime_content_sha256": self._selection.runtime.files,

@@ -341,8 +341,9 @@ class SSHWorker:
                 or timeout_seconds <= 0):
             raise WorkerError("invalid ping timeout")
         try:
-            self._request({"operation": "ping"}, timeout_seconds, supervise=False)
-            return True
+            return self._request({"operation": "ping"}, timeout_seconds, supervise=False) == {
+                "status": "ssh_ready"
+            }
         except (Exception, KeyboardInterrupt) as interruption_error:
             remember_interruption(interruption_error)
             if isinstance(interruption_error, KeyboardInterrupt):

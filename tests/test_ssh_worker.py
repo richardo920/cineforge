@@ -81,7 +81,7 @@ class SSHTests(unittest.TestCase):
     def test_ping_validates_timeout_and_uses_fresh_unsupervised_requests(self):
         worker = self.worker(allow_live=True)
         self.addCleanup(worker.close)
-        with patch.object(worker, "_request", return_value={}) as request:
+        with patch.object(worker, "_request", return_value={"status": "ssh_ready"}) as request:
             for timeout in (0, -1, True, None, "1", float("nan"), float("inf")):
                 with self.subTest(timeout=timeout), self.assertRaises(WorkerError):
                     worker.ping(timeout)
@@ -90,6 +90,9 @@ class SSHTests(unittest.TestCase):
             self.assertTrue(worker.ping(2.5))
             self.assertEqual(request.call_count, 2)
             request.assert_called_with({"operation": "ping"}, 2.5, supervise=False)
+        for reply in ({}, {"status": "heartbeat"}, {"status": "ssh_ready", "extra": True}):
+            with self.subTest(reply=reply), patch.object(worker, "_request", return_value=reply):
+                self.assertFalse(worker.ping(1))
         with patch.object(worker, "_request", side_effect=WorkerError("private")):
             self.assertFalse(worker.ping(1))
         with patch.object(worker, "_request", side_effect=KeyboardInterrupt):
@@ -229,7 +232,7 @@ class SSHTests(unittest.TestCase):
 
     def test_arm_lost_ack_is_not_retried_and_unguarded_worker_cannot_prepare(self):
         worker = self.worker(allow_live=True)
-        with worker, patch.object(worker, "_request", side_effect=[{}, WorkerError("fixture")]) as call:
+        with worker, patch.object(worker, "_request", side_effect=[{"status": "ssh_ready"}, WorkerError("fixture")]) as call:
             with self.assertRaises(WorkerError):
                 worker.probe(LeaseSnapshot("first", "created", "pod_1"), 30)
             self.assertEqual(call.call_count, 2)  # one read-only ping, one ARM
