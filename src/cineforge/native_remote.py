@@ -42,7 +42,7 @@ from cineforge.native_speech_pins import BASE_FILES, DESIGN_FILES, SDK_FILES
 from cineforge.native_speech_process import pack, unpack
 from cineforge.s2v import NativeSpeechProof
 from cineforge.s2v_service import LongSessionServiceContext, S2VServiceContext, is_speech_service
-from cineforge.speech import QwenBaseRequest, SpeechArtifact
+from cineforge.speech import RESERVED_DURATION_HEADROOM_FACTOR, QwenBaseRequest, SpeechArtifact
 from cineforge.ssh_worker import SSHWorker
 from cineforge.worker_guard import worker_guard_source_sha256
 from cineforge.worker_profiles import require_s2v_hardware
@@ -772,7 +772,7 @@ class RemoteNativeSpeechRuntime:
                 wave = inspect_pcm16_wav(payload)
                 if (
                     wave.frames * request.timebase.ticks_per_second
-                    > request.duration_ticks * wave.sample_rate
+                    > RESERVED_DURATION_HEADROOM_FACTOR * request.duration_ticks * wave.sample_rate
                 ):
                     raise ValueError
             receipt_raw = nr_encode(receipt)
