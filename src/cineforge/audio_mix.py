@@ -1,6 +1,8 @@
 """Bounded PCM soundtrack mixing and measured linear presets; no export authority.
 
-Sources are never resampled, trimmed or looped. Mono duplicates to explicit stereo;
+Dialogue speech longer than its cue is time-stretched (pitch-preserving) to
+fit the cue at synthesis receipt, before admission; the mix itself never
+resamples, trims or loops a source. Mono duplicates to explicit stereo;
 unoccupied timeline/reserved speech tails are silence. Fake meters label fixtures only.
 """
 from __future__ import annotations

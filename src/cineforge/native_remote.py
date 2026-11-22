@@ -43,6 +43,7 @@ from cineforge.native_speech_process import pack, unpack
 from cineforge.s2v import NativeSpeechProof
 from cineforge.s2v_service import LongSessionServiceContext, S2VServiceContext, is_speech_service
 from cineforge.speech import RESERVED_DURATION_HEADROOM_FACTOR, QwenBaseRequest, SpeechArtifact
+from cineforge.speech_fit import fit_pcm16_wav_to_slot
 from cineforge.ssh_worker import SSHWorker
 from cineforge.worker_guard import worker_guard_source_sha256
 from cineforge.worker_profiles import require_s2v_hardware
@@ -775,6 +776,17 @@ class RemoteNativeSpeechRuntime:
                     > RESERVED_DURATION_HEADROOM_FACTOR * request.duration_ticks * wave.sample_rate
                 ):
                     raise ValueError
+            if isinstance(request, QwenBaseRequest):
+                # Owner policy (2026-11-21): speech longer than its slot is
+                # time-stretched to fit, here at receipt, so the fitted bytes are
+                # the artifact of record the proof below binds. The Pod receipt
+                # attests the synthesis itself; the stretch is a deterministic
+                # controller-side derivation, applied to base operations only.
+                payload = fit_pcm16_wav_to_slot(
+                    payload,
+                    ticks_per_second=request.timebase.ticks_per_second,
+                    duration_ticks=request.duration_ticks,
+                )
             receipt_raw = nr_encode(receipt)
             proof = RemoteNativeProof(
                 token,

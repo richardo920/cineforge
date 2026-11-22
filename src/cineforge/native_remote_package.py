@@ -80,6 +80,7 @@ _PACKAGE_FILES = (
     "skill_runtime.py",
     "skills.py",
     "speech.py",
+    "speech_fit.py",
     "ssh_worker.py",
     "stem_import.py",
     "storage.py",

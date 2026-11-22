@@ -232,6 +232,33 @@ class RemoteFixture(unittest.TestCase):
 
 
 class RemoteTests(RemoteFixture):
+    def test_over_slot_base_fits_before_proof_registration(self):
+        slot_frames = (self.request.duration_ticks * 24000
+                       // self.request.timebase.ticks_per_second)
+        worker_payload = wav_bytes(frames=slot_frames + 5000)
+        self.prepare()
+        with patch(__name__ + ".response",
+                side_effect=lambda header, original=response: original(header, worker_payload)):
+            payload = self.bridge.synthesize(self.request, self.reference)
+        self.assertEqual(inspect_pcm16_wav(payload).frames, slot_frames)
+        proof = self.bridge.proof_for(self.request, payload)
+        self.assertEqual(proof.payload_sha256, hashlib.sha256(payload).hexdigest())
+        self.assertEqual(self.bridge.receipt_for(self.request, payload)["owned_process_id"], 12345)
+        speech = SpeechArtifact(
+            replace(self.gate.speech.pin, sha256=proof.payload_sha256),
+            self.request, payload, "unverified_injected_runtime", 24000, slot_frames)
+        verified = self.bridge.verify_speech(speech, self.gate.service)
+        self.assertEqual(verified.speech_sha256, proof.payload_sha256)
+        self.static_failure(lambda: self.bridge.proof_for(self.request, worker_payload))
+
+    def test_under_slot_base_preserves_worker_bytes(self):
+        worker_payload = wav_bytes(frames=2400)
+        self.prepare()
+        with patch(__name__ + ".response",
+                side_effect=lambda header, original=response: original(header, worker_payload)):
+            payload = self.bridge.synthesize(self.request, self.reference)
+        self.assertEqual(payload, worker_payload)
+
     def test_long_session_bounded_repeated_english_and_one_design(self):
         short = self.gate.service.approval
         approval = LongSessionBudgetApproval.for_scope(short.journal_directory, short.region,
@@ -1400,9 +1427,9 @@ class SpeechDiagnosticTests(RemoteFixture):
                 with patch(__name__ + ".response",
                         side_effect=lambda header, original=response, payload=payload: original(header, payload)):
                     result = self.bridge.synthesize(self.request, self.reference)
-                self.assertEqual(result, payload)
+                self.assertEqual(inspect_pcm16_wav(result).frames, slot_frames)
                 self.assertEqual(self.bridge.proof_for(self.request, result).payload_sha256,
-                                 hashlib.sha256(payload).hexdigest())
+                                 hashlib.sha256(result).hexdigest())
                 self.assertIsNone(self.bridge.last_speech_failure)
 
     def test_speech_above_headroom_fails_payload_validation(self):
