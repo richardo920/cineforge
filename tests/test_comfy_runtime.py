@@ -1557,3 +1557,223 @@ class ComfyCurrentReplyTests(unittest.TestCase):
                 "subject_sha256", "installed_sha256", "probe_sha256",
                 "execution_sha256", "jit_enabled", "phase",
             })
+
+
+class VerifyDiagnosticTests(unittest.TestCase):
+    def setUp(self):
+        (self.runtime, self.worker, self.selected, _, self.state,
+         self.bridge) = ComfyControllerTests().fixture()
+        declaration = plan()
+        self.runtime._prepared = True
+        self.runtime._subject = comfy_subject(declaration)
+        self.runtime._expires_unix = self.bridge._expires_unix
+        self.fact = dict(subject_sha256=comfy_subject(declaration),
+            installed_sha256=nr_digest(declaration["installed"]), probe_sha256=HASH,
+            execution_sha256=nr_digest(declaration["execution"]),
+            jit_enabled=False, phase="after_core_startup")
+        self.bridge._call = lambda operation, **kwargs: self.fact
+        self.deadline = time.monotonic() + 50
+
+    def verify(self):
+        return self.runtime.verify(self.worker, self.selected, deadline=self.deadline)
+
+    def assert_failure(self, sub_step, error_type="ValueError", *, poisoned=True):
+        self.assertEqual(self.runtime._verify_diagnostic,
+                         {"sub_step": sub_step, "error_type": error_type})
+        self.assertEqual(self.runtime._unresolved, poisoned)
+        self.assertEqual(self.bridge._unresolved, poisoned)
+
+    def test_success_resets_diagnostic(self):
+        self.runtime._verify_diagnostic = {"sub_step": "deadline"}
+        self.assertIsNone(self.verify())
+        self.assertIsNone(self.runtime._verify_diagnostic)
+        self.assertFalse(self.runtime._unresolved)
+
+    def test_not_prepared(self):
+        self.runtime._prepared = False
+        with self.assertRaisesRegex(ValueError, "^closed Comfy preparation required$"):
+            self.verify()
+        self.assert_failure("not_prepared", poisoned=False)
+
+    def test_entry_admit_gate_propagates_unwrapped(self):
+        self.state["revoked"] = True
+        with self.assertRaisesRegex(ValueError, "^" + CANARY + "$"):
+            self.verify()
+        self.assert_failure("entry_admit", poisoned=False)
+
+    def test_entry_admit_cause(self):
+        from cineforge.ssh_worker import WorkerError
+        error = WorkerError(CANARY)
+        error.cause_diagnostic = {
+            "cause_type": "BootstrapError", "reason": "process_failed", "returncode": 17}
+        def reject():
+            raise error
+        self.worker.native_admission = reject
+        with self.assertRaises(WorkerError) as caught:
+            self.verify()
+        self.assertIs(caught.exception, error)
+        self.assertEqual(self.runtime._verify_diagnostic, {
+            "sub_step": "entry_admit", "error_type": "WorkerError",
+            "cause_type": "BootstrapError", "reason": "process_failed", "returncode": 17})
+        self.assertFalse(self.runtime._unresolved)
+
+    def test_entry_require_propagates_unwrapped(self):
+        from cineforge.ssh_worker import WorkerError
+        error = WorkerError(CANARY)
+        def reject(selection):
+            raise error
+        self.worker._require_s2v = reject
+        with self.assertRaises(WorkerError) as caught:
+            self.verify()
+        self.assertIs(caught.exception, error)
+        self.assert_failure("entry_require", "WorkerError", poisoned=False)
+
+    def rpc_failure(self, operation):
+        self.bridge._last_call_failure = {
+            "operation": operation, "cause_type": "BootstrapError", "reason": "process_failed",
+            "returncode": 23, "child_output_tail": "synthetic tail"}
+        def fail(operation, **kwargs):
+            raise NativeSpeechError(CANARY)
+        self.bridge._call = fail
+        with self.assertRaisesRegex(ValueError, "^closed Comfy current verification failed$"):
+            self.verify()
+
+    def test_verify_rpc_retains_invoke_cause(self):
+        self.rpc_failure("native_comfy_verify")
+        self.assertEqual(self.runtime._verify_diagnostic, {
+            "sub_step": "verify_rpc", "error_type": "NativeSpeechError",
+            "cause_type": "BootstrapError", "reason": "process_failed", "returncode": 23,
+            "child_output_tail": "synthetic tail"})
+        self.assertTrue(self.runtime._unresolved)
+
+    def test_verify_rpc_drops_stale_operation(self):
+        self.rpc_failure("native_speech")
+        self.assert_failure("verify_rpc", "NativeSpeechError")
+
+    def test_fact_shape(self):
+        self.fact["phase"] = "wrong"
+        with self.assertRaisesRegex(ValueError, "^closed Comfy current verification failed$"):
+            self.verify()
+        self.assertEqual(self.runtime._verify_diagnostic, {
+            "sub_step": "fact_check", "fact_step": "fact_shape", "error_type": "ValueError"})
+        self.assertTrue(self.runtime._unresolved)
+
+    def test_fact_closure(self):
+        self.fact["installed_sha256"] = "b" * 64
+        with self.assertRaisesRegex(ValueError, "^closed Comfy current verification failed$"):
+            self.verify()
+        self.assertEqual(self.runtime._verify_diagnostic, {
+            "sub_step": "fact_check", "fact_step": "fact_closure", "error_type": "ValueError"})
+
+    def test_exit_admit(self):
+        calls = []
+        def admit():
+            calls.append(None)
+            if len(calls) == 2:
+                raise ValueError(CANARY)
+        self.worker.native_admission = admit
+        with self.assertRaisesRegex(ValueError, "^closed Comfy current verification failed$"):
+            self.verify()
+        self.assert_failure("exit_admit")
+
+    def test_exit_require(self):
+        from cineforge.ssh_worker import WorkerError
+        calls = []
+        def require(selection):
+            calls.append(None)
+            if len(calls) == 2:
+                raise WorkerError(CANARY)
+        self.worker._require_s2v = require
+        with self.assertRaisesRegex(ValueError, "^closed Comfy current verification failed$"):
+            self.verify()
+        self.assert_failure("exit_require", "WorkerError")
+
+    def test_deadline(self):
+        now = [100.0]
+        original = self.worker._require_s2v
+        calls = []
+        def require(selection):
+            original(selection)
+            calls.append(None)
+            if len(calls) == 2:
+                now[0] = 105.0
+        self.worker._require_s2v = require
+        self.deadline = 105.0
+        with (patch("cineforge.comfy_runtime.time.monotonic", side_effect=lambda: now[0]),
+              self.assertRaisesRegex(ValueError, "^closed Comfy current verification failed$")):
+            self.verify()
+        self.assert_failure("deadline")
+
+    def test_check_fact_diagnostic_preserves_messages(self):
+        for key, value, step, message in (
+                ("phase", "wrong", "fact_shape", "closed Comfy worker facts differ"),
+                ("installed_sha256", "b" * 64, "fact_closure", "closed Comfy installed closure differs")):
+            fact = dict(self.fact, **{key: value})
+            with self.subTest(step=step):
+                with self.assertRaisesRegex(ValueError, "^" + message + "$"):
+                    self.runtime._check_fact(fact)
+                diagnostic = {}
+                with self.assertRaisesRegex(ValueError, "^" + message + "$"):
+                    self.runtime._check_fact(fact, diagnostic=diagnostic)
+                self.assertEqual(diagnostic, {"fact_step": step})
+
+    def test_diagnostic_failure_preserves_entry_exception(self):
+        error = ValueError(CANARY)
+        def reject():
+            raise error
+        self.worker.native_admission = reject
+        with (patch("cineforge.comfy_runtime._verify_failure_diagnostic", side_effect=RuntimeError),
+              self.assertRaises(ValueError) as caught):
+            self.verify()
+        self.assertIs(caught.exception, error)
+        self.assertIsNone(self.runtime._verify_diagnostic)
+        self.assertFalse(self.runtime._unresolved)
+
+    def test_diagnostic_failure_preserves_poison_and_wrap(self):
+        self.fact["phase"] = "wrong"
+        with (patch("cineforge.comfy_runtime._verify_failure_diagnostic", side_effect=RuntimeError),
+              self.assertRaisesRegex(ValueError, "^closed Comfy current verification failed$")):
+            self.verify()
+        self.assertIsNone(self.runtime._verify_diagnostic)
+        self.assertTrue(self.runtime._unresolved)
+
+    def test_diagnostic_interrupt_preserves_cancellation_and_poison(self):
+        self.fact["phase"] = "wrong"
+        with (patch("cineforge.comfy_runtime._verify_failure_diagnostic", side_effect=KeyboardInterrupt),
+              self.assertRaises(KeyboardInterrupt)):
+            self.verify()
+        self.assertTrue(self.runtime._unresolved)
+
+    def test_cause_validation_and_direct_cause_precedence(self):
+        from cineforge.ssh_worker import WorkerError
+        invalid = ({"cause_type": True, "reason": 1, "supervision_message": [],
+                    "returncode": True, "child_output_tail": "bad\ntail"},
+                   {"returncode": "23", "child_output_tail": "x" * 513},
+                   {"child_output_tail": ""}, {"child_output_tail": "é"})
+        for cause in invalid:
+            with self.subTest(cause=cause):
+                error = WorkerError(CANARY)
+                error.cause_diagnostic = cause
+                def admit(error=error):
+                    raise error
+                self.worker.native_admission = admit
+                with self.assertRaises(WorkerError):
+                    self.verify()
+                self.assertEqual(self.runtime._verify_diagnostic,
+                                 {"sub_step": "entry_admit", "error_type": "WorkerError"})
+        error = NativeSpeechError(CANARY)
+        error.cause_diagnostic = {"cause_type": "Direct", "reason": "direct",
+                                  "returncode": 17, "supervision_message": "fixed",
+                                  "child_output_tail": "x" * 512, "private": CANARY}
+        self.worker.native_admission = lambda: None
+        self.bridge._last_call_failure = {"operation": "native_comfy_verify",
+                                         "cause_type": "Stale", "returncode": 23}
+        def call(operation, **kwargs):
+            raise error
+        self.bridge._call = call
+        with self.assertRaises(ValueError):
+            self.verify()
+        self.assertEqual(self.runtime._verify_diagnostic, {
+            "sub_step": "verify_rpc", "error_type": "NativeSpeechError",
+            "cause_type": "Direct", "reason": "direct", "returncode": 17,
+            "supervision_message": "fixed", "child_output_tail": "x" * 512})
