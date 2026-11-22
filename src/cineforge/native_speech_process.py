@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from cineforge.json_codec import strict_loads
-from cineforge.native_speech_integrity import NativeSpeechError
+from cineforge.native_speech_integrity import CHILD_OUTPUT_TAIL_MAX, NativeSpeechError
 
 MAX_HEADER = 16 * 1024**2
 MAX_INPUT = MAX_HEADER + 16 * 1024**2 + 4
@@ -49,6 +49,22 @@ def unpack(raw: bytes) -> tuple[dict[str, Any], bytes]:
     if not isinstance(header, dict):
         raise NativeSpeechError("invalid native speech protocol header")
     return header, raw[4 + count:]
+
+
+def _child_output_tail(result: bytes | None) -> str | None:
+    if result is None:
+        return None
+    try:
+        header, _ = unpack(result)
+        if not isinstance(header, dict) or header.get("status") != "failed":
+            return None
+        tail = header.get("error")
+        if (type(tail) is str and 0 < len(tail) <= CHILD_OUTPUT_TAIL_MAX
+                and all(32 <= ord(c) <= 126 for c in tail)):
+            return tail
+    except BaseException:
+        pass
+    return None
 
 
 def _finish(process: subprocess.Popen[bytes] | None, selector: selectors.BaseSelector | None,
@@ -183,7 +199,8 @@ def run_child(command: tuple[str, ...], *, payload: bytes, env: dict[str, str],
                                 owned_process_id=None if process is None else process.pid) from None
     if failed or result is None or process is None or process.returncode != 0:
         raise NativeSpeechError("bounded native speech child failed",
-                                owned_process_id=None if process is None else process.pid) from None
+                                owned_process_id=None if process is None else process.pid,
+                                child_output_tail=_child_output_tail(result)) from None
     owned = OwnedChildResult(result, process.pid)
     # Cleanup and scheduler delays consume the original cap too. A known-clean
     # late result is a failed attempt, not invented cleanup uncertainty.

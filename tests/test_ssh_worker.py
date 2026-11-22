@@ -404,6 +404,25 @@ class SSHTests(unittest.TestCase):
             self.assertEqual(caught.exception.cause_diagnostic, expected)
             self.assertNotIn("SYNTHETIC-PRIVATE-CANARY", str(caught.exception.cause_diagnostic))
 
+    def test_run_process_retains_only_valid_child_output_tail(self):
+        from cineforge.worker_bootstrap import BootstrapError, encode
+        tail = "NativeSpeechError: native speech exceeds reserved duration"
+        for value in (tail, "x" * 513, "é", 3, "bad\n"):
+            error = BootstrapError("static", reason="process_failed", returncode=2,
+                                   child_output_tail=value)
+            with self.subTest(value=value), patch("cineforge.worker_bootstrap.bounded_process",
+                    side_effect=error), self.assertRaises(WorkerError) as caught:
+                run_process([sys.executable, "-c", "pass"], timeout=2)
+            expected = {"cause_type": "BootstrapError", "reason": "process_failed", "returncode": 2}
+            if value == tail:
+                expected["child_output_tail"] = tail
+            self.assertEqual(caught.exception.cause_diagnostic, expected)
+        raw = encode({"status": "worker_operation_failed", "child_output_tail": tail}) + b"\n"
+        code = "import os;os.write(1," + repr(raw) + ");os._exit(2)"
+        with self.assertRaises(WorkerError) as caught:
+            run_process([sys.executable, "-c", code], timeout=2)
+        self.assertEqual(caught.exception.cause_diagnostic, expected | {"child_output_tail": tail})
+
     def test_exited_parent_detached_descendant_and_backpressure_cannot_hold_ssh_deadline(self):
         exercise_descendant_pipe(self, self.root, "cineforge.ssh_worker", "run_process")
 

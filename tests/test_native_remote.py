@@ -1314,6 +1314,19 @@ class SpeechDiagnosticTests(RemoteFixture):
                 self.assertEqual(set(diagnostic),
                     {"entry", "sub_step", "error_type", "operation", "reply_received", "sent_unix"})
 
+    def test_capture_call_failure_retains_only_valid_child_output_tail(self):
+        tail = "NativeSpeechError: native speech exceeds reserved duration"
+        for value in (tail, "x" * 512, "x" * 513, 3, None, "", "bad\n", "é"):
+            error = WorkerError("bounded SSH process failed")
+            error.cause_diagnostic = {"child_output_tail": value}
+            self.bridge._capture_call_failure("native_invoke", error, reply_received=False)
+            expected = {"operation": "native_invoke", "reply_received": False,
+                        "error_type": "WorkerError"}
+            if value in (tail, "x" * 512):
+                expected["child_output_tail"] = value
+            with self.subTest(value=value):
+                self.assertEqual(self.bridge._last_call_failure, expected)
+
     def test_speech_dispatch_retains_bounded_cause(self):
         cases = (
             ({"cause_type": "BootstrapError", "reason": "process_failed", "returncode": 1},

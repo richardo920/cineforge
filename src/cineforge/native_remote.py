@@ -31,7 +31,12 @@ from cineforge.native_remote_plan import (
     nr_recipe,
 )
 from cineforge.native_speech import NativeSpeechRuntime, OriginalVoiceDesign
-from cineforge.native_speech_integrity import NativeSpeechError, NativeSpeechSelection, digest
+from cineforge.native_speech_integrity import (
+    CHILD_OUTPUT_TAIL_MAX,
+    NativeSpeechError,
+    NativeSpeechSelection,
+    digest,
+)
 from cineforge.native_speech_pcm import pcm_wav
 from cineforge.native_speech_pins import BASE_FILES, DESIGN_FILES, SDK_FILES
 from cineforge.native_speech_process import pack, unpack
@@ -205,6 +210,10 @@ class RemoteNativeSpeechRuntime:
                         diagnostic[key] = cause[key]
                 if type(cause.get("returncode")) is int:
                     diagnostic["returncode"] = cause["returncode"]
+                tail = cause.get("child_output_tail")
+                if (type(tail) is str and 0 < len(tail) <= CHILD_OUTPUT_TAIL_MAX
+                        and all(32 <= ord(c) <= 126 for c in tail)):
+                    diagnostic["child_output_tail"] = tail
             self._last_call_failure = diagnostic
         except BaseException as diagnostic_error:
             remember_interruption(diagnostic_error)
