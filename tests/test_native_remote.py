@@ -1398,7 +1398,7 @@ class SpeechDiagnosticTests(RemoteFixture):
                 self.prepare()
                 payload = wav_bytes(frames=frames)
                 with patch(__name__ + ".response",
-                        side_effect=lambda header, original=response: original(header, payload)):
+                        side_effect=lambda header, original=response, payload=payload: original(header, payload)):
                     result = self.bridge.synthesize(self.request, self.reference)
                 self.assertEqual(result, payload)
                 self.assertEqual(self.bridge.proof_for(self.request, result).payload_sha256,
