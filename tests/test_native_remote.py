@@ -1387,19 +1387,23 @@ class SpeechDiagnosticTests(RemoteFixture):
         self.assertEqual(diagnostic["reply_keys"], sorted(diagnostic["reply_keys"]))
 
     def test_speech_reserved_duration_headroom_returns_proof(self):
-        self.prepare()
         slot_frames, remainder = divmod(self.request.duration_ticks * 24000,
                                         self.request.timebase.ticks_per_second)
         self.assertEqual(remainder, 0)
         self.assertEqual(slot_frames % 2, 0)
-        payload = wav_bytes(frames=slot_frames * 3 // 2)
-        with patch("test_native_remote.response",
-                side_effect=lambda header, original=response: original(header, payload)):
-            result = self.bridge.synthesize(self.request, self.reference)
-        self.assertEqual(result, payload)
-        self.assertEqual(self.bridge.proof_for(self.request, result).payload_sha256,
-                         hashlib.sha256(payload).hexdigest())
-        self.assertIsNone(self.bridge.last_speech_failure)
+        for frames in (slot_frames * 3 // 2, slot_frames * 2):
+            with self.subTest(frames=frames):
+                self.remote = self.root / str(frames)
+                self.bridge = RemoteNativeSpeechRuntime(self.worker, allow_native=True)
+                self.prepare()
+                payload = wav_bytes(frames=frames)
+                with patch(__name__ + ".response",
+                        side_effect=lambda header, original=response: original(header, payload)):
+                    result = self.bridge.synthesize(self.request, self.reference)
+                self.assertEqual(result, payload)
+                self.assertEqual(self.bridge.proof_for(self.request, result).payload_sha256,
+                                 hashlib.sha256(payload).hexdigest())
+                self.assertIsNone(self.bridge.last_speech_failure)
 
     def test_speech_above_headroom_fails_payload_validation(self):
         self.prepare()
