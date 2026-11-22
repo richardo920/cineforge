@@ -12,11 +12,13 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest.mock import Mock, patch
 
 from test_cloud_budget import selection
 
-from cineforge import worker_guard
+from cineforge import native_speech_integrity, ssh_worker, worker_bootstrap, worker_guard
+from cineforge.native_speech_integrity import NativeSpeechError
 from cineforge.worker_bootstrap import (
     MODEL_REVISION,
     REVISION,
@@ -636,10 +638,23 @@ class BootstrapTests(unittest.TestCase):
 
     def test_guardian_main_retains_only_valid_child_output_tail(self):
         tail = "NativeSpeechError: native speech exceeds reserved duration"
-        for value in (tail, None, "x" * 513, 3, "é", "bad\n"):
-            error = BootstrapError("static", child_output_tail=value)
+        class DerivedNativeSpeechError(NativeSpeechError):
+            pass
+
+        class DerivedStr(str):
+            pass
+
+        cases = [(BootstrapError("static", child_output_tail=tail), None),
+                 (DerivedNativeSpeechError("static", child_output_tail=tail), None),
+                 (NativeSpeechError("static", child_output_tail=tail), tail),
+                 (NativeSpeechError("static", child_output_tail="x" * 512), "x" * 512)]
+        for value in (None, "", "x" * 513, 3, "é", "bad\n", "bad\x7f", DerivedStr(tail)):
+            forged_error: Any = NativeSpeechError("static")
+            forged_error.child_output_tail = value
+            cases.append((forged_error, None))
+        for error, expected_tail in cases:
             request = {"operation": "native_invoke", "timeout_seconds": 1}
-            with (self.subTest(value=value),
+            with (self.subTest(error=type(error), tail=getattr(error, "child_output_tail", None)),
                   patch("cineforge.worker_bootstrap.sys.stdin", Mock(buffer=io.BytesIO(encode(request)))),
                   patch("cineforge.worker_bootstrap.sys.stdout", new_callable=io.StringIO) as output,
                   patch("cineforge.worker_bootstrap.os.umask"),
@@ -648,9 +663,17 @@ class BootstrapTests(unittest.TestCase):
                   patch("cineforge.worker_bootstrap.dispatch", side_effect=error)):
                 self.assertEqual(main(), 2)
                 expected = {"status": "worker_operation_failed"}
-                if value == tail:
-                    expected["child_output_tail"] = tail
-                self.assertEqual(output.getvalue().encode(), encode(expected) + b"\n")
+                if expected_tail is not None:
+                    expected["child_output_tail"] = expected_tail
+                    expected_raw = encode(expected) + b"\n"
+                else:
+                    expected_raw = b'{"status":"worker_operation_failed"}\n'
+                self.assertEqual(output.getvalue().encode(), expected_raw)
+
+    def test_child_output_tail_caps_match(self):
+        self.assertEqual(native_speech_integrity.CHILD_OUTPUT_TAIL_MAX, 512)
+        self.assertEqual(worker_bootstrap._CHILD_OUTPUT_TAIL_MAX, 512)
+        self.assertEqual(ssh_worker._CHILD_OUTPUT_TAIL_MAX, 512)
 
     def test_standalone_failure_does_not_echo_input_or_traceback(self):
         request = {"operation": "fixture-sensitive-value", "allow_live": False, "timeout_seconds": 1}

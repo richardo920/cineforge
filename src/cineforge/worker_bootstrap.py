@@ -1119,10 +1119,14 @@ def main() -> int:
         failed = True
         if type(error) is SetupFailure:
             diagnostic = checked_setup_failure(error.diagnostic)
-        candidate = getattr(error, "child_output_tail", None)
-        if (type(candidate) is str and 0 < len(candidate) <= _CHILD_OUTPUT_TAIL_MAX
-                and all(32 <= ord(c) <= 126 for c in candidate)):
-            tail = candidate
+        # Identify the carrier by qualified name: worker_bundle.worker_source() bundles
+        # this module standalone, so it must not import the native package.
+        if (type(error).__name__ == "NativeSpeechError"
+                and type(error).__module__ == "cineforge.native_speech_integrity"):
+            candidate = getattr(error, "child_output_tail", None)
+            if (type(candidate) is str and 0 < len(candidate) <= _CHILD_OUTPUT_TAIL_MAX
+                    and all(32 <= ord(c) <= 126 for c in candidate)):
+                tail = candidate
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
     if failed or answer is None:
