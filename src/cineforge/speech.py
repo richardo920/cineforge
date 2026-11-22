@@ -29,6 +29,15 @@ BASE_MODEL = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
 BASE_REVISION = "fd4b254389122332181a7c3db7f27e918eec64e3"  # pragma: allowlist secret - public model revision
 _MAX_BYTES = 16 * 1024 * 1024
 
+# Generated speech may run up to this factor of the request's reserved
+# duration (duration_ticks). The pod-side Qwen voice renders longer than
+# the pacing estimates the segment slots were built from (observed good
+# renders: 0.765x and 0.848x of the slot; fragmented/multi-sentence lines
+# exceed 1.0x), so the reserved maximum is twice the slot. Genuine runaway
+# generation is still bounded independently by the child's 60 s output
+# layout cap and the 512-token generation cap.
+RESERVED_DURATION_HEADROOM_FACTOR = 2
+
 
 class SpeechError(ContractError):
     """Static diagnostics without private dialogue, audio, paths or runtime output."""
@@ -209,7 +218,7 @@ class SpeechArtifact:
                 or self.runtime_kind not in ("synthetic_fixture", "unverified_injected_runtime")):
             raise SpeechError("speech artifact metadata mismatch")
         if (wave.frames * self.request.timebase.ticks_per_second
-                > self.request.duration_ticks * wave.sample_rate):
+                > RESERVED_DURATION_HEADROOM_FACTOR * self.request.duration_ticks * wave.sample_rate):
             raise SpeechError("speech exceeds reserved duration")
 
 

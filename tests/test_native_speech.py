@@ -19,7 +19,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from test_speech import adapter, fixture
+from test_speech import adapter, fixture, wav_bytes
 
 from cineforge import native_speech_worker as worker
 from cineforge.audio_pcm import inspect_pcm16_wav
@@ -159,6 +159,42 @@ class NativeSpeechTests(unittest.TestCase):
             OriginalVoiceDesign("text", "auto", "description", HASH)
         with self.assertRaises(TypeError):
             OriginalVoiceDesign("text", "English", "description", HASH, speaker="stock")
+
+    def test_runtime_reserved_duration_boundaries(self):
+        slot_frames, remainder = divmod(self.request.duration_ticks * 24000,
+                                        self.request.timebase.ticks_per_second)
+        self.assertEqual(remainder, 0)
+        self.assertEqual(slot_frames % 2, 0)
+        for frames in (slot_frames * 3 // 2, slot_frames * 2, slot_frames * 2 + 1):
+            with self.subTest(frames=frames):
+                payload = wav_bytes(frames=frames)
+
+                def child(command, result_payload=payload, **kwargs):
+                    self.fake_child(command, **kwargs)
+                    header, _ = unpack(kwargs["payload"])
+                    return OwnedChildResult(pack(*response(header, result_payload)), 12345)
+
+                with patch("cineforge.native_speech.run_child", child):
+                    if frames > slot_frames * 2:
+                        errors = []
+
+                        class ObservedError(NativeSpeechError):
+                            def __init__(self, message, *, observed=errors, **kwargs):
+                                observed.append(message)
+                                super().__init__(message, **kwargs)
+
+                        # The runtime preserves its existing public failure wrapper.
+                        with patch("cineforge.native_speech.NativeSpeechError", ObservedError), \
+                                self.assertRaisesRegex(NativeSpeechError,
+                                    "^native speech attempt failed$"):
+                            self.runtime.synthesize(self.request, self.reference)
+                        self.assertEqual(errors, ["native speech exceeds reserved duration",
+                                                  "native speech attempt failed"])
+                        self.assertIsNone(self.runtime.last_receipt)
+                    else:
+                        result = self.runtime.synthesize(self.request, self.reference)
+                        self.assertEqual(result, payload)
+                        self.assertEqual(self.runtime.last_receipt["frames"], frames)
 
     def test_refuse_changed_reference_or_runtime_review_without_child(self):
         with patch("cineforge.native_speech.run_child") as child:
@@ -589,9 +625,25 @@ class NativeSDKBridgeTests(unittest.TestCase):
                     self.assertEqual(prompt["ref_audio"][1], request.reference_sample_rate)
                 design = OriginalVoiceDesign("Original reference", "Chinese", "Fictional timbre", HASH)
                 worker._generate("design", design, b"", chosen, 18)
-                loads = sum(row[0] == "load" for row in calls)
                 request = translated.translate(utterance_id="en-line", **arguments)
                 reference = inspect_pcm16_wav(arguments["reference_payload"]).pcm
+                slot_frames, remainder = divmod(request.duration_ticks * 24000,
+                                                request.timebase.ticks_per_second)
+                self.assertEqual(remainder, 0)
+                self.assertEqual(slot_frames % 2, 0)
+                for frames in (slot_frames * 3 // 2, slot_frames * 2, slot_frames * 2 + 1):
+                    with self.subTest(frames=frames), patch.object(Model, "generate_voice_clone",
+                            return_value=([Array([.1] * frames)], 24000)):
+                        if frames > slot_frames * 2:
+                            with self.assertRaisesRegex(NativeSpeechError,
+                                    "^native speech exceeds reserved duration$"):
+                                worker._generate("base", request, reference, chosen, 1)
+                        else:
+                            output, conversion, _ = worker._generate(
+                                "base", request, reference, chosen, 1)
+                            self.assertEqual(inspect_pcm16_wav(output).frames, frames)
+                            self.assertEqual(conversion.frames, frames)
+                loads = sum(row[0] == "load" for row in calls)
                 for attribute, value in (("is_available", lambda: False),
                                          ("is_bf16_supported", lambda: False),
                                          ("get_device_capability", lambda index: (7, 5)),

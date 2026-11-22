@@ -31,7 +31,7 @@ from cineforge.native_speech_network import deny_network
 from cineforge.native_speech_pcm import Conversion, float_pcm
 from cineforge.native_speech_pins import PCM_POLICY
 from cineforge.native_speech_process import MAX_INPUT, pack, unpack
-from cineforge.speech import QwenBaseRequest, SpeechError
+from cineforge.speech import RESERVED_DURATION_HEADROOM_FACTOR, QwenBaseRequest, SpeechError
 
 
 def _selection(value: dict[str, Any]) -> NativeSpeechSelection:
@@ -125,7 +125,7 @@ def _generate(operation: str, request: QwenBaseRequest | OriginalVoiceDesign,
     payload, conversion = float_pcm(waves[0].tolist(), rate)
     if (isinstance(request, QwenBaseRequest)
             and conversion.frames * request.timebase.ticks_per_second
-            > request.duration_ticks * conversion.sample_rate):
+            > RESERVED_DURATION_HEADROOM_FACTOR * request.duration_ticks * conversion.sample_rate):
         raise NativeSpeechError("native speech exceeds reserved duration")
     return payload, conversion, actual
 

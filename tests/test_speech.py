@@ -13,6 +13,7 @@ import wave
 from dataclasses import FrozenInstanceError, replace
 from unittest.mock import patch
 
+from cineforge import native_remote, native_speech, native_speech_worker, speech
 from cineforge.audio import (
     AudioTimebase,
     Cue,
@@ -393,6 +394,31 @@ class SpeechTests(unittest.TestCase):
             data[name] = value
             with self.assertRaises(ContractError):
                 QwenBaseRequest.from_dict(data)
+
+    def test_reserved_duration_headroom_factor_is_shared(self):
+        self.assertEqual(speech.RESERVED_DURATION_HEADROOM_FACTOR, 2)
+        for module in (native_speech, native_remote, native_speech_worker):
+            self.assertIs(module.RESERVED_DURATION_HEADROOM_FACTOR,
+                          speech.RESERVED_DURATION_HEADROOM_FACTOR)
+
+    def test_artifact_reserved_duration_boundaries(self):
+        request = self.adapter.translate(utterance_id="en-line", **self.arguments)
+        slot_frames, remainder = divmod(request.duration_ticks * 24000,
+                                        request.timebase.ticks_per_second)
+        self.assertEqual(remainder, 0)
+        self.assertEqual(slot_frames % 2, 0)
+        for frames in (slot_frames, slot_frames * 3 // 2, slot_frames * 2, slot_frames * 2 + 1):
+            with self.subTest(frames=frames):
+                payload = wav_bytes(frames=frames)
+                pin = RevisionPin("speech", 1, hashlib.sha256(payload).hexdigest())
+                if frames > slot_frames * 2:
+                    with self.assertRaisesRegex(SpeechError, "^speech exceeds reserved duration$"):
+                        SpeechArtifact(pin, request, payload, "synthetic_fixture", 24000, frames)
+                else:
+                    artifact = SpeechArtifact(pin, request, payload, "synthetic_fixture", 24000, frames)
+                    self.assertEqual(artifact.payload, payload)
+                    self.assertEqual(artifact.frames, frames)
+                    self.assertIs(artifact.request, request)
 
     def test_ids_validated_before_runtime_and_data_records_frozen(self):
         with self.assertRaises(ContractError):

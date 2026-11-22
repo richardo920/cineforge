@@ -25,7 +25,7 @@ from test_conditioning import runtime_fixture
 from test_native_speech import response, selection
 from test_runpod import spec as legacy_spec
 from test_s2v import context
-from test_speech import adapter, fixture
+from test_speech import adapter, fixture, wav_bytes
 
 from cineforge import native_remote_bootstrap as bootstrap
 from cineforge import native_remote_worker as remote
@@ -1385,6 +1385,46 @@ class SpeechDiagnosticTests(RemoteFixture):
         self.assertEqual(len(diagnostic["reply_keys"]), 32)
         self.assertTrue(all(len(k) <= 64 for k in diagnostic["reply_keys"]))
         self.assertEqual(diagnostic["reply_keys"], sorted(diagnostic["reply_keys"]))
+
+    def test_speech_reserved_duration_headroom_returns_proof(self):
+        self.prepare()
+        slot_frames, remainder = divmod(self.request.duration_ticks * 24000,
+                                        self.request.timebase.ticks_per_second)
+        self.assertEqual(remainder, 0)
+        self.assertEqual(slot_frames % 2, 0)
+        payload = wav_bytes(frames=slot_frames * 3 // 2)
+        with patch("test_native_remote.response",
+                side_effect=lambda header, original=response: original(header, payload)):
+            result = self.bridge.synthesize(self.request, self.reference)
+        self.assertEqual(result, payload)
+        self.assertEqual(self.bridge.proof_for(self.request, result).payload_sha256,
+                         hashlib.sha256(payload).hexdigest())
+        self.assertIsNone(self.bridge.last_speech_failure)
+
+    def test_speech_above_headroom_fails_payload_validation(self):
+        self.prepare()
+        slot_frames, remainder = divmod(self.request.duration_ticks * 24000,
+                                        self.request.timebase.ticks_per_second)
+        self.assertEqual(remainder, 0)
+        payload = wav_bytes(frames=slot_frames * 2 + 1)
+
+        def tamper(request, reply):
+            if request["operation"] == "native_invoke":
+                path = self.remote / (request["token"] + ".result")
+                header, _ = unpack(bootstrap.nr_read(path))
+                header["receipt"].update(frames=slot_frames * 2 + 1,
+                    payload_sha256=hashlib.sha256(payload).hexdigest())
+                raw = pack(header, payload)
+                path.write_bytes(raw)
+                return remote._descriptor(raw)
+            return reply
+
+        self.mutate = tamper
+        self.static_failure(lambda: self.bridge.synthesize(self.request, self.reference))
+        self.assertEqual(self.bridge.last_speech_failure["entry"], "invoke")
+        self.assertEqual(self.bridge.last_speech_failure["sub_step"], "payload_validation")
+        self.assertEqual(self.bridge.last_speech_failure["error_type"], "ValueError")
+        self.assertEqual(self.child_count, 1)
 
     def test_speech_synthesize_short_session_receipt_validation_attribution(self):
         self.prepare()

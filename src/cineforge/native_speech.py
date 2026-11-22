@@ -34,7 +34,7 @@ from cineforge.native_speech_process import (
     run_child,
     unpack,
 )
-from cineforge.speech import QwenBaseRequest
+from cineforge.speech import RESERVED_DURATION_HEADROOM_FACTOR, QwenBaseRequest
 
 _BOOTSTRAP = ("import os,sys;sys.path.insert(0,sys.argv[1]);"
               "from cineforge.native_speech_worker import main;os._exit(main())")
@@ -253,7 +253,7 @@ class NativeSpeechRuntime:
                     current = QwenBaseRequest.from_dict(request)
                     wave = inspect_pcm16_wav(result)
                     if (wave.frames * current.timebase.ticks_per_second
-                            > current.duration_ticks * wave.sample_rate):
+                            > RESERVED_DURATION_HEADROOM_FACTOR * current.duration_ticks * wave.sample_rate):
                         raise NativeSpeechError("native speech exceeds reserved duration")
                 pending_receipt = dict(receipt, owned_process_id=process_id,
                     owned_child_status="exit0-parent-reaped-group-signal-attempted")
