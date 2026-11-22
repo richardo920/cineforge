@@ -342,7 +342,8 @@ class S2VRunTests(unittest.TestCase):
                9999999999.0, lambda: 100, diagnostic)
         self.assertEqual(diagnostic, {"step": "window"})
 
-    def prefinish_failure(self, phase=None, *, admission_error=None, expected_error=S2VError):
+    def prefinish_failure(self, phase=None, *, verify_failure=None,
+                          admission_error=None, expected_error=S2VError):
         if admission_error is None:
             admission_error = ValueError("CANARY synthetic revoked admission")
         original = self.driver.verify_comfy_current
@@ -352,6 +353,8 @@ class S2VRunTests(unittest.TestCase):
                 if phase is not None:
                     self.driver.last_verify_failure = {"phase": phase, "error_type": "TimeoutError",
                                                        "private": "CANARY"}
+                if verify_failure is not None:
+                    self.driver.last_verify_failure = verify_failure
                 raise admission_error
             return original(**kwargs)
         self.driver.verify_comfy_current = verify
@@ -371,6 +374,36 @@ class S2VRunTests(unittest.TestCase):
             "stage": "pre_finish_admit", "step": "verify_current", "error_type": "ValueError",
             "verify_phase": "verify"})
         self.assertNotIn("CANARY", json.dumps(record))
+
+    def test_precision_prefinish_verify_cause_is_checkpointed(self):
+        cause = {"cause_type": "BootstrapError", "reason": "process_failed", "returncode": 23,
+                 "supervision_message": "worker supervision or lease deadline failed",
+                 "child_output_tail": "tail"}
+        record = self.prefinish_failure(verify_failure={
+            "phase": "verify", "sub_step": "verify_rpc", "fact_step": "fact_shape",
+            **cause, "private": "CANARY"})
+        self.assertEqual(record["precision_finish_failure"], {
+            "stage": "pre_finish_admit", "step": "verify_current", "error_type": "ValueError",
+            "verify_phase": "verify", "verify_sub_step": "verify_rpc",
+            "verify_fact_step": "fact_shape", **cause})
+        self.assertNotIn("CANARY", json.dumps(record))
+
+    def test_precision_prefinish_forged_verify_sub_step_is_dropped(self):
+        record = self.prefinish_failure(verify_failure={
+            "phase": "verify", "sub_step": "CANARY", "fact_step": "fact_closure"})
+        self.assertEqual(record["precision_finish_failure"], {
+            "stage": "pre_finish_admit", "step": "verify_current", "error_type": "ValueError",
+            "verify_phase": "verify", "verify_fact_step": "fact_closure"})
+        self.assertNotIn("CANARY", json.dumps(record))
+
+    def test_precision_prefinish_drops_invalid_verify_scalars(self):
+        record = self.prefinish_failure(verify_failure={
+            "phase": "verify", "sub_step": "entry_admit", "fact_step": "CANARY",
+            "returncode": True, "child_output_tail": "bad\ntail",
+            "cause_type": 23, "reason": True, "supervision_message": []})
+        self.assertEqual(record["precision_finish_failure"], {
+            "stage": "pre_finish_admit", "step": "verify_current", "error_type": "ValueError",
+            "verify_phase": "verify", "verify_sub_step": "entry_admit"})
 
     def test_precision_prefinish_deadline_phase_is_checkpointed(self):
         record = self.prefinish_failure("deadline")

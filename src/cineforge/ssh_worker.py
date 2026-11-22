@@ -23,7 +23,7 @@ from typing import Any, Callable, Protocol
 from cineforge import worker_bootstrap, worker_guard
 from cineforge.cloud_budget import CloudBudgetSession
 from cineforge.comfy_policy import ApprovedComfySelection, WorkerVerification
-from cineforge.comfy_runtime import ClosedComfyRuntime
+from cineforge.comfy_runtime import VERIFY_FACT_STEPS, VERIFY_SUB_STEPS, ClosedComfyRuntime
 from cineforge.comfy_transport import (
     ComfyHTTPTransport,
     PrecisionPostError,
@@ -1179,8 +1179,31 @@ class SSHWorker:
             valid = True
         except (Exception, KeyboardInterrupt) as interruption_error:
             remember_interruption(interruption_error)
-            self.last_verify_failure = {"phase": "verify",
-                                        "error_type": type(interruption_error).__name__}
+            failure: dict[str, Any] = {"phase": "verify",
+                                       "error_type": type(interruption_error).__name__}
+            try:
+                diagnostic = self._closed_comfy._verify_diagnostic
+                if type(diagnostic) is dict:
+                    sub_step = diagnostic.get("sub_step")
+                    if type(sub_step) is str and sub_step in VERIFY_SUB_STEPS:
+                        failure["sub_step"] = sub_step
+                    fact_step = diagnostic.get("fact_step")
+                    if type(fact_step) is str and fact_step in VERIFY_FACT_STEPS:
+                        failure["fact_step"] = fact_step
+                    for key in ("cause_type", "reason", "supervision_message"):
+                        value = diagnostic.get(key)
+                        if type(value) is str:
+                            failure[key] = value
+                    returncode = diagnostic.get("returncode")
+                    if type(returncode) is int:
+                        failure["returncode"] = returncode
+                    tail = diagnostic.get("child_output_tail")
+                    if (type(tail) is str and 0 < len(tail) <= 512
+                            and all(32 <= ord(character) <= 126 for character in tail)):
+                        failure["child_output_tail"] = tail
+            except BaseException as diagnostic_error:
+                remember_interruption(diagnostic_error)
+            self.last_verify_failure = failure
         if not valid:
             raise WorkerError("current Comfy verification incomplete or past original deadline")
 

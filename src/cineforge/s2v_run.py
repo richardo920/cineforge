@@ -303,6 +303,27 @@ def run_s2v(selection: S2VSelection, verification: WorkerVerification, driver: S
                                     and type(verify_failure.get("phase")) is str
                                     and verify_failure["phase"] in ("deadline", "verify")):
                                 pre_finish_failure["verify_phase"] = verify_failure["phase"]
+                                if verify_failure["phase"] == "verify":
+                                    sub_step = verify_failure.get("sub_step")
+                                    if (type(sub_step) is str and sub_step in (
+                                            "not_prepared", "entry_admit", "entry_require", "verify_rpc",
+                                            "fact_check", "exit_admit", "exit_require", "deadline")):
+                                        pre_finish_failure["verify_sub_step"] = sub_step
+                                    fact_step = verify_failure.get("fact_step")
+                                    if (type(fact_step) is str
+                                            and fact_step in ("fact_shape", "fact_closure")):
+                                        pre_finish_failure["verify_fact_step"] = fact_step
+                                    for key in ("cause_type", "reason", "supervision_message"):
+                                        value = verify_failure.get(key)
+                                        if type(value) is str:
+                                            pre_finish_failure[key] = value
+                                    returncode = verify_failure.get("returncode")
+                                    if type(returncode) is int:
+                                        pre_finish_failure["returncode"] = returncode
+                                    tail = verify_failure.get("child_output_tail")
+                                    if (type(tail) is str and 0 < len(tail) <= 512
+                                            and all(32 <= ord(character) <= 126 for character in tail)):
+                                        pre_finish_failure["child_output_tail"] = tail
                     except BaseException as diagnostic_error:
                         remember_interruption(diagnostic_error)
                     raise

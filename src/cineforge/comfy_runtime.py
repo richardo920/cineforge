@@ -13,7 +13,43 @@ from cineforge.comfy_precision import POLICY, precision_receipt, precision_reque
 from cineforge.comfy_runtime_plan import comfy_plan, comfy_subject, comfy_worker
 from cineforge.interruptions import preserve_interruption, remember_interruption
 from cineforge.native_remote_plan import NR_BLOB_MAX, nr_digest, nr_encode, nr_hash, nr_json
+from cineforge.native_speech_integrity import NativeSpeechError
 from cineforge.s2v_service import LongSessionServiceContext
+
+VERIFY_SUB_STEPS = frozenset({
+    "not_prepared", "entry_admit", "entry_require", "verify_rpc",
+    "fact_check", "exit_admit", "exit_require", "deadline"})
+VERIFY_FACT_STEPS = frozenset({"fact_shape", "fact_closure"})
+
+
+def _merge_verify_cause(target: dict[str, Any], source: Any) -> None:
+    if type(source) is not dict:
+        return
+    for key in ("cause_type", "reason", "supervision_message"):
+        value = source.get(key)
+        if type(value) is str:
+            target[key] = value
+    returncode = source.get("returncode")
+    if type(returncode) is int:
+        target["returncode"] = returncode
+    tail = source.get("child_output_tail")
+    if (type(tail) is str and 0 < len(tail) <= 512
+            and all(32 <= ord(character) <= 126 for character in tail)):
+        target["child_output_tail"] = tail
+
+
+def _verify_failure_diagnostic(sub_step: str, error: BaseException, *,
+                               fact_step: Any = None,
+                               call_failure: Any = None) -> dict[str, Any]:
+    diagnostic: dict[str, Any] = {"sub_step": sub_step,
+                                  "error_type": type(error).__name__[:64]}
+    if type(fact_step) is str and fact_step in VERIFY_FACT_STEPS:
+        diagnostic["fact_step"] = fact_step
+    _merge_verify_cause(diagnostic, getattr(error, "cause_diagnostic", None))
+    if ("cause_type" not in diagnostic and type(call_failure) is dict
+            and call_failure.get("operation") == "native_comfy_verify"):
+        _merge_verify_cause(diagnostic, call_failure)
+    return diagnostic
 
 
 def _finish_diagnostic(stage: str, reply: Any) -> dict[str, Any]:
@@ -140,6 +176,7 @@ class ClosedComfyRuntime:
         self._precision_used: set[str] = set()
         self._precision_posted = False
         self._precision_finish_diagnostic: dict[str, Any] | None = None
+        self._verify_diagnostic: dict[str, Any] | None = None
 
     def _poison(self) -> None:
         self._unresolved = True
@@ -228,7 +265,9 @@ class ClosedComfyRuntime:
             self._poison()
             raise ValueError("closed Comfy setup incomplete or unconfirmed; never replay") from None
 
-    def _check_fact(self, fact: Any) -> None:
+    def _check_fact(self, fact: Any, *, diagnostic: dict[str, Any] | None = None) -> None:
+        if diagnostic is not None:
+            diagnostic["fact_step"] = "fact_shape"
         if (type(fact) is not dict or set(fact) != {"subject_sha256", "installed_sha256", "probe_sha256",
                                                  "execution_sha256", "jit_enabled", "phase"}
                 or fact["subject_sha256"] != self._subject or fact["jit_enabled"] is not False
@@ -237,24 +276,54 @@ class ClosedComfyRuntime:
         for name in ("subject_sha256", "installed_sha256", "probe_sha256", "execution_sha256"):
             nr_hash(fact[name])
         plan = self._checked.current()
+        if diagnostic is not None:
+            diagnostic["fact_step"] = "fact_closure"
         if (fact["installed_sha256"] != hashlib.sha256(nr_encode(plan["installed"])).hexdigest()
                 or fact["execution_sha256"] != hashlib.sha256(nr_encode(plan["execution"])).hexdigest()):
             raise ValueError("closed Comfy installed closure differs")
 
     @preserve_interruption
     def verify(self, worker: Any, selection: Any, *, deadline: float) -> None:
+        self._verify_diagnostic = None
         if not self._prepared:
-            raise ValueError("closed Comfy preparation required")
-        plan = self._admit(worker, deadline)
-        worker._require_s2v(selection)
+            error = ValueError("closed Comfy preparation required")
+            self._verify_diagnostic = {"sub_step": "not_prepared", "error_type": "ValueError"}
+            raise error
+        sub_step = "entry_admit"
+        try:
+            plan = self._admit(worker, deadline)
+            sub_step = "entry_require"
+            worker._require_s2v(selection)
+        except BaseException as interruption_error:
+            try:
+                self._verify_diagnostic = _verify_failure_diagnostic(sub_step, interruption_error)
+            except BaseException as diagnostic_error:
+                remember_interruption(diagnostic_error)
+            raise
+        fact_diagnostic: dict[str, Any] = {}
+        sub_step = "verify_rpc"
         try:
             reply = self._call("native_comfy_verify", deadline, comfy_subject_sha256=comfy_subject(plan))
-            self._check_fact(reply)
+            sub_step = "fact_check"
+            self._check_fact(reply, diagnostic=fact_diagnostic)
+            sub_step = "exit_admit"
             self._admit(worker, deadline)
+            sub_step = "exit_require"
             worker._require_s2v(selection)
+            sub_step = "deadline"
             if time.monotonic() >= deadline:
                 raise ValueError
         except BaseException as interruption_error:
+            try:
+                call_failure = None
+                if sub_step == "verify_rpc" and type(interruption_error) is NativeSpeechError:
+                    call_failure = getattr(self._bridge, "_last_call_failure", None)
+                self._verify_diagnostic = _verify_failure_diagnostic(
+                    sub_step, interruption_error,
+                    fact_step=fact_diagnostic.get("fact_step") if sub_step == "fact_check" else None,
+                    call_failure=call_failure)
+            except BaseException as diagnostic_error:
+                remember_interruption(diagnostic_error)
             remember_interruption(interruption_error)
             self._poison()
             raise ValueError("closed Comfy current verification failed") from None

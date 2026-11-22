@@ -47,7 +47,7 @@ class PairedDeadlineTests(unittest.TestCase):
         self.clock.start()
         self.addCleanup(self.clock.stop)
 
-    def real_currentness_chain(self, late_review=None):
+    def real_currentness_chain(self, late_review=None, *, verify_returncode=None):
         from test_comfy_runtime import HASH, ComfyControllerTests, comfy_subject, nr_digest
 
         from cineforge.native_remote_plan import nr_encode
@@ -82,6 +82,10 @@ class PairedDeadlineTests(unittest.TestCase):
             body = json.loads(kwargs['payload'])
             wire.append((body['operation'], self.now, kwargs['absolute_deadline']))
             if body['operation'] == 'native_comfy_verify':
+                if verify_returncode is not None:
+                    from cineforge.worker_bootstrap import BootstrapError
+                    raise BootstrapError("worker process did not complete", reason="process_failed",
+                                         returncode=verify_returncode)
                 return nr_encode(fact)
             return canonical(self.f.rpc(body, kwargs['timeout']))
         self.driver._request = lambda body, timeout, **kw: SSHWorker._request(self.driver, body, timeout, **kw)
@@ -161,6 +165,63 @@ class PairedDeadlineTests(unittest.TestCase):
         self.driver.last_verify_failure = {"phase": "verify", "error_type": "TimeoutError"}
         self.driver.verify_comfy_current(absolute_deadline=105.0)
         self.assertIsNone(self.driver.last_verify_failure)
+
+    def test_currentness_retains_validated_runtime_diagnostic(self):
+        def fail(*args, **kwargs):
+            self.driver._closed_comfy._verify_diagnostic = {
+                "sub_step": "verify_rpc", "error_type": "NativeSpeechError",
+                "cause_type": "BootstrapError", "reason": "process_failed",
+                "returncode": 23, "child_output_tail": "tail", "private": "CANARY"}
+            raise TimeoutError
+        with (patch.object(self.driver._closed_comfy, "verify", fail),
+              self.assertRaises(WorkerError)):
+            self.driver.verify_comfy_current(absolute_deadline=105.0)
+        self.assertEqual(self.driver.last_verify_failure, {
+            "phase": "verify", "error_type": "TimeoutError", "sub_step": "verify_rpc",
+            "cause_type": "BootstrapError", "reason": "process_failed", "returncode": 23,
+            "child_output_tail": "tail"})
+
+    def test_currentness_drops_forged_diagnostic_values(self):
+        class Text(str):
+            pass
+        class Number(int):
+            pass
+        for diagnostic in (
+                {"sub_step": "CANARY"}, {"fact_step": "CANARY"}, {"returncode": "23"},
+                {"returncode": True}, {"child_output_tail": "tail\n"},
+                {"child_output_tail": "x" * 513}, {"child_output_tail": ""},
+                {"child_output_tail": "é"}, {"sub_step": Text("verify_rpc")},
+                {"fact_step": Text("fact_shape")}, {"reason": Text("process_failed")},
+                {"cause_type": 23}, {"supervision_message": False}, {"returncode": Number(23)}):
+            with self.subTest(diagnostic=diagnostic):
+                self.driver._closed_comfy._verify_diagnostic = diagnostic
+                with (patch.object(self.driver._closed_comfy, "verify", side_effect=TimeoutError),
+                      self.assertRaises(WorkerError)):
+                    self.driver.verify_comfy_current(absolute_deadline=105.0)
+                self.assertEqual(self.driver.last_verify_failure,
+                                 {"phase": "verify", "error_type": "TimeoutError"})
+
+    def test_currentness_deadline_ignores_runtime_diagnostic(self):
+        self.driver._closed_comfy._verify_diagnostic = {
+            "sub_step": "verify_rpc", "reason": "process_failed", "returncode": 23}
+        with (patch.object(self.driver.budget, "remaining_seconds", return_value=120),
+              patch.object(self.driver._closed_comfy, "verify") as verify,
+              self.assertRaises(WorkerError)):
+            self.driver.verify_comfy_current(absolute_deadline=105.0)
+        verify.assert_not_called()
+        self.assertEqual(self.driver.last_verify_failure,
+                         {"phase": "deadline", "error_type": "ValueError"})
+
+    def test_real_currentness_retains_process_failure(self):
+        self.now = 100.0
+        process, wire = self.real_currentness_chain(verify_returncode=23)
+        with (patch("cineforge.worker_bootstrap.bounded_process", process),
+              self.assertRaises(WorkerError)):
+            self.driver.verify_comfy_current(absolute_deadline=105.0)
+        self.assertEqual(wire, [("native_comfy_verify", 100.0, 105.0)])
+        self.assertEqual(self.driver.last_verify_failure, {
+            "phase": "verify", "error_type": "ValueError", "sub_step": "verify_rpc",
+            "cause_type": "BootstrapError", "reason": "process_failed", "returncode": 23})
 
     def test_entry_expiry_and_invalid_caps_make_no_admission_or_wire_calls(self):
         with patch.object(self.driver, '_require_s2v') as admission:
