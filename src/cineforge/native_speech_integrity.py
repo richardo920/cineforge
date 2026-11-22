@@ -21,6 +21,8 @@ from typing import Any
 from cineforge.json_codec import strict_loads
 from cineforge.native_speech_pins import BASE_FILES, DESIGN_FILES, RUNTIME_DISTRIBUTIONS, SDK_FILES
 
+CHILD_OUTPUT_TAIL_MAX = 512
+
 FilePin = tuple[str, int, str, str]
 _HASH = re.compile(r"[0-9a-f]{64}\Z")
 _MAX_TREE_BYTES = 64 * 1024**3
@@ -36,10 +38,16 @@ class NativeSpeechError(ValueError):
     """Only static diagnostics; cleanup uncertainty never becomes a success."""
 
     def __init__(self, message: str, *, cleanup_uncertain: bool = False,
-                 owned_process_id: int | None = None) -> None:
+                 owned_process_id: int | None = None,
+                 child_output_tail: str | None = None) -> None:
         if owned_process_id is not None and (type(owned_process_id) is not int or owned_process_id <= 0):
             raise ValueError("invalid owned process provenance")
+        if child_output_tail is not None and (
+                type(child_output_tail) is not str or not 0 < len(child_output_tail) <= CHILD_OUTPUT_TAIL_MAX
+                or any(not 32 <= ord(c) <= 126 for c in child_output_tail)):
+            raise ValueError("invalid child output provenance")
         super().__init__(message)
+        self.child_output_tail = child_output_tail
         self.cleanup_uncertain = cleanup_uncertain
         # Diagnostic provenance only; a historical PID is never future signal authority.
         self.owned_process_id = owned_process_id

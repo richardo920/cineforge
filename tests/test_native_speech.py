@@ -201,6 +201,24 @@ class NativeSpeechTests(unittest.TestCase):
         self.assertEqual(self.runtime.last_attempt.outcome, "failed")
         self.assertIsNone(self.runtime.last_receipt)
 
+    def test_runtime_retains_only_valid_child_output_tail(self):
+        tail = "NativeSpeechError: native speech exceeds reserved duration"
+        for value in (tail, None, "x" * 513, "bad\n", 3):
+            error = NativeSpeechError("bounded native speech child failed")
+            error.child_output_tail = value
+            with self.subTest(value=value), patch("cineforge.native_speech.run_child",
+                    side_effect=error), self.assertRaises(NativeSpeechError) as caught:
+                self.runtime.synthesize(self.request, self.reference)
+            self.assertEqual(caught.exception.child_output_tail, tail if value == tail else None)
+
+    def test_child_output_provenance_validation(self):
+        for value in ("", "x" * 513, "bad\n", "é", 3, True):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                    ValueError, "invalid child output provenance"):
+                NativeSpeechError("static", child_output_tail=value)
+        self.assertEqual(NativeSpeechError("static", child_output_tail="x" * 512).child_output_tail,
+                         "x" * 512)
+
     def test_cleanup_uncertainty_and_interruption_remain_explicit(self):
         with patch("cineforge.native_speech.run_child", side_effect=NativeSpeechError(
                 CANARY, cleanup_uncertain=True, owned_process_id=12345)):
@@ -642,6 +660,42 @@ class NativeProcessTests(unittest.TestCase):
             self.execute("import sys;sys.stdin.buffer.read();raise RuntimeError('" + CANARY + "')")
         self.assertNotIn(CANARY, "".join(traceback.format_exception(caught.exception)))
 
+    def test_standin_failed_frame_retains_only_bounded_ascii_error(self):
+        tail = "NativeSpeechError: native speech exceeds reserved duration"
+        for value in (tail, "x" * 512, "x" * 513, 3, "", "é", "bad\n"):
+            frame = pack({"version": 1, "status": "failed", "error": value}, b"")
+            code = ("import os,sys;sys.stdin.buffer.read();os.write(1," + repr(frame)
+                    + ");os._exit(1)")
+            with contextlib.ExitStack() as stack:
+                if sys.platform == "darwin":
+                    # Darwin refuses killpg on a dead owned group; isolate frame retention.
+                    stack.enter_context(patch("cineforge.native_speech_process.os.killpg"))
+                with self.subTest(value=value), self.assertRaises(NativeSpeechError) as caught:
+                    self.execute(code)
+            self.assertEqual(caught.exception.child_output_tail,
+                             value if value in (tail, "x" * 512) else None)
+
+    def test_child_failure_frames_keep_only_closed_diagnostics(self):
+        package = str(Path(__file__).resolve().parents[1] / "src")
+        for message, expected in (
+                ("native speech exceeds reserved duration",
+                 "NativeSpeechError: native speech exceeds reserved duration"),
+                ("private/path", "NativeSpeechError"),
+                ("private\\path", "NativeSpeechError"),
+                ("private é", "NativeSpeechError"),
+                ("x" * 129, "NativeSpeechError")):
+            code = ("import os,sys;sys.path.insert(0,sys.argv[1]);"
+                    "from cineforge import native_speech_worker as w;"
+                    "exec(" + repr("def fail(*args):\n raise w.NativeSpeechError(" + repr(message)
+                                   + ")\n") + ");w.handle=fail;os._exit(w.main())")
+            with self.subTest(message=message):
+                result = subprocess.run([sys.executable, "-I", "-B", "-S", "-c", code, package],
+                    input=pack({}, b""), capture_output=True, timeout=5)
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(unpack(result.stdout),
+                    ({"version": 1, "status": "failed", "error": expected}, b""))
+                self.assertEqual(result.stderr, b"")
+
     def test_timeout_output_bound_and_interruption_reap_owned_child(self):
         original = subprocess.Popen
         children = []
@@ -716,7 +770,8 @@ class NativeProcessTests(unittest.TestCase):
                 input=b"invalid", stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5,
                 env={"PATH": "/usr/bin:/bin", "PYTHONPATH": str(root), "PYTHONUSERBASE": str(root)})
             self.assertEqual(result.returncode, 1)
-            self.assertEqual(unpack(result.stdout), ({"version": 1, "status": "failed"}, b""))
+            self.assertEqual(unpack(result.stdout), ({"version": 1, "status": "failed",
+                "error": "NativeSpeechError: invalid native speech protocol header"}, b""))
             self.assertFalse(marker.exists())
             self.assertEqual(result.stderr, b"")
 
@@ -730,9 +785,42 @@ class NativeProcessTests(unittest.TestCase):
         result = subprocess.run([sys.executable, "-I", "-B", "-S", "-c", code, package],
             input=pack({}, b""), capture_output=True, timeout=5)
         self.assertEqual(result.returncode, 1)
-        self.assertEqual(unpack(result.stdout), ({"version": 1, "status": "failed"}, b""))
+        self.assertEqual(unpack(result.stdout),
+                         ({"version": 1, "status": "failed", "error": "RuntimeError"}, b""))
         self.assertEqual(result.stderr, b"")
         self.assertNotIn(CANARY.encode(), result.stdout)
+
+    def test_child_success_and_interruption_frame_bytes_are_unchanged(self):
+        package = str(Path(__file__).resolve().parents[1] / "src")
+        for body, expected, returncode in (
+                ("return ({'version': 1, 'status': 'provisional'}, b'fixture')",
+                 pack({"version": 1, "status": "provisional"}, b"fixture"), 0),
+                ("raise KeyboardInterrupt(" + repr(CANARY) + ")",
+                 pack({"version": 1, "status": "failed"}, b""), 130)):
+            code = ("import os,sys;sys.path.insert(0,sys.argv[1]);"
+                    "from cineforge import native_speech_worker as w;"
+                    "exec(" + repr("def handle(*args):\n " + body + "\n")
+                    + ");w.handle=handle;os._exit(w.main())")
+            with self.subTest(returncode=returncode):
+                result = subprocess.run([sys.executable, "-I", "-B", "-S", "-c", code, package],
+                    input=pack({}, b""), capture_output=True, timeout=5)
+                self.assertEqual(result.returncode, returncode)
+                self.assertEqual(result.stdout, expected)
+                self.assertEqual(result.stderr, b"")
+
+    def test_failure_diagnostic_does_not_format_foreign_errors_or_subclasses(self):
+        from cineforge.native_speech_worker import _failure_diagnostic
+        class ForeignError(RuntimeError):
+            def __str__(self):
+                raise AssertionError("foreign exception formatted")
+        class ForeignNativeError(NativeSpeechError):
+            pass
+        self.assertEqual(_failure_diagnostic(ForeignError(CANARY)), "ForeignError")
+        self.assertEqual(_failure_diagnostic(ForeignNativeError(CANARY)), "ForeignNativeError")
+        self.assertEqual(_failure_diagnostic(SpeechError("invalid speech request")),
+                         "SpeechError: invalid speech request")
+        with patch("cineforge.native_speech_worker.CHILD_OUTPUT_TAIL_MAX", new=object()):
+            self.assertIsNone(_failure_diagnostic(RuntimeError(CANARY)))
 
     def test_cleanup_attempts_all_steps_despite_private_faults(self):
         from cineforge.native_speech_process import _finish

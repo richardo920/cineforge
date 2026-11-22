@@ -18,6 +18,7 @@ from typing import Any
 
 from cineforge.native_speech import OriginalVoiceDesign
 from cineforge.native_speech_integrity import (
+    CHILD_OUTPUT_TAIL_MAX,
     NativeBinary,
     NativeHardware,
     NativeSpeechError,
@@ -30,7 +31,7 @@ from cineforge.native_speech_network import deny_network
 from cineforge.native_speech_pcm import Conversion, float_pcm
 from cineforge.native_speech_pins import PCM_POLICY
 from cineforge.native_speech_process import MAX_INPUT, pack, unpack
-from cineforge.speech import QwenBaseRequest
+from cineforge.speech import QwenBaseRequest, SpeechError
 
 
 def _selection(value: dict[str, Any]) -> NativeSpeechSelection:
@@ -182,8 +183,24 @@ def handle(header: dict[str, Any], reference: bytes) -> tuple[dict[str, Any], by
             "provenance": "unreviewed-native-speech"}, payload
 
 
+def _failure_diagnostic(error: BaseException) -> str | None:
+    try:
+        name = type(error).__name__
+        if not name.isidentifier() or any(not 32 <= ord(c) <= 126 for c in name):
+            return None
+        diagnostic = name
+        if type(error) in (NativeSpeechError, SpeechError):
+            message = str(error)
+            if (0 < len(message) <= 128 and all(32 <= ord(c) <= 126 for c in message)
+                    and "/" not in message and "\\" not in message):
+                diagnostic += ": " + message
+        return diagnostic[:CHILD_OUTPUT_TAIL_MAX]
+    except BaseException:
+        return None
+
+
 def main() -> int:
-    """Only static framed failures leave the child, even if a private SDK traceback exists."""
+    """Only closed diagnostics leave the child, even if a private SDK traceback exists."""
     output = os.dup(1)
     try:
         null = os.open(os.devnull, os.O_RDWR)
@@ -200,8 +217,12 @@ def main() -> int:
     except KeyboardInterrupt:
         frame = pack({"version": 1, "status": "failed"}, b"")
         code = 130
-    except BaseException:
-        frame = pack({"version": 1, "status": "failed"}, b"")
+    except BaseException as error:
+        failure: dict[str, Any] = {"version": 1, "status": "failed"}
+        diagnostic = _failure_diagnostic(error)
+        if diagnostic is not None:
+            failure["error"] = diagnostic
+        frame = pack(failure, b"")
         code = 1
     # Keep this pipe descriptor open until the fixed bootstrap calls os._exit:
     # EOF then means process exit, rather than an untrusted atexit callback.

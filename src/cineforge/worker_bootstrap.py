@@ -51,14 +51,19 @@ M4_REVISION = I2V_WORKER.model_revision
 M4_FILES = {path: (size, digest) for path, size, digest in I2V_WORKER.files}
 
 
+# Mirrors native_speech_integrity.CHILD_OUTPUT_TAIL_MAX; local for standalone guardian source.
+_CHILD_OUTPUT_TAIL_MAX = 512
+
+
 class BootstrapError(ValueError):
     """Static worker diagnostic, without subprocess, URL or environment content."""
 
     def __init__(self, message: str, *, reason: str = "unknown",
-                 returncode: int | None = None) -> None:
+                 returncode: int | None = None, child_output_tail: str | None = None) -> None:
         super().__init__(message)
         self.reason = reason
         self.returncode = returncode
+        self.child_output_tail = child_output_tail
 
 
 SETUP_REASONS = {
@@ -124,6 +129,24 @@ def setup_failure_envelope(raw: bytes) -> dict[str, Any] | None:
         return checked_setup_failure(value["setup_failure"])
     except (ValueError, TypeError, RecursionError):
         return None
+
+
+def _failure_reply_child_output_tail(raw: bytes) -> str | None:
+    if not isinstance(raw, bytes) or not 0 < len(raw) <= 1024:
+        return None
+    try:
+        value = _json(raw)
+        if (not isinstance(value, dict) or value.get("status") != "worker_operation_failed"
+                or not set(value) <= {"status", "setup_failure", "child_output_tail"}
+                or "child_output_tail" not in value or encode(value) + b"\n" != raw):
+            return None
+        tail = value["child_output_tail"]
+        if (type(tail) is str and 0 < len(tail) <= _CHILD_OUTPUT_TAIL_MAX
+                and all(32 <= ord(c) <= 126 for c in tail)):
+            return tail
+    except (ValueError, TypeError, RecursionError):
+        pass
+    return None
 
 
 def validate_reference_png(payload: bytes) -> None:
@@ -257,7 +280,8 @@ def bounded_process(command: list[str], *, timeout: float, cwd: Path | None = No
                 if diagnostic is not None:
                     raise SetupFailure(diagnostic)
             raise BootstrapError("worker process did not complete", reason="process_failed",
-                                 returncode=process.returncode)
+                                 returncode=process.returncode,
+                                 child_output_tail=_failure_reply_child_output_tail(bytes(output)))
         if check is not None:
             check()
         if time.monotonic() >= deadline:
@@ -1072,6 +1096,7 @@ def main() -> int:
     failed = False
     answer = None
     diagnostic = None
+    tail = None
     try:
         request = _json(sys.stdin.buffer.read(256 * 1024 + 1))
         if len(encode(request)) > 256 * 1024:
@@ -1094,13 +1119,26 @@ def main() -> int:
         failed = True
         if type(error) is SetupFailure:
             diagnostic = checked_setup_failure(error.diagnostic)
+        # Identify the carrier by qualified name: worker_bundle.worker_source() bundles
+        # this module standalone, so it must not import the native package.
+        if (type(error).__name__ == "NativeSpeechError"
+                and type(error).__module__ == "cineforge.native_speech_integrity"):
+            candidate = getattr(error, "child_output_tail", None)
+            if (type(candidate) is str and 0 < len(candidate) <= _CHILD_OUTPUT_TAIL_MAX
+                    and all(32 <= ord(c) <= 126 for c in candidate)):
+                tail = candidate
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
     if failed or answer is None:
-        if diagnostic is None:
+        if diagnostic is None and tail is None:
             print('{"status":"worker_operation_failed"}')
         else:
-            print(encode({"status": "worker_operation_failed", "setup_failure": diagnostic}).decode())
+            reply: dict[str, Any] = {"status": "worker_operation_failed"}
+            if diagnostic is not None:
+                reply["setup_failure"] = diagnostic
+            if tail is not None:
+                reply["child_output_tail"] = tail
+            print(encode(reply).decode())
         return 2
     print(encode(answer).decode())
     return 0

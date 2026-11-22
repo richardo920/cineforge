@@ -19,6 +19,7 @@ from typing import Any
 from cineforge.audio_pcm import PCM16Wave, inspect_pcm16_wav
 from cineforge.interruptions import preserve_interruption, remember_interruption
 from cineforge.native_speech_integrity import (
+    CHILD_OUTPUT_TAIL_MAX,
     NativeSpeechError,
     NativeSpeechSelection,
     digest,
@@ -207,6 +208,7 @@ class NativeSpeechRuntime:
         result = None
         pending_receipt = None
         key = None
+        child_tail = None
         try:
             identity = digest({"operation": operation, "request": request, "seed": self._seed,
                                "selection": self._selection.subject_sha256(),
@@ -269,6 +271,10 @@ class NativeSpeechRuntime:
                 uncertain = error.cleanup_uncertain
                 process_id = error.owned_process_id
         except BaseException as error:
+            tail = getattr(error, "child_output_tail", None)
+            if (type(tail) is str and 0 < len(tail) <= CHILD_OUTPUT_TAIL_MAX
+                    and all(32 <= ord(c) <= 126 for c in tail)):
+                child_tail = tail
             uncertain = uncertain or isinstance(error, NativeSpeechError) and error.cleanup_uncertain
             # A late filesystem cleanup failure after the owned child returned is
             # also unresolved cleanup, rather than an apparently reusable runtime.
@@ -288,7 +294,7 @@ class NativeSpeechRuntime:
             if uncertain:
                 self._unresolved = self.last_attempt
             raise NativeSpeechError("native speech attempt failed", cleanup_uncertain=uncertain,
-                                    owned_process_id=process_id) \
+                                    owned_process_id=process_id, child_output_tail=child_tail) \
                 from None
         self.last_attempt = attempt
         self._receipt = pending_receipt

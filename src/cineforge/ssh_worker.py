@@ -61,6 +61,8 @@ MAX_CONTROL_NAMESPACES = 8
 # Approved lifetime ceiling; mirrors cineforge.native_remote.MAX_NATIVE_TIMEOUT_SECONDS.
 # Kept local to avoid an import cycle: native_remote imports SSHWorker.
 MAX_NATIVE_TIMEOUT_SECONDS = 7200
+# Mirrors native_speech_integrity.CHILD_OUTPUT_TAIL_MAX; controller-local diagnostic bound.
+_CHILD_OUTPUT_TAIL_MAX = 512
 
 
 @preserve_interruption
@@ -116,6 +118,10 @@ def _bounded_cause_diagnostic(error: BaseException) -> dict[str, Any]:
             diagnostic["reason"] = error.reason
         if type(error.returncode) is int:
             diagnostic["returncode"] = error.returncode
+        tail = error.child_output_tail
+        if (type(tail) is str and 0 < len(tail) <= _CHILD_OUTPUT_TAIL_MAX
+                and all(32 <= ord(c) <= 126 for c in tail)):
+            diagnostic["child_output_tail"] = tail
     elif type(error) is WorkerError and str(error) == SUPERVISION_FAILURE_MESSAGE:
         diagnostic["supervision_message"] = SUPERVISION_FAILURE_MESSAGE
     return diagnostic
