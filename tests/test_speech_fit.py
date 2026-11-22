@@ -69,8 +69,8 @@ class SpeechFitTests(unittest.TestCase):
 
     def test_invalid_slots_and_stereo(self):
         with self.assertRaises(SpeechFitError):
-            fit_pcm16_wav_to_slot(sine(1000, 44100), ticks_per_second=10000,
-                                  duration_ticks=48124)
+            fit_pcm16_wav_to_slot(sine(130560), ticks_per_second=16000,
+                                  duration_ticks=48125)
         mono = sine(1000)
         stereo = bytearray(mono[:44] + inspect_pcm16_wav(mono).pcm * 2)
         struct.pack_into("<I", stereo, 4, len(stereo) - 8)
@@ -85,6 +85,11 @@ class SpeechFitTests(unittest.TestCase):
                 fit_pcm16_wav_to_slot(mono, ticks_per_second=tps, duration_ticks=ticks)
         with self.assertRaises(SpeechFitError):
             fit_pcm16_wav_to_slot(sine(32), ticks_per_second=RATE, duration_ticks=16)
+
+    def test_under_slot_non_divisible_slot_is_unchanged(self):
+        payload = sine(1000)
+        self.assertIs(fit_pcm16_wav_to_slot(
+            payload, ticks_per_second=16000, duration_ticks=48125), payload)
 
     def test_harmonic_stack_rms(self):
         count = 130560

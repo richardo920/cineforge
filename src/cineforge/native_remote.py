@@ -782,6 +782,9 @@ class RemoteNativeSpeechRuntime:
                 # the artifact of record the proof below binds. The Pod receipt
                 # attests the synthesis itself; the stretch is a deterministic
                 # controller-side derivation, applied to base operations only.
+                # The Pod receipt returned for this invoke attests the pre-fit
+                # synthesis (its payload_sha256/frames describe the synthesized
+                # bytes); the proof binds the fitted bytes as the artifact of record.
                 payload = fit_pcm16_wav_to_slot(
                     payload,
                     ticks_per_second=request.timebase.ticks_per_second,
@@ -839,6 +842,9 @@ class RemoteNativeSpeechRuntime:
     def receipt_for(
         self, request: QwenBaseRequest | OriginalVoiceDesign, payload: bytes
     ) -> dict[str, Any]:
+        """For a stretched invoke, the receipt attests the pre-fit synthesis while
+        the registered proof binds the fitted artifact of record (see `_invoke`).
+        """
         return nr_json(self.proof_for(request, payload)._receipt)
 
     def verify_speech(

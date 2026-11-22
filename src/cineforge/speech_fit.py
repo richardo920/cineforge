@@ -23,13 +23,13 @@ def fit_pcm16_wav_to_slot(payload: bytes, *, ticks_per_second: int, duration_tic
     if (type(ticks_per_second) is not int or ticks_per_second <= 0
             or type(duration_ticks) is not int or duration_ticks <= 0):
         raise SpeechFitError("invalid speech slot timing")
+    if wave.frames * ticks_per_second <= duration_ticks * wave.sample_rate:
+        return payload
     if duration_ticks * wave.sample_rate % ticks_per_second:
         raise SpeechFitError("speech slot requires an exact frame count")
     slot_frames = duration_ticks * wave.sample_rate // ticks_per_second
     if slot_frames <= 0:
         raise SpeechFitError("speech slot requires positive frames")
-    if wave.frames <= slot_frames:
-        return payload
     if wave.frames < 64:
         raise SpeechFitError("speech fit requires at least 64 source frames")
     samples: list[int] = list(struct.unpack(f"<{wave.frames}h", wave.pcm))
