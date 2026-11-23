@@ -442,6 +442,23 @@ class SSHTests(unittest.TestCase):
                                  256 * 1024 if operation == "native_fetch" else 65536)
                 self.assertEqual(call.call_args.kwargs["absolute_deadline"], deadline)
 
+    def test_request_clamps_worker_timeout_without_changing_process_bound(self):
+        worker = self.worker(allow_live=True)
+        worker._connection(LeaseSnapshot("first", "created", "pod_1"), 5)
+        for computed, expected in ((7200, 7140), (7141, 7140), (7140, 7140), (300, 300)):
+            for with_deadline in (False, True):
+                with self.subTest(computed=computed, with_deadline=with_deadline), \
+                        patch("cineforge.ssh_worker.time.monotonic", return_value=1000), \
+                        patch("cineforge.ssh_worker.run_process",
+                              return_value=b'{"status":"fixture"}') as call:
+                    deadline = 1000 + computed if with_deadline else None
+                    worker._request({"operation": "native_capabilities"},
+                                    7200 if with_deadline else computed, supervise=False,
+                                    absolute_deadline=deadline)
+                    self.assertEqual(json.loads(call.call_args.kwargs["payload"])["timeout_seconds"],
+                                     expected)
+                    self.assertEqual(call.call_args.kwargs["timeout"], computed)
+
     def test_source_and_payload_are_separate_not_shell_interpolated(self):
         worker = self.worker(allow_live=True)
         worker._connection(LeaseSnapshot("first", "created", "pod_1"), 5)
