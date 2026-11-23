@@ -45,6 +45,7 @@ _PACKAGE_FILES = (
     "contracts.py",
     "curated_skills.py",
     "devices.py",
+    "external_speech.py",
     "interruptions.py",
     "json_codec.py",
     "long_delivery.py",

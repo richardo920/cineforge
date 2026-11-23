@@ -96,6 +96,29 @@ class ExternalSpeechTests(unittest.TestCase):
         with self.assertRaises(ExternalSpeechError):
             runtime.verify_speech(self.artifact(raw, request), self.service)
 
+    def test_exact_slot_preserves_payload(self):
+        raw = wav_bytes(frames=7200)
+        runtime = self.runtime(renders=(ExternalSpeechRender(self.request.text, raw),))
+        payload = runtime.synthesize(self.request, self.reference)
+        self.assertIs(payload, raw)
+        self.assertEqual(payload, raw)
+
+    def test_exact_headroom_fits_to_slot(self):
+        raw = wav_bytes(frames=14400)
+        runtime = self.runtime(renders=(ExternalSpeechRender(self.request.text, raw),))
+        payload = runtime.synthesize(self.request, self.reference)
+        self.assertEqual(inspect_pcm16_wav(payload).frames, 7200)
+        runtime.verify_speech(self.artifact(payload), self.service)
+
+    def test_fitted_payload_cannot_be_verified_for_another_request(self):
+        runtime = self.runtime(renders=(ExternalSpeechRender(self.request.text,
+                                                            wav_bytes(frames=10000)),))
+        payload = runtime.synthesize(self.request, self.reference)
+        other = replace(self.request, duration_ticks=self.request.duration_ticks + 1)
+        self.assertEqual(other.text, self.request.text)
+        with self.assertRaises(ExternalSpeechError):
+            runtime.verify_speech(self.artifact(payload, other), self.service)
+
     def test_over_headroom_rejected(self):
         runtime = self.runtime(renders=(ExternalSpeechRender(self.request.text,
                                                             wav_bytes(frames=14401)),))

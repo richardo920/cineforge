@@ -3,6 +3,9 @@
 Lines are fitted to their slots at receipt under the native delivery policy.
 Proofs bind a canonical external-render receipt and one approval scope: the
 NativeSpeechProof receipt slot holds that digest, not a pod receipt. No I/O.
+The proof reference hash is the request reference pin committed by the receipt;
+the external render is bound to that pin by construction of the source, rather
+than acoustically conditioned on the reference audio.
 """
 from __future__ import annotations
 

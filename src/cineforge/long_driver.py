@@ -169,6 +169,9 @@ def run_long_session(b: LongSessionBindings, frozen: FrozenInputs, output: Path,
         return canonical(value)
 
     config = configuration()
+    if (b.external_speech is not None
+            and b.external_speech.configuration()["scope_sha256"] != approval.subject_sha256):
+        raise A20Error("LONG_EXTERNAL_SPEECH_SCOPE")
     acquisition_id = b.acquisition_id
     receipt = dict(frozen.receipt, configuration_sha256=_sha(config), staging_wheel_sha256=_sha(wheel))
     record: dict[str, Any] = {"schema_version": 1, "mode": "long-session",

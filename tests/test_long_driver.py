@@ -20,6 +20,7 @@ from cineforge import long_driver as driver
 from cineforge.a20_inputs import A20Error, FrozenInputs
 from cineforge.cloud_budget import CloudBudgetSession
 from cineforge.cloud_journal import CloudJournal
+from cineforge.external_speech import ExternalSpeechRender, ExternalSpeechRuntime
 from cineforge.rights import EvidenceRef
 from cineforge.runpod import (
     AcquisitionIntent,
@@ -107,6 +108,57 @@ class LongDriverTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
             h = LongHarness(Path(tmp).resolve(), stack)
             self.assertIsNone(h.bindings.external_speech)
+
+    def external_runtime(self, h, scope=None):
+        return ExternalSpeechRuntime(provider="test-provider", voice_id="test-voice",
+            model_id="test-model", worker_id="test-worker",
+            scope_sha256=scope or h.bindings.service.approval.subject_sha256,
+            renders=(ExternalSpeechRender("Approved English.", wav_bytes(frames=200)),),
+            design_render=wav_bytes(frames=120))
+
+    def test_external_speech_completes_without_bridge_health_check(self):
+        with tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
+            h = LongHarness(Path(tmp).resolve(), stack, lines=["Approved English."])
+            runtime = self.external_runtime(h)
+            def gate(context, speech, bridge):
+                return NS(speech=speech, service=h.bindings.service, sheet=context.sheet,
+                    verify_speech=runtime.verify_speech,
+                    actor=NS(read=lambda: h.inputs.read()["actor_png"]))
+            h.bindings = replace(h.bindings, external_speech=runtime, s2v_gate=gate)
+            record = h.run()
+            self.assertEqual(record["outcome"], "complete", record)
+            self.assertEqual(record["segments"][0]["status"], "verified")
+            bridge = h.patches["RemoteNativeSpeechRuntime"].return_value
+            bridge.speech_health_check.assert_not_called()
+            persisted = json.loads((h.output / "run.json").read_bytes())
+            self.assertEqual(persisted["speech_source"]["provider"],
+                             runtime.configuration()["provider"])
+            self.assertEqual(persisted["voice_reference_sha256"],
+                             hashlib.sha256(runtime.preview(h.bindings.design)).hexdigest())
+
+    def test_external_speech_rejects_bridge_verifier(self):
+        with tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
+            h = LongHarness(Path(tmp).resolve(), stack, lines=["Approved English."])
+            runtime = self.external_runtime(h)
+            h.bindings = replace(h.bindings, external_speech=runtime, s2v_gate=h.gate)
+            record = h.run()
+            self.assertEqual(record["outcome"], "failed", record)
+            self.assertEqual(record["segments"], [])
+            failure = record["failures"][-1]
+            self.assertEqual(failure["error_type"], "A20Error")
+            self.assertEqual(failure["message"], "LONG_S2V_BINDING")
+            self.assertEqual(failure["stage"], "s2v_gate")
+
+    def test_external_speech_scope_rejected_before_segment_generation(self):
+        with tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
+            h = LongHarness(Path(tmp).resolve(), stack, lines=["Approved English."])
+            runtime = self.external_runtime(h, scope="b" * 64)
+            h.bindings = replace(h.bindings, external_speech=runtime)
+            with self.assertRaisesRegex(A20Error, "^LONG_EXTERNAL_SPEECH_SCOPE$"):
+                h.run()
+            self.assertEqual(h.generated, [])
+            h.adapter.synthesize.assert_not_called()
+            h.patches["RemoteNativeSpeechRuntime"].assert_not_called()
 
     def test_explicit_probe_binding_verifies_without_ambient_path(self):
         with tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
