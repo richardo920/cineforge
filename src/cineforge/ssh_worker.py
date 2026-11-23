@@ -33,6 +33,7 @@ from cineforge.comfy_transport import (
     require_time,
 )
 from cineforge.devices import Backend, GPUDevice
+from cineforge.external_speech import ExternalSpeechRuntime
 from cineforge.interruptions import preserve_interruption, remember_interruption
 from cineforge.private_store import PrivateRunDirectory, read_private_input
 from cineforge.retention_heartbeat import spawn_heartbeat
@@ -677,7 +678,14 @@ class SSHWorker:
             worker_bootstrap.validate_s2v_admission(self.runtime_evidence, profile_id=self.selection.worker_profile["id"])
             trace = selection.gate.preflight()
             selection.request(selection.gate.shot)
-            if trace["speech_native_proof"]["worker_id"] != self.plan.pod_id:
+            acceptable = {self.plan.pod_id}
+            verifier = selection.gate.verify_speech
+            source = getattr(verifier, "__self__", None)
+            if isinstance(source, ExternalSpeechRuntime):
+                acceptable.add(source.worker_id)
+            # PR #228: accept the pod or verifier-bound external source; preflight re-verifies
+            # the proof against that verifier and the gate checks its service approval scope.
+            if trace["speech_native_proof"]["worker_id"] not in acceptable:
                 raise ValueError
         except (Exception, KeyboardInterrupt) as interruption_error:
             remember_interruption(interruption_error)
