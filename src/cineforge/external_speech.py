@@ -83,6 +83,10 @@ class ExternalSpeechRuntime:
         self._design_render = design_render
         self._facts: dict[tuple[str, str], tuple[str, str]] = {}
 
+    @property
+    def worker_id(self) -> str:
+        return self._worker_id
+
     def synthesize(self, request: QwenBaseRequest, reference: PCM16Wave) -> bytes:
         if type(request) is not QwenBaseRequest or type(reference) is not PCM16Wave:
             raise ExternalSpeechError("typed external speech request and reference required")

@@ -17,12 +17,14 @@ from test_conditioning import runtime_fixture
 from test_runpod import spec as legacy_spec
 from test_s2v import context, worker
 from test_s2v_profile import png
+from test_speech import wav_bytes
 
 from cineforge import s2v_profile as profile
 from cineforge import worker_bootstrap as bootstrap
 from cineforge.comfy_runtime import ClosedComfyRuntime
+from cineforge.external_speech import ExternalSpeechRender, ExternalSpeechRuntime
 from cineforge.runpod import RunpodPodSpec
-from cineforge.s2v import S2VError, digest, select_s2v
+from cineforge.s2v import S2VError, S2VSelection, digest, select_s2v
 from cineforge.s2v_stage import _pair_json, paired_transfer
 from cineforge.skills import bind_shot
 from cineforge.ssh_worker import SSHWorker, WorkerError
@@ -122,6 +124,42 @@ class PairTransferTests(unittest.TestCase):
         self.assertNotIn("CANARY", "".join(traceback.format_exception(caught.exception)))
         self.assertIsNone(caught.exception.__context__)
         self.assertIsNone(caught.exception.__cause__)
+
+    def require_speech_worker(self, verifier, worker_id):
+        trace = {"speech_native_proof": {"worker_id": worker_id}}
+        gate = SimpleNamespace(service=self.gate.service, shot=self.gate.shot,
+            verify_speech=verifier, preflight=lambda: trace,
+            speech_worker_ids=replace(self.gate, verify_speech=verifier).speech_worker_ids)
+        selected = object.__new__(S2VSelection)
+        object.__setattr__(selected, "gate", gate)
+        with patch.object(S2VSelection, "request") as request:
+            try:
+                self.driver._require_s2v(selected)
+            finally:
+                request.assert_called_once_with(gate.shot)
+
+    def test_worker_guard_accepts_only_configured_external_speech_identity(self):
+        payload = wav_bytes()
+        runtime = ExternalSpeechRuntime(provider="synthetic", voice_id="aria", model_id="tts",
+            worker_id="muse-tts-aria", scope_sha256=self.gate.service.approval.subject_sha256,
+            renders=(ExternalSpeechRender("Synthetic line", payload),), design_render=payload)
+        self.assertNotEqual(runtime.worker_id, self.plan.pod_id)
+        self.require_speech_worker(runtime.verify_speech, runtime.worker_id)
+        self.require_speech_worker(runtime.verify_speech, self.plan.pod_id)
+        with self.assertRaisesRegex(WorkerError,
+                "^current S2V request differs from guarded native worker scope$"):
+            self.require_speech_worker(runtime.verify_speech, "unconfigured-worker")
+
+    def test_worker_guard_keeps_non_external_bound_verifier_pod_identity_strict(self):
+        class Bridge:
+            def verify_speech(self, speech, service):
+                raise AssertionError("stub preflight does not invoke the verifier")
+
+        bridge = Bridge()
+        self.require_speech_worker(bridge.verify_speech, self.plan.pod_id)
+        with self.assertRaisesRegex(WorkerError,
+                "^current S2V request differs from guarded native worker scope$"):
+            self.require_speech_worker(bridge.verify_speech, "other-worker")
 
     def test_explicit_long_pair_bound_allows_five_and_refuses_expansion(self):
         import uuid

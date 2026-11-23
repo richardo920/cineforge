@@ -677,7 +677,9 @@ class SSHWorker:
             worker_bootstrap.validate_s2v_admission(self.runtime_evidence, profile_id=self.selection.worker_profile["id"])
             trace = selection.gate.preflight()
             selection.request(selection.gate.shot)
-            if trace["speech_native_proof"]["worker_id"] != self.plan.pod_id:
+            # PR #228: the gate accepts the pod or its bound external speech source.
+            if (trace["speech_native_proof"]["worker_id"]
+                    not in selection.gate.speech_worker_ids(self.plan.pod_id)):
                 raise ValueError
         except (Exception, KeyboardInterrupt) as interruption_error:
             remember_interruption(interruption_error)

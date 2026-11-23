@@ -7,15 +7,18 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 from test_s2v_profile import png
 from test_speech import EVIDENCE, Runtime, adapter, fixture, reviewed, wav_bytes
 
 from cineforge import s2v_profile as profile
 from cineforge.audio import AudioTimebase, Cue, DialogueScript, ShotTiming, Stem
+from cineforge.audio_pcm import inspect_pcm16_wav
 from cineforge.characters import CharacterRegistry, with_character_review
 from cineforge.comfy_policy import ApprovedComfySelection, ComfyPolicyError, WorkerVerification
 from cineforge.contracts import ProjectPlan
+from cineforge.external_speech import ExternalSpeechRender, ExternalSpeechRuntime
 from cineforge.providers import ExecutionRequest, ProviderError
 from cineforge.rights import EvidenceRef, RightsLedger, RightsRef, Use, with_review
 from cineforge.s2v import (
@@ -188,6 +191,63 @@ class S2VGateTests(unittest.TestCase):
         self.gate.ledger.revoke(self.gate.model_rights, reason="CANARY")
         with self.assertRaises(S2VError):
             bound.require_execution_worker(verification)
+
+    def external_gate(self):
+        speech = self.gate.speech
+        runtime = ExternalSpeechRuntime(provider="synthetic", voice_id="aria", model_id="tts",
+            worker_id="external-worker", scope_sha256=self.gate.service.approval.subject_sha256,
+            renders=(ExternalSpeechRender(speech.request.text, speech.payload),),
+            design_render=speech.payload)
+        payload = runtime.synthesize(speech.request, inspect_pcm16_wav(wav_bytes()))
+        self.assertEqual(payload, speech.payload)
+        gate = replace(self.gate, verify_speech=runtime.verify_speech, authorize=lambda _: None)
+        return gate, runtime
+
+    def staged_gate(self, gate):
+        approved = digest(gate.subject)
+        def authorize(subject):
+            self.assertEqual(digest(subject), approved)
+        staged = StagedS2VPair("owned-worker", gate.service.approval.subject_sha256,
+                              approved, canonical(gate.media).decode())
+        return replace(gate, authorize=authorize, staging=staged)
+
+    def test_submission_accepts_real_external_speech_with_pod_bound_pair(self):
+        gate, runtime = self.external_gate()
+        self.assertEqual(gate.preflight()["speech_native_proof"]["worker_id"], runtime.worker_id)
+        gate = self.staged_gate(gate)
+        request = ExecutionRequest(gate.shot, profile.model())
+        gate.require_submission(request, "owned-worker")
+        with self.assertRaisesRegex(S2VError,
+                "^S2V submission requires this owned worker's exact staged pair$"):
+            replace(gate, staging=replace(gate.staging, worker_id=runtime.worker_id)).require_submission(
+                request, "owned-worker")
+
+    def test_submission_rejects_unrelated_speech_lineage_with_external_bound_gate(self):
+        gate, _ = self.external_gate()
+        trace = gate.preflight()
+        trace["speech_native_proof"]["worker_id"] = "unrelated-worker"
+        # Isolate submission's identity check with otherwise valid, reapproved lineage.
+        with patch.object(VerifiedS2V, "preflight", return_value=trace):
+            gate = self.staged_gate(gate)
+            with self.assertRaisesRegex(S2VError,
+                    "^S2V submission requires this owned worker's exact staged pair$"):
+                gate.require_submission(ExecutionRequest(gate.shot, profile.model()), "owned-worker")
+
+    def test_speech_worker_ids_accepts_only_pod_and_exact_external_runtime(self):
+        self.assertEqual(self.gate.speech_worker_ids("owned-worker"), {"owned-worker"})
+        self.assertEqual(self.gate.speech_worker_ids(None), frozenset())
+        gate, runtime = self.external_gate()
+        self.assertEqual(gate.speech_worker_ids("owned-worker"),
+                         {"owned-worker", runtime.worker_id})
+        self.assertEqual(gate.speech_worker_ids(None), {runtime.worker_id})
+        class DerivedRuntime(ExternalSpeechRuntime):
+            pass
+        derived = DerivedRuntime(provider="synthetic", voice_id="aria", model_id="tts",
+            worker_id=runtime.worker_id, scope_sha256=gate.service.approval.subject_sha256,
+            renders=(ExternalSpeechRender(gate.speech.request.text, gate.speech.payload),),
+            design_render=gate.speech.payload)
+        self.assertEqual(replace(gate, verify_speech=derived.verify_speech).speech_worker_ids(None),
+                         frozenset())
 
     def test_private_reference_replacement_and_unsupported_actor_or_multispeaker_refuse(self):
         for changes in (dict(age="child"), dict(people=True), dict(people=2), dict(pose="profile"),

@@ -401,13 +401,23 @@ class VerifiedS2V:
         if failed:
             raise S2VError("current exact S2V request authorization rejected")
 
+    def speech_worker_ids(self, pod_id: str | None) -> frozenset[str]:
+        """Accept the executing pod and this gate's bound external speech source (PR #228)."""
+        from cineforge.external_speech import ExternalSpeechRuntime
+
+        accepted = {pod_id} if type(pod_id) is str else set()
+        source = getattr(self.verify_speech, "__self__", None)
+        if type(source) is ExternalSpeechRuntime:
+            accepted.add(source.worker_id)
+        return frozenset(accepted)
+
     def require_submission(self, request: ExecutionRequest, worker_id: str | None) -> None:
         self.require(request, self.workflow_digest)
         proof = self.staging
         current_subject = self.subject
         speech_proof = current_subject["lineage"]["speech_native_proof"]
         if (type(proof) is not StagedS2VPair or proof.worker_id != worker_id
-                or speech_proof["worker_id"] != worker_id
+                or speech_proof["worker_id"] not in self.speech_worker_ids(worker_id)
                 or proof.scope_sha256 != self.service.approval.subject_sha256
                 or proof.subject_sha256 != digest(current_subject)
                 or canonical(strict_object(proof.metadata_json)) != canonical(self.media)):
