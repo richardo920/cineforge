@@ -128,7 +128,8 @@ class PairTransferTests(unittest.TestCase):
     def require_speech_worker(self, verifier, worker_id):
         trace = {"speech_native_proof": {"worker_id": worker_id}}
         gate = SimpleNamespace(service=self.gate.service, shot=self.gate.shot,
-            verify_speech=verifier, preflight=lambda: trace)
+            verify_speech=verifier, preflight=lambda: trace,
+            speech_worker_ids=replace(self.gate, verify_speech=verifier).speech_worker_ids)
         selected = object.__new__(S2VSelection)
         object.__setattr__(selected, "gate", gate)
         with patch.object(S2VSelection, "request") as request:
