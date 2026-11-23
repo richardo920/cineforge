@@ -103,6 +103,11 @@ class LongHarness(Harness):
 
 
 class LongDriverTests(unittest.TestCase):
+    def test_external_speech_defaults_to_none(self):
+        with tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
+            h = LongHarness(Path(tmp).resolve(), stack)
+            self.assertIsNone(h.bindings.external_speech)
+
     def test_explicit_probe_binding_verifies_without_ambient_path(self):
         with tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
             h = LongHarness(Path(tmp).resolve(), stack, lines=["Approved English."])

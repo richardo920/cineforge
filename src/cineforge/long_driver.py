@@ -19,6 +19,7 @@ from cineforge.a20_driver import LanguageInputs, acquisition_max_cost_usd, attem
 from cineforge.a20_inputs import A20Error, CreativeInputs, FrozenInputs
 from cineforge.cloud_budget import CloudBudgetSession
 from cineforge.comfy_runtime import CheckedComfyRuntime, ClosedComfyRuntime
+from cineforge.external_speech import ExternalSpeechRuntime
 from cineforge.interruptions import preserve_interruption, remember_interruption
 from cineforge.native_remote import RemoteNativeSpeechRuntime
 from cineforge.native_speech import OriginalVoiceDesign
@@ -91,6 +92,7 @@ class LongSessionBindings:
     s2v_gate: Callable[[LanguageInputs, SpeechArtifact, RemoteNativeSpeechRuntime], VerifiedS2V]
     checkpoint: Callable[[str, dict[str, Any]], None]
     ffprobe: Path | None = None
+    external_speech: ExternalSpeechRuntime | None = None
 
 
 class _DeadlineStopped(A20Error):
@@ -160,8 +162,11 @@ def run_long_session(b: LongSessionBindings, frozen: FrozenInputs, output: Path,
 
     def configuration() -> bytes:
         # Acquisition id is deliberately per attempt; resume still pins all execution data.
-        return canonical({"recipe": b.recipe, "spec": spec.to_dict(),
-            "design": asdict(b.design), "approval": approval.subject_sha256})
+        value = {"recipe": b.recipe, "spec": spec.to_dict(),
+            "design": asdict(b.design), "approval": approval.subject_sha256}
+        if b.external_speech is not None:
+            value["external_speech"] = b.external_speech.configuration()
+        return canonical(value)
 
     config = configuration()
     acquisition_id = b.acquisition_id
@@ -174,6 +179,8 @@ def run_long_session(b: LongSessionBindings, frozen: FrozenInputs, output: Path,
             "Recovery leases use remaining verified work; journal-wide reservations include disk reserve.",
             "acquisition_max_cost_usd is the approved per-acquisition ceiling; admission reserves the requested lease against aggregate_usd."],
         "generation_timing": "elapsed shot execution including technical verification"}
+    if b.external_speech is not None:
+        record["speech_source"] = b.external_speech.configuration()
     stage, index = "preflight", None
     with PrivateRunDirectory(output, resume=True) as store:
         if (output / "run.json").exists():
@@ -295,7 +302,8 @@ def run_long_session(b: LongSessionBindings, frozen: FrozenInputs, output: Path,
                             if _sha(reference) != record["voice_reference_sha256"]:
                                 raise A20Error("LONG_VOICE_REFERENCE_CHANGED")
                         else:
-                            reference = bridge.preview(b.design)
+                            reference = (b.external_speech.preview(b.design)
+                                if b.external_speech is not None else bridge.preview(b.design))
                         with PrivateRunDirectory(output / attempt / "payloads") as payloads:
                             record["voice_reference"] = attempt + "/payloads/" + payloads.put_payload(reference, "wav")
                             record["voice_reference_sha256"] = _sha(reference)
@@ -326,9 +334,10 @@ def run_long_session(b: LongSessionBindings, frozen: FrozenInputs, output: Path,
                                 voices = voice_hash
                                 record["canonical_voices_sha256"] = voices
                                 guard()
-                                if not bridge.speech_health_check():
+                                if b.external_speech is None and not bridge.speech_health_check():
                                     raise A20Error("LONG_SPEECH_HEALTH_CHECK")
-                                speech = QwenBaseSpeechAdapter(context.voices, runtime=bridge).synthesize(
+                                runtime = b.external_speech if b.external_speech is not None else bridge
+                                speech = QwenBaseSpeechAdapter(context.voices, runtime=runtime).synthesize(
                                     context.sheet, context.utterance_id, context.reference, reference,
                                     plan=context.plan, registry=context.registry, ledger=context.ledger,
                                     current_picture=context.picture, current_script=context.sheet.script.pin(),
@@ -336,9 +345,11 @@ def run_long_session(b: LongSessionBindings, frozen: FrozenInputs, output: Path,
                                 stage = "s2v_gate"
                                 guard()
                                 gate = b.s2v_gate(context, speech, bridge)
+                                expected_verifier = (b.external_speech.verify_speech
+                                    if b.external_speech is not None else bridge.verify_speech)
                                 if (gate.speech is not speech or gate.service != b.service
                                         or gate.actor.read() != data["actor_png"]
-                                        or gate.verify_speech != bridge.verify_speech or gate.sheet != context.sheet):
+                                        or gate.verify_speech != expected_verifier or gate.sheet != context.sheet):
                                     raise A20Error("LONG_S2V_BINDING")
                                 selection = select_s2v(gate)
                                 stage = "prepare"
