@@ -61,6 +61,10 @@ MAX_CONTROL_NAMESPACES = 8
 # Approved lifetime ceiling; mirrors cineforge.native_remote.MAX_NATIVE_TIMEOUT_SECONDS.
 # Kept local to avoid an import cycle: native_remote imports SSHWorker.
 MAX_NATIVE_TIMEOUT_SECONDS = 7200
+# The worker enforces the lifetime ceiling minus its 60-second cleanup
+# reserve (worker_bootstrap accepts timeout_seconds <= 7140) and rejects
+# larger requests before doing any work; never send a larger value.
+MAX_WORKER_TIMEOUT_SECONDS = MAX_NATIVE_TIMEOUT_SECONDS - 60
 # Mirrors native_speech_integrity.CHILD_OUTPUT_TAIL_MAX; controller-local diagnostic bound.
 _CHILD_OUTPUT_TAIL_MAX = 512
 
@@ -337,6 +341,7 @@ class SSHWorker:
             if timeout <= 0:
                 raise WorkerError("absolute SSH deadline exhausted")
             request["timeout_seconds"] = timeout
+        request["timeout_seconds"] = min(request["timeout_seconds"], MAX_WORKER_TIMEOUT_SECONDS)
         if is_speech_service(self.selection):
             flags = "/usr/bin/python3.11 -I -B -S -c "
         else:
